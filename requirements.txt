@@ -1,0 +1,14 @@
+# Phone automation
+uiautomator2>=3.0
+
+# Backend / UI API
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+
+# Instagram media fetcher
+yt-dlp>=2024.1.1
+
+# Telegram trigger bot
+python-telegram-bot>=20.0
+python-dotenv>=1.0

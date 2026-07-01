@@ -1,0 +1,122 @@
+<div class="shell">
+  <header>
+    <h1>Instagram Queue</h1>
+    <p class="subtitle">Add new content to <code>posts/</code></p>
+  </header>
+
+  @if (view === 'picker') {
+    <div class="grid">
+      @for (type of types; track type.id) {
+        <button
+          type="button"
+          class="card"
+          [class.disabled]="!type.enabled"
+          [disabled]="!type.enabled"
+          (click)="pick(type)">
+          <span class="icon">{{ type.icon }}</span>
+          <span class="label">{{ type.label }}</span>
+          @if (!type.enabled) {
+            <span class="soon">soon</span>
+          }
+        </button>
+      }
+    </div>
+  }
+
+  @if (view === 'form') {
+    <form class="form" (ngSubmit)="submit()">
+      <button type="button" class="back" (click)="back()">← back</button>
+      <h2>New {{ isReel ? 'Reel' : 'Post' }}</h2>
+
+      <label class="field">
+        <span>Instagram URL</span>
+        <input
+          type="url"
+          [placeholder]="isReel ? 'https://www.instagram.com/reel/...' : 'https://www.instagram.com/p/...'"
+          [(ngModel)]="reelUrl"
+          name="reelUrl" />
+        <small>
+          Paste an Instagram {{ isReel ? 'reel' : 'post' }} URL and we'll fetch the media.
+          Photo posts may need a public account; reels work in most cases.
+          Or drop a local file below.
+        </small>
+      </label>
+
+      <label class="field">
+        <span>{{ isReel ? 'Video (optional if URL is set)' : 'Image (optional if URL is set)' }}</span>
+        <input type="file" [accept]="acceptTypes" (change)="onFile($event)" />
+      </label>
+
+      @if (previewUrl && !isReel) {
+        <img class="preview" [src]="previewUrl" alt="preview" />
+      }
+      @if (previewUrl && isReel) {
+        <video class="preview" [src]="previewUrl" controls></video>
+      }
+
+      <label class="field">
+        <span>Caption</span>
+        <textarea
+          rows="8"
+          placeholder="Write your caption..."
+          [(ngModel)]="caption"
+          name="caption"></textarea>
+      </label>
+
+      <label class="field">
+        <span>Hashtags</span>
+        <input
+          type="text"
+          placeholder="travel, sunset, beachlife"
+          [(ngModel)]="hashtags"
+          name="hashtags" />
+        <small>Comma- or space-separated. The # is optional.</small>
+      </label>
+
+      <div class="actions">
+        <button
+          type="button"
+          class="submit secondary"
+          [disabled]="!canSubmit()"
+          (click)="submit(false)">
+          @if (submitting && submitMode === 'queue') {
+            Queueing...
+          } @else {
+            Queue it
+          }
+        </button>
+        <button
+          type="button"
+          class="submit"
+          [disabled]="!canSubmit()"
+          (click)="submit(true)">
+          @if (submitting && submitMode === 'publish') {
+            Posting to IG...
+          } @else {
+            Queue &amp; post now
+          }
+        </button>
+      </div>
+
+      @if (okStatus === 'queued') {
+        <div class="result ok">
+          Queued as <strong>{{ okId }}</strong>. Run <code>py upload_post.py</code> later,
+          or use "Queue &amp; post now" next time to ship in one click.
+        </div>
+      }
+      @if (okStatus === 'queued_and_posted') {
+        <div class="result ok">
+          Posted to Instagram. <strong>{{ okId }}</strong> archived in <code>posts/posted/</code>.
+        </div>
+      }
+      @if (okStatus === 'queued_but_post_failed') {
+        <div class="result err">
+          Queued as <strong>{{ okId }}</strong> but the IG upload failed: {{ errMsg }}
+        </div>
+      }
+      @if (!okStatus && errMsg) {
+        <div class="result err">{{ errMsg }}</div>
+      }
+    </form>
+  }
+</div>
