@@ -29,7 +29,7 @@ Setup:
     the bot sees plain group messages, not just commands.
 
 Run:
-  py telegram_bot.py
+  py modules/telegram/telegram_bot.py
 """
 
 import asyncio
@@ -40,7 +40,6 @@ import sys
 import traceback
 
 import uiautomator2 as u2
-from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -50,23 +49,26 @@ from telegram.ext import (
     filters,
 )
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-POSTS_DIR = os.path.join(HERE, "posts")
+# Make the repo root importable so the `from shared` / `from modules` imports
+# below resolve when run directly (`py modules/telegram/telegram_bot.py`).
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-# Make sibling modules importable when run as a script.
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
-import reel_downloader  # noqa: E402
-import upload_post as ig  # noqa: E402
+from shared import config  # noqa: E402  (needs the sys.path bootstrap above)
+from shared import reel_downloader  # noqa: E402
+from modules.instagram import upload_post as ig  # noqa: E402
+
+# Single shared queue at the repo root (posts/ + posts/posted/).
+POSTS_DIR = config.POSTS_DIR
 
 
 # --------------------------------------------------------------------------- #
 # Config                                                                      #
 # --------------------------------------------------------------------------- #
 
-load_dotenv(os.path.join(HERE, ".env"))
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-_CHAT_ID_RAW = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+TOKEN = config.TELEGRAM_BOT_TOKEN
+_CHAT_ID_RAW = config.TELEGRAM_CHAT_ID
 if not TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN is missing — set it in .env.")
 if not _CHAT_ID_RAW:
@@ -79,10 +81,9 @@ except ValueError as exc:
     ) from exc
 
 # Account list — drives the inline keyboard and the per-URL upload loop.
-# Order in .env is preserved; that's the order rows render in the
-# keyboard and the order uploads happen in.
-_ACCOUNTS_RAW = os.environ.get("IG_ACCOUNTS", "").strip()
-ACCOUNTS = [a.strip().lstrip("@") for a in _ACCOUNTS_RAW.split(",") if a.strip()]
+# Order in .env is preserved (see shared/config.py); that's the order rows
+# render in the keyboard and the order uploads happen in.
+ACCOUNTS = list(config.IG_ACCOUNTS)
 if not ACCOUNTS:
     raise SystemExit(
         "IG_ACCOUNTS is empty — set it in .env to a comma-separated list of "

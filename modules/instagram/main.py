@@ -1,18 +1,22 @@
-# scroll_reels.py
+# main.py — Instagram reels scroller
 import os
 import random
 import sys
 import time
 
 import uiautomator2 as u2
-from dotenv import load_dotenv
 
-from human_swipe import generate_human_swipe
+# Make the repo root importable so the `from shared` / `from modules` imports
+# below resolve when run directly (`py modules/instagram/main.py`).
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+from shared import config  # noqa: E402  (needs the sys.path bootstrap above)
+from modules.instagram.human_swipe import generate_human_swipe  # noqa: E402
 
 # WiFi-debugging address (IP:port) preferred; USB serial as fallback.
-DEVICE_ID = os.environ.get("PHONE_ADDRESS", "R5CX235CF9A")
+DEVICE_ID = config.DEVICE_ID
 DURATION_MINUTES = 10
 
 # Distraction (reel loops while phone is idle)

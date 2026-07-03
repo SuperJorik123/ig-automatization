@@ -34,13 +34,13 @@ ALLOWED_EXT_BY_TYPE = {
 # media file regardless of which type queued it.
 ALLOWED_EXT = {ext for exts in ALLOWED_EXT_BY_TYPE.values() for ext in exts}
 
-# Make upload_post.py / reel_downloader.py importable so /api/posts can
-# fetch + publish inline. Otherwise we'd have to fork a subprocess and
+# Make the modules/ + shared/ packages importable so /api/posts can fetch +
+# publish inline (HERE is the repo root). Otherwise we'd fork a subprocess and
 # stream stdout.
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
-import upload_post as ig
-import reel_downloader
+from modules.instagram import upload_post as ig
+from shared import reel_downloader
 
 app = FastAPI(title="ig-automatization UI backend")
 

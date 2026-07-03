@@ -1,21 +1,44 @@
 # IG Automatization — project guide
 
-PC-side queue manager + Android driver for posting photos and scrolling reels on Instagram. Posts live in `posts/` as `NNN.jpg` + `NNN.json` (caption + hashtags); the Angular UI in `ui/` queues new ones; `upload_post.py` drives IG over ADB via uiautomator2.
+PC-side queue manager + Android driver for posting photos and scrolling reels on Instagram. Posts live in `posts/` as `NNN.jpg` + `NNN.json` (caption + hashtags); the Angular UI in `ui/` queues new ones; `modules/instagram/upload_post.py` drives IG over ADB via uiautomator2. Code is organised per platform under `modules/` (`instagram`, `telegram`, `twitter`, `facebook`), with cross-cutting pieces in `shared/` and the web layer (`server.py`, `ui/`) + media queue (`posts/`) at the repo root.
+
+## Layout
+
+Per-platform modules under `modules/`, cross-cutting code under `shared/`, the web layer (`server.py`, `ui/`) and the media queue (`posts/`) at the repo root:
+
+```
+modules/
+  instagram/   upload_post.py, main.py, dump_ui.py, human_swipe.py, analyze_swipes.py, visualize_swipes.py
+  telegram/    telegram_bot.py
+  twitter/     poster.py (stub) — download-from-X already lives in shared/reel_downloader.py
+  facebook/    poster.py (stub) — nothing implemented yet
+shared/
+  config.py            .env loading + PHONE_ADDRESS / POSTS_DIR / credentials
+  reel_downloader.py   yt-dlp downloader (Instagram + Twitter/X URLs)
+server.py    FastAPI backend (root)
+ui/          Angular frontend (root)
+posts/       shared media queue (root); posts/posted/ holds archives
+```
+
+Every entrypoint puts the repo root on `sys.path` (the scripts via a 3×-`dirname` bootstrap at the top of the file; `server.py` via its existing `sys.path.insert`) so `from shared import …` / `from modules.instagram import …` resolve whether the file is run directly (`py modules/instagram/upload_post.py`) or imported.
 
 ## Files
 
 | File | Purpose |
 | ---- | ------- |
-| `server.py` | FastAPI backend on `:8000`. Receives uploads from the UI, writes them into `posts/`, optionally fires `upload_post.py`. Also accepts a `url` form field — when an Instagram URL is pasted, calls `reel_downloader.download_media(url, stub, kind=post_type)` first instead of expecting a multipart file. The stub picks `.mp4` for reels / `.jpg` for posts; yt-dlp overrides the extension with the real one. CORS open to `http://localhost:4200`. |
-| `reel_downloader.py` | Fetches Instagram media by URL via `yt-dlp` (no token / login / Selenium required — pulls the file directly from `fbcdn.net`). Exposes `is_instagram_url(s)` and `download_media(url, dest_path, kind="reel"\|"post")`; `download_reel` is kept as a backwards-compat alias. **Limitation**: IG gates many photo posts behind a login — yt-dlp surfaces this as `Instagram sent an empty media response`. Reels are reliable, photo posts are best-effort. |
-| `upload_post.py` | Main poster. Pushes media to phone, drives IG's UI through the new flow (see below), archives to `posts/posted/`. |
-| `main.py` | Reels scrolling loop. Uses `human_swipe.py` for realistic swipes. **Do not touch when working on the post flow.** |
-| `human_swipe.py` | Empirical swipe model fit to a real trace; powers `main.py`. |
-| `dump_ui.py` | Connects to the test phone and dumps the current IG screen to `ui_dump.xml`. Use whenever a selector breaks. |
-| `analyze_swipes.py` / `visualize_swipes.py` | Offline analysis for the swipe model — not used at runtime. |
-| `swipe_stats.json` / `swipes.txt` | Calibration data feeding `human_swipe.py`. |
+| `server.py` | FastAPI backend on `:8000` (repo root). Receives uploads from the UI, writes them into `posts/`, optionally fires `modules.instagram.upload_post`. Also accepts a `url` form field — when an Instagram URL is pasted, calls `reel_downloader.download_media(url, stub, kind=post_type)` first instead of expecting a multipart file. The stub picks `.mp4` for reels / `.jpg` for posts; yt-dlp overrides the extension with the real one. CORS open to `http://localhost:4200`. |
+| `shared/config.py` | Loads the repo-root `.env` and exposes `DEVICE_ID` (from `PHONE_ADDRESS`, USB-serial fallback), `POSTS_DIR`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `IG_ACCOUNTS`. Every entrypoint imports it so `.env` and `posts/` resolve to the root no matter which subfolder the file lives in. |
+| `shared/reel_downloader.py` | Fetches Instagram/Twitter media by URL via `yt-dlp` (no token / login / Selenium required — pulls the file directly from `fbcdn.net`). Exposes `is_instagram_url(s)`, `is_twitter_url(s)`, `download_media(url, dest_path, kind="reel"\|"post")`; `download_reel` is kept as a backwards-compat alias. **Limitation**: IG gates many photo posts behind a login — yt-dlp surfaces this as `Instagram sent an empty media response`. Reels are reliable, photo posts are best-effort. |
+| `modules/instagram/upload_post.py` | Main poster. Pushes media to phone, drives IG's UI through the new flow (see below), archives to `posts/posted/`. Re-exports `DEVICE_ID` from `shared.config` so callers keep using `ig.DEVICE_ID`. |
+| `modules/instagram/main.py` | Reels scrolling loop. Uses `human_swipe.py` for realistic swipes. **Do not touch when working on the post flow.** |
+| `modules/instagram/human_swipe.py` | Empirical swipe model fit to a real trace; powers `main.py`. |
+| `modules/instagram/dump_ui.py` | Connects to the test phone and dumps the current IG screen to `ui_dump.xml`. Use whenever a selector breaks. |
+| `modules/instagram/analyze_swipes.py` / `visualize_swipes.py` | Offline analysis for the swipe model — not used at runtime. |
+| `modules/telegram/telegram_bot.py` | Telegram bot: scans a configured group for IG/Twitter URLs, downloads via `shared/reel_downloader.py`, queues into `posts/`, and posts to IG via `modules.instagram.upload_post` for each selected account (`IG_ACCOUNTS`). |
+| `modules/twitter/poster.py`, `modules/facebook/poster.py` | Posting **stubs** mirroring the IG `upload_post(...)` signature; raise `NotImplementedError`. Twitter/X *downloading* already works via `shared/reel_downloader.py`. |
+| `swipe_stats.json` / `swipes.txt` | Calibration data feeding `human_swipe.py` (generated by `analyze_swipes.py`; live alongside it in `modules/instagram/`). |
 | `ui/` | Angular frontend (`ng serve` on `:4200`, proxies `/api/*` → `:8000`). |
-| `posts/` | Queue. `posts/posted/` holds archives (move-on-success). |
+| `posts/` | Shared queue at the repo root. `posts/posted/` holds archives (move-on-success). |
 
 ## Running the system
 
@@ -32,22 +55,26 @@ UI (another terminal):
     cd ui
     npm start
 
+Telegram bot (optional, another terminal — needs `.env` credentials):
+
+    py modules/telegram/telegram_bot.py
+
 Post manually (skip the UI, uses the next queued image):
 
-    py upload_post.py
+    py modules/instagram/upload_post.py
 
 Dump the current IG screen for selector hunting:
 
-    py dump_ui.py
+    py modules/instagram/dump_ui.py
     # → writes ui_dump.xml; grep it for 'Create', 'Photo', etc.
 
 ## Test device
 
-Galaxy S23, ADB ID `R5CX235CF9A`. Hardcoded in `upload_post.py`, `main.py`, `dump_ui.py`. The swipe model in `human_swipe.py` is calibrated for 1080×2340 — other geometries need a recalibration.
+Galaxy S23, ADB ID `R5CX235CF9A`. Resolved once in `shared/config.py` (`DEVICE_ID` from `PHONE_ADDRESS` in `.env`, falling back to the USB serial `R5CX235CF9A`) and re-exported by `modules/instagram/upload_post.py` as `ig.DEVICE_ID`. The swipe model in `human_swipe.py` is calibrated for 1080×2340 — other geometries need a recalibration.
 
 ## Current IG creation flow
 
-`upload_post.upload_post(d, image_path, caption_body, hashtags, kind=...)` drives the new creation UI end to end. `kind` is `"post"` (photo, default) or `"reel"` (video); the only divergence is which row gets tapped in step 4 — the rest of the flow is assumed identical and we fix selectors as IG diverges.
+`modules.instagram.upload_post.upload_post(d, image_path, caption_body, hashtags, kind=...)` drives the new creation UI end to end. `kind` is `"post"` (photo, default) or `"reel"` (video); the only divergence is which row gets tapped in step 4 — the rest of the flow is assumed identical and we fix selectors as IG diverges.
 
 1. Open IG (`app_start`).
 2. Tap **Profile** (bottom-right tab) — `tap_profile_tab`.
@@ -69,7 +96,7 @@ On modern Samsung / OneUI, `d.set_clipboard(text)` raises `java.lang.SecurityExc
 
 ### Side notes / TODOs
 
-- **Audio for posts/reels.** The new IG flow may surface an audio/music picker on some post types (reels, possibly some post variants). When we add **reel** or **carousel** support, remember to handle — or explicitly skip — the audio step on the way through. The current photo-post flow does not seem to include it, but verify with `dump_ui.py` after step 5 if a music screen appears.
+- **Audio for posts/reels.** The new IG flow may surface an audio/music picker on some post types (reels, possibly some post variants). When we add **reel** or **carousel** support, remember to handle — or explicitly skip — the audio step on the way through. The current photo-post flow does not seem to include it, but verify with `modules/instagram/dump_ui.py` after step 5 if a music screen appears.
 - **Carousel.** Will also start by tapping **Post** in the creation sheet, then multi-select on the gallery screen. Not implemented yet.
 - **Selector hunting.** Content-description (`description=`, `descriptionContains=`) and visible text (`text=`) are far more stable across IG versions than resource IDs. When a selector breaks, start there before reaching for `resourceId=`.
 - **Python launcher.** Use `py`, never `python` — multi-install PATH gotcha on this machine.

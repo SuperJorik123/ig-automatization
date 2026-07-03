@@ -1,10 +1,17 @@
 import os
+import sys
 
 import uiautomator2 as u2
-from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
-DEVICE_ID = os.environ.get("PHONE_ADDRESS", "R5CX235CF9A")
+# Make the repo root importable so `from shared import config` resolves when
+# run directly (`py modules/instagram/dump_ui.py`).
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from shared import config  # noqa: E402  (needs the sys.path bootstrap above)
+
+DEVICE_ID = config.DEVICE_ID
 
 d = u2.connect(DEVICE_ID)
 d.app_start("com.instagram.android", stop=False)

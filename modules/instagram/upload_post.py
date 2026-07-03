@@ -28,7 +28,7 @@ How the caption reaches IG:
 
 Most resource-id / text selectors below are best guesses — IG renames
 things across versions. When a step fails, dump the UI of the current
-screen with `py dump_ui.py` and update the selector.
+screen with `py modules/instagram/dump_ui.py` and update the selector.
 """
 
 import json
@@ -36,19 +36,24 @@ import os
 import random
 import re
 import shutil
+import sys
 import time
 
 import uiautomator2 as u2
-from dotenv import load_dotenv
 
-# Load .env so PHONE_ADDRESS resolves whether this script is run directly
-# (`py upload_post.py`), imported by server.py, or imported by the bot.
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+# Make the repo root importable so `from shared import config` resolves when
+# this file is run directly (`py modules/instagram/upload_post.py`): in that
+# case sys.path[0] is this file's dir, not the repo root.
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-# WiFi-debugging address (IP:port) is preferred; USB serial is the
-# fallback so re-tethering still works if .env is wiped or PHONE_ADDRESS
-# is unset. Update PHONE_ADDRESS in .env when the WiFi IP/port drifts.
-DEVICE_ID = os.environ.get("PHONE_ADDRESS", "R5CX235CF9A")
+from shared import config  # noqa: E402  (needs the sys.path bootstrap above)
+
+# config loads the repo-root .env and resolves PHONE_ADDRESS (WiFi IP:port
+# preferred, USB serial fallback). Re-exported here so `ig.DEVICE_ID` keeps
+# working for server.py and the Telegram bot.
+DEVICE_ID = config.DEVICE_ID
 PKG = "com.instagram.android"
 
 
@@ -584,7 +589,7 @@ def upload_post(d, image_path, caption_body, hashtags, kind="post", target_accou
     print("  → tap Home tab")
     if not tap_home_tab(d):
         raise RuntimeError(
-            "Couldn't find the Home tab. Run `py dump_ui.py` and grep ui_dump.xml "
+            "Couldn't find the Home tab. Run `py modules/instagram/dump_ui.py` and grep ui_dump.xml "
             "for 'feed_tab' / 'Home' to find the new selector."
         )
     pause(0.5, 1.0)
@@ -592,7 +597,7 @@ def upload_post(d, image_path, caption_body, hashtags, kind="post", target_accou
     print("  → tap + (create) at top-left of Home")
     if not tap_create_button(d):
         raise RuntimeError(
-            "Couldn't find the + create button. Run `py dump_ui.py` and grep "
+            "Couldn't find the + create button. Run `py modules/instagram/dump_ui.py` and grep "
             "ui_dump.xml for 'action_bar_buttons_container_left' or 'Create' "
             "to find the new selector."
         )
@@ -602,7 +607,7 @@ def upload_post(d, image_path, caption_body, hashtags, kind="post", target_accou
     if not tap_post_type(d, kind):
         raise RuntimeError(
             f"Couldn't find {kind.capitalize()!r} in the creation sheet. Run "
-            "`py dump_ui.py` and check ui_dump.xml for the row label."
+            "`py modules/instagram/dump_ui.py` and check ui_dump.xml for the row label."
         )
     pause()
 
@@ -616,7 +621,7 @@ def upload_post(d, image_path, caption_body, hashtags, kind="post", target_accou
     print("  → tap latest thumbnail in gallery")
     if not tap_latest_gallery_item(d):
         raise RuntimeError(
-            "Couldn't tap the latest thumbnail. Run `py dump_ui.py` and check "
+            "Couldn't tap the latest thumbnail. Run `py modules/instagram/dump_ui.py` and check "
             "ui_dump.xml for the gallery grid item selector."
         )
     pause(0.6, 1.2)
@@ -753,7 +758,7 @@ def archive_post(posts_dir, image_path):
 
 
 def main():
-    posts_dir = os.path.join(os.path.dirname(__file__), "posts")
+    posts_dir = config.POSTS_DIR
     os.makedirs(posts_dir, exist_ok=True)
 
     image_path, caption_body, hashtags = find_next_post(posts_dir)
