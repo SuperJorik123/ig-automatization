@@ -9,6 +9,12 @@ python-multipart>=0.0.9
 # Instagram media fetcher
 yt-dlp>=2024.1.1
 
-# Telegram trigger bot
-python-telegram-bot>=20.0
+# Telegram bots (IG trigger bot + news aggregator). [job-queue] enables the
+# daily-drip scheduler used by modules/telegram/news_bot.py.
+python-telegram-bot[job-queue]>=20.0
 python-dotenv>=1.0
+
+# Telegram news aggregator (modules/telegram)
+telethon>=1.36        # MTProto user client — reads source channels
+anthropic>=0.40       # Claude translation
+tzdata                # IANA timezone db (Windows lacks it; needed for DAILY_TIME)
