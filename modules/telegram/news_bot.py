@@ -1,27 +1,21 @@
 """
-modules/telegram/news_bot.py — the publisher bot.
+modules/telegram/news_bot.py — group-triggered news broadcaster.
 
-Two jobs:
-  1. Manual posts: you DM the bot (text and/or a photo/video); it broadcasts to
-     ALL destination channels immediately, translating the caption per channel.
-     Only TG_OPERATOR_ID may do this.
-  2. Daily drip: once a day (DAILY_TIME / TIMEZONE) it pops the oldest
-     auto-collected post from the queue and broadcasts it the same way.
+Post a photo/video/album with a caption (or a plain text message) into the
+control group (TELEGRAM_CHAT_ID). The bot replies with a channel picker
+listing every TG_DESTINATIONS channel; toggle the ones you want (All / None
+shortcuts included) and hit "Post to selected" — the caption is translated
+into each channel's language and the post fans out.
 
-The collector (collector.py) is the other half — it fills the queue from source
-channels. Add this bot as an ADMIN in every destination channel.
+No scheduling, no queue: what you post in the group is all that goes out.
 
 Run:  py modules/telegram/news_bot.py
-Commands (operator only):  /queue  → how many posts are waiting
 """
 
 import asyncio
-import datetime
-import json
 import logging
 import os
 import sys
-import zoneinfo
 
 # Make the repo root importable so `from shared` / `from modules` resolve when
 # run directly (`py modules/telegram/news_bot.py`).
@@ -29,140 +23,200 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from telegram import Update  # noqa: E402
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
 from telegram.ext import (  # noqa: E402
     Application,
-    CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
 from shared import config  # noqa: E402
-from modules.telegram import publisher, queue_store  # noqa: E402
+from modules.telegram import publisher  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("news_bot")
 
-
-def _is_operator(update: Update) -> bool:
-    user = update.effective_user
-    return bool(
-        config.TG_OPERATOR_ID
-        and user
-        and str(user.id) == str(config.TG_OPERATOR_ID)
-    )
-
-
-# Safety cap on a single unlimited-mode flush tick, so a large backlog doesn't
-# hammer Telegram's rate limits in one burst (the rest goes out next tick).
-_FLUSH_BURST_CAP = 20
-
-
-async def _publish_next(bot) -> bool:
-    """Publish the oldest pending post. Returns False when the queue is empty."""
-    item = queue_store.next_pending()
-    if not item:
-        return False
-    media = json.loads(item["media"] or "[]")
-    ok, errors = await publisher.publish(bot, item["text"], media)
-    if ok == 0 and errors:
-        queue_store.mark_failed(item["id"])
-        log.error("post %s failed on every destination", item["id"])
-    else:
-        queue_store.mark_posted(item["id"])
-        log.info("post %s → %d channel(s), %d error(s)", item["id"], ok, len(errors))
-    return True
+if not config.TELEGRAM_BOT_TOKEN:
+    raise SystemExit("TELEGRAM_BOT_TOKEN missing in .env")
+if not config.TELEGRAM_CHAT_ID:
+    raise SystemExit("TELEGRAM_CHAT_ID missing in .env — the control group's numeric id")
+try:
+    CHAT_ID = int(config.TELEGRAM_CHAT_ID)
+except ValueError as exc:
+    raise SystemExit(
+        f"TELEGRAM_CHAT_ID must be an integer, got {config.TELEGRAM_CHAT_ID!r}"
+    ) from exc
+if not config.TG_DESTINATIONS:
+    raise SystemExit("TG_DESTINATIONS empty in .env — list your news channels as chat_id:lang")
 
 
-async def daily_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Throttled mode: post up to POSTS_PER_DAY oldest posts, then wait for tomorrow."""
-    limit = config.POSTS_PER_DAY or 1
-    posted = 0
-    while posted < limit and await _publish_next(context.bot):
-        posted += 1
-        if posted < limit:
-            await asyncio.sleep(1)  # gentle on Telegram rate limits
-    log.info("daily run: posted %d/%d; %d still queued", posted, limit, queue_store.pending_count())
+# --------------------------------------------------------------------------- #
+# Pending prompts + album buffering                                           #
+# --------------------------------------------------------------------------- #
+
+# Maps the message_id of a picker prompt the bot sent → the post waiting on it:
+# {"text": str, "media": [{"file_id","type"}...], "selected": set[int]}.
+# In-memory only; a bot restart expires open pickers (tapping one then says so).
+_pending = {}
+
+# Telegram delivers an album as separate messages sharing a media_group_id.
+# Buffer the parts and flush after a short quiet period so one album produces
+# one picker instead of N.
+_albums = {}
+_ALBUM_SETTLE_S = 1.5
 
 
-async def flush_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Unlimited mode (POSTS_PER_DAY=false): drain the queue on every tick."""
-    posted = 0
-    while posted < _FLUSH_BURST_CAP and await _publish_next(context.bot):
-        posted += 1
-        await asyncio.sleep(1)
-    if posted:
-        log.info("flush: posted %d; %d still queued", posted, queue_store.pending_count())
-
-
-async def on_dm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manual post: broadcast the operator's DM to all destinations now."""
-    msg = update.effective_message
-    if not config.TG_OPERATOR_ID:
-        await msg.reply_text(
-            "Manual posting is disabled. Set TG_OPERATOR_ID in .env to your numeric "
-            "Telegram user id (get it from @userinfobot) and restart the bot."
-        )
-        return
-    if not _is_operator(update):
-        return  # ignore everyone else silently
-
-    text = msg.caption or msg.text or ""
-    media = []
+def _extract_media(msg):
+    """file_id + kind for a photo/video message, else None (text-only)."""
     if msg.photo:
-        media.append({"file_id": msg.photo[-1].file_id, "type": "photo"})
-    elif msg.video:
-        media.append({"file_id": msg.video.file_id, "type": "video"})
-    if not text and not media:
+        return {"file_id": msg.photo[-1].file_id, "type": "photo"}
+    if msg.video:
+        return {"file_id": msg.video.file_id, "type": "video"}
+    return None
+
+
+def _keyboard(selected: set) -> InlineKeyboardMarkup:
+    """Channel picker: one row per destination, indexed into TG_DESTINATIONS
+    (indices keep callback_data tiny — Telegram caps it at 64 bytes)."""
+    rows = []
+    for i, dest in enumerate(config.TG_DESTINATIONS):
+        mark = "☑" if i in selected else "☐"
+        label = f"{mark} {dest['chat_id']}"
+        if dest["lang"]:
+            label += f" · {dest['lang']}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"t:{i}")])
+    rows.append([
+        InlineKeyboardButton("All", callback_data="all"),
+        InlineKeyboardButton("None", callback_data="none"),
+    ])
+    rows.append([InlineKeyboardButton("▶ Post to selected", callback_data="submit")])
+    rows.append([InlineKeyboardButton("✕ Cancel", callback_data="cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _prompt(msg, text: str, media: list) -> None:
+    """Reply to the news message with the channel picker."""
+    n_media = len(media)
+    what = f"{n_media} media" if n_media else "text post"
+    prompt = await msg.reply_text(
+        f"Post this ({what}) to which channels?",
+        reply_markup=_keyboard(set()),
+    )
+    _pending[prompt.message_id] = {"text": text, "media": media, "selected": set()}
+
+
+async def _flush_album(gid) -> None:
+    """Fires after the album has been quiet for _ALBUM_SETTLE_S."""
+    try:
+        await asyncio.sleep(_ALBUM_SETTLE_S)
+    except asyncio.CancelledError:
+        return  # another part arrived; its timer took over
+    entry = _albums.pop(gid, None)
+    if entry:
+        await _prompt(entry["msg"], entry["text"], entry["media"])
+
+
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A message in the control group = a news candidate. Show the picker."""
+    msg = update.effective_message
+    if msg is None:
+        return
+    text = msg.caption or msg.text or ""
+    media_item = _extract_media(msg)
+    if not text.strip() and media_item is None:
+        return  # stickers, joins, etc.
+
+    gid = msg.media_group_id
+    if gid is None:
+        await _prompt(msg, text, [media_item] if media_item else [])
         return
 
-    ok, errors = await publisher.publish(context.bot, text, media)
-    reply = f"Sent to {ok} channel(s)"
-    if errors:
-        reply += f", {len(errors)} failed: " + "; ".join(f"{c}: {e}" for c, e in errors[:3])
-    await msg.reply_text(reply)
+    # Album part: merge into the buffer and restart the settle timer.
+    entry = _albums.get(gid)
+    if entry is None:
+        _albums[gid] = entry = {"msg": msg, "text": text, "media": []}
+    else:
+        entry["task"].cancel()
+        if text and not entry["text"]:
+            entry["text"] = text  # caption can ride on any part
+    if media_item:
+        entry["media"].append(media_item)
+    entry["task"] = asyncio.create_task(_flush_album(gid))
 
 
-async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_operator(update):
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle taps on the channel picker."""
+    q = update.callback_query
+    if q.message is None or q.message.chat.id != CHAT_ID:
+        await q.answer()
         return
-    await update.effective_message.reply_text(f"{queue_store.pending_count()} post(s) queued")
+
+    state = _pending.get(q.message.message_id)
+    if state is None:
+        await q.answer()
+        await q.edit_message_text("(prompt expired — post the news again)")
+        return
+
+    data = q.data
+
+    if data == "submit" and not state["selected"]:
+        await q.answer("Pick at least one channel.", show_alert=True)
+        return
+
+    await q.answer()
+
+    if data.startswith("t:"):
+        i = int(data.split(":", 1)[1])
+        state["selected"] ^= {i}  # toggle
+        await q.edit_message_reply_markup(_keyboard(state["selected"]))
+        return
+
+    if data == "all":
+        state["selected"] = set(range(len(config.TG_DESTINATIONS)))
+        await q.edit_message_reply_markup(_keyboard(state["selected"]))
+        return
+
+    if data == "none":
+        state["selected"] = set()
+        await q.edit_message_reply_markup(_keyboard(state["selected"]))
+        return
+
+    if data == "cancel":
+        _pending.pop(q.message.message_id, None)
+        await q.edit_message_text("✕ cancelled")
+        return
+
+    if data == "submit":
+        dests = [config.TG_DESTINATIONS[i] for i in sorted(state["selected"])]
+        _pending.pop(q.message.message_id, None)
+        await q.edit_message_text(
+            "⏳ posting to " + ", ".join(d["chat_id"] for d in dests) + " …"
+        )
+        posted, errors = await publisher.publish(
+            context.bot, state["text"], state["media"], dests
+        )
+        lines = []
+        if posted:
+            lines.append("✅ posted to " + ", ".join(posted))
+        for chat_id, err in errors:
+            lines.append(f"❌ {chat_id}: {err}")
+        await q.edit_message_text("\n".join(lines))
 
 
 def main() -> None:
-    if not config.TELEGRAM_BOT_TOKEN:
-        raise SystemExit("TELEGRAM_BOT_TOKEN missing in .env")
-    if not config.TG_DESTINATIONS:
-        raise SystemExit("TG_DESTINATIONS empty in .env — list your news channels as chat_id:lang")
-    queue_store.init()
-
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-    if app.job_queue is None:
-        raise SystemExit("JobQueue unavailable — install python-telegram-bot[job-queue]")
-
-    app.add_handler(CommandHandler("queue", cmd_queue))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, on_dm))
-
-    if config.POSTS_PER_DAY is None:
-        # Unlimited: poll the queue and post everything as it's collected.
-        app.job_queue.run_repeating(flush_job, interval=60, first=5)
-        log.info(
-            "news bot up: %d destination(s), mode=POST EVERYTHING (queue flushed ~every 60s)",
-            len(config.TG_DESTINATIONS),
-        )
-    else:
-        hh, mm = (int(x) for x in config.DAILY_TIME.split(":"))
-        tz = zoneinfo.ZoneInfo(config.TIMEZONE)
-        app.job_queue.run_daily(daily_job, time=datetime.time(hh, mm, tzinfo=tz))
-        log.info(
-            "news bot up: %d destination(s), mode=%d/day at %s %s",
-            len(config.TG_DESTINATIONS),
-            config.POSTS_PER_DAY,
-            config.DAILY_TIME,
-            config.TIMEZONE,
-        )
-    app.run_polling()
+    # Chat filter limits the bot to the control group; ~COMMAND skips /commands.
+    app.add_handler(MessageHandler(filters.Chat(CHAT_ID) & ~filters.COMMAND, on_message))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    log.info(
+        "news bot up: listening in chat %s, %d destination channel(s): %s",
+        CHAT_ID,
+        len(config.TG_DESTINATIONS),
+        ", ".join(f"{d['chat_id']}({d['lang'] or 'raw'})" for d in config.TG_DESTINATIONS),
+    )
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

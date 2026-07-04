@@ -4,40 +4,34 @@ Two independent tools live here:
 
 | File | What it is |
 | ---- | ---------- |
-| `telegram_bot.py` | The original **IG trigger bot** — paste an IG/Twitter URL in a group, it downloads + reposts to Instagram. Unrelated to the news aggregator below. |
-| **News aggregator** (`collector.py` + `news_bot.py`) | Collects posts from other Telegram channels and republishes them to your own news channels — a configurable **N posts/day (or everything)**, plus **manual posts on demand**, translated per channel language. |
+| `telegram_bot.py` | The original **IG trigger bot** — paste an IG/Twitter URL in a group, it downloads + reposts to Instagram. Unrelated to the news broadcaster below. |
+| **News broadcaster** (`news_bot.py`) | Post news into your control group → pick which of your channels get it → it posts, translated per channel language. |
+
+Plus the future smart-filter input: `collector.py` + `queue_store.py` watch source
+channels and queue their posts (nothing consumes the queue yet — the smart
+filter will).
 
 ---
 
-## News aggregator
+## News broadcaster
 
 ### How it works
 
-Telegram splits the job across two identities, because a **bot can't read other
-channels' history** — only a **user account** (MTProto/Telethon) can.
-
 ```
-AUTO (N/day — configurable via POSTS_PER_DAY, or "everything"):
-  @source1 ┐
-  @source2 ┼─▶ collector.py ───▶ SQLite queue ───▶ news_bot daily job ─┬─▶ @news_en
-  @sourceN ┘  (Telethon USER)   (data/news.db)     (translate + fan-out) ├─▶ @news_ru
-              downloads media                                            └─▶ @news_..
-
-MANUAL (on demand):
-  you ──DM──▶ news_bot.py (BOT) ──▶ translate per language ──▶ all @news_* immediately
+you post text / photo / video / album into the control group (TELEGRAM_CHAT_ID)
+  → bot replies with a channel picker (☐ per channel, All / None)
+  → you tap "▶ Post to selected"
+  → caption translated per channel language (OpenRouter, cached per language)
+  → posted to every selected channel; per-channel ✅/❌ status edited into the prompt
 ```
 
-- **`collector.py`** — logs in as *you* (Telethon), watches `TG_SOURCES`, dedups,
-  downloads media, and writes each post to the queue. Long-running.
-- **`news_bot.py`** — the bot. Handles your DMs (manual broadcast) and runs the
-  daily job that pops the oldest queued post. Long-running.
-- **`translator.py`** — translates each caption into a destination's language via
-  Claude. Failure falls back to posting the original text (never blocks).
-- **`queue_store.py`** — the SQLite queue + per-source cursor.
-- **`publisher.py`** — translate-per-language + fan-out, shared by both paths.
+- **`news_bot.py`** — the bot. Watches the control group, shows the picker, publishes. Long-running.
+- **`publisher.py`** — translate-per-language + fan-out to the chosen destinations.
+- **`translator.py`** — OpenRouter translation. Failure falls back to posting the original text (never blocks).
 
-Collected posts are reposted **as your own** (media downloaded + re-uploaded, no
-"Forwarded from"). Manual posts reuse Telegram's `file_id`, so no download.
+Albums (multiple photos/videos sent together) are buffered for ~1.5 s and
+handled as one post with one picker. Media is re-sent by Telegram `file_id`,
+so nothing is downloaded.
 
 ### One-time setup
 
@@ -45,47 +39,54 @@ Collected posts are reposted **as your own** (media downloaded + re-uploaded, no
 
        py -m pip install -r requirements.txt
 
-2. **MTProto credentials** — go to https://my.telegram.org → *API development
-   tools* → create an app → copy `api_id` + `api_hash` into `.env`
-   (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`).
+2. **Create the bot** via `@BotFather` → `/newbot`, then `/setprivacy` →
+   **Disable** so it sees plain group messages. Put the token in `.env`
+   (`TELEGRAM_BOT_TOKEN`).
 
-3. **Fill in `.env`** (see `.env.example` for the full list):
-   `TG_OPERATOR_ID`, `TG_SOURCES`, `TG_DESTINATIONS`, `SOURCE_LANG`, `POSTS_PER_DAY`,
-   `DAILY_TIME`, `TIMEZONE`, `ANTHROPIC_API_KEY`. Reuses the existing `TELEGRAM_BOT_TOKEN`.
+3. **Control group**: add the bot to the group where you'll drop news; put the
+   group's numeric id in `.env` (`TELEGRAM_CHAT_ID` — get it from
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` after posting a message).
 
-4. **Add the bot as an admin** in every destination channel (with "Post
-   messages" permission). Make sure your user account is a **member** of every
-   private source channel.
+4. **Destination channels**: add the bot as **admin** (Post messages) in every
+   channel, then list them in `.env` as `chat_id:lang` pairs:
 
-5. **First login for the collector** (interactive — enter the code Telegram
-   sends you). Run it yourself in a terminal:
+       TG_DESTINATIONS=@news_us1:en,@news_us2:en,@news_us3:en,@news_eu:en,@news_ru:ru
 
-       py modules/telegram/collector.py
-
-   This creates `modules/telegram/data/collector.session`; later runs are
-   non-interactive.
+5. **Translation**: set `OPENROUTER_API_KEY` (openrouter.ai). Channels whose
+   `lang` equals `SOURCE_LANG` are posted untranslated.
 
 ### Running
 
-Two terminals (both long-running):
+    py modules/telegram/news_bot.py
 
-    py modules/telegram/collector.py      # fills the queue from sources
-    py modules/telegram/news_bot.py       # daily drip + manual DMs
-
-- **Manual post:** DM the bot text and/or one photo/video → it broadcasts to all
-  destinations immediately (translated per channel). Only `TG_OPERATOR_ID` works.
-- **Check the queue:** send `/queue` to the bot.
+Then post something in the control group and use the picker.
 
 ### Notes & current limits
 
-- **Post rate** — `POSTS_PER_DAY` in `.env`: a number throttles the daily drip
-  (`1` = once a day at `DAILY_TIME`); `false` posts **everything** continuously
-  (queue flushed ~every 60s; `DAILY_TIME`/`TIMEZONE` are ignored in this mode).
-- **Translation model** defaults to `claude-opus-4-8`; set
-  `TRANSLATE_MODEL=claude-haiku-4-5` in `.env` for a cheaper/faster option.
-- **Manual media** is one photo/video per DM (albums via DM are not handled yet;
-  collected albums *are* handled).
-- **No web dashboard** — sources/destinations are configured in `.env`. Adding a
-  channel = edit `TG_DESTINATIONS` and restart `news_bot.py`.
-- `data/` (SQLite, media, `.session`) should stay git-ignored — the `.session`
-  file is a login credential.
+- **No scheduling / no queue** — the bot only posts what you drop in the group,
+  when you confirm the picker. The old daily-drip mode was removed.
+- **Caption limit** — Telegram caps media captions at 1024 chars; longer
+  captions will fail on that channel (shows as ❌ in the status reply).
+- **Picker state is in-memory** — restarting the bot expires open pickers
+  (tapping one says "prompt expired — post the news again").
+- **Don't run `news_bot.py` and `telegram_bot.py` at the same time** — they
+  share `TELEGRAM_BOT_TOKEN`, and two pollers on one token conflict. Use a
+  second bot token if both are ever needed at once.
+
+---
+
+## Source collector (future smart-filter input)
+
+`collector.py` logs in as *you* (Telethon — bots can't read channels they don't
+own), watches `TG_SOURCES`, dedups, downloads media, and writes each post into
+the SQLite queue (`queue_store.py`, `data/news.db`). Nothing drains the queue
+today; the planned smart filter (importance scoring + regional routing) will.
+
+Setup: get `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from https://my.telegram.org,
+list `TG_SOURCES` in `.env`, then run the first login interactively:
+
+    py modules/telegram/collector.py
+
+This creates `modules/telegram/data/collector.session`; later runs are
+non-interactive. `data/` (SQLite, media, `.session`) stays git-ignored — the
+`.session` file is a login credential.

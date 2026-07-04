@@ -2,13 +2,11 @@
 modules/telegram/publisher.py — translate a post per destination language and
 fan it out to every configured news channel via the bot.
 
-Shared by both publish paths in news_bot.py:
-  - the daily job (pops an auto-collected post from the queue), and
-  - the manual DM handler (immediate broadcast of what you send the bot).
+Called by news_bot.py when the operator confirms the channel picker.
 
 Media items are dicts:
   {"path": "<local file>", "type": "photo"|"video"}   # collected posts (copy-as-own)
-  {"file_id": "<telegram id>", "type": "photo"|"video"}  # manual DMs (reuse the upload)
+  {"file_id": "<telegram id>", "type": "photo"|"video"}  # group posts (reuse the upload)
 Telegram accepts a local path string or a file_id for photo=/video=/media=, so
 both shapes flow through `_ref` unchanged.
 """
@@ -48,23 +46,27 @@ async def _send(bot, chat_id, caption: str, media: list) -> None:
     await bot.send_media_group(chat_id=chat_id, media=group)
 
 
-async def publish(bot, text: str, media: list):
-    """Send `text` (+ optional media) to every TG_DESTINATIONS channel, translating
-    the caption into each destination's language first. Translations are cached
-    per language so N same-language channels cost one API call. A failure on one
-    channel is logged and skipped — it does not abort the rest.
+async def publish(bot, text: str, media: list, dests: list | None = None):
+    """Send `text` (+ optional media) to each destination channel (default: all
+    of TG_DESTINATIONS), translating the caption into each destination's
+    language first. Translations are cached per language so N same-language
+    channels cost one API call. A failure on one channel is logged and skipped
+    — it does not abort the rest.
 
-    Returns (ok_count, errors) where errors is a list of (chat_id, message)."""
+    Returns (posted, errors): posted is the list of chat_ids that succeeded,
+    errors is a list of (chat_id, message)."""
+    if dests is None:
+        dests = config.TG_DESTINATIONS
     cache: dict[str, str] = {}
-    ok, errors = 0, []
-    for dest in config.TG_DESTINATIONS:
+    posted, errors = [], []
+    for dest in dests:
         chat_id, lang = dest["chat_id"], dest["lang"]
         if lang not in cache:
             cache[lang] = translator.translate(text, lang, config.SOURCE_LANG) if lang else text
         try:
             await _send(bot, chat_id, cache[lang], media)
-            ok += 1
+            posted.append(chat_id)
         except Exception as exc:  # network, permissions, bad chat id, ...
             log.error("publish to %s failed: %s", chat_id, exc)
             errors.append((chat_id, str(exc)))
-    return ok, errors
+    return posted, errors
