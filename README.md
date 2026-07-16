@@ -116,7 +116,7 @@ The quota resets daily. When a channel's local bucket is full, incoming local st
 
 Stories from different sources about the same event are clustered. The cluster is posted once (the best version). Subsequent updates ("X hours later…") are posted only if they add material new information — detected by semantic similarity against what's already been posted to that channel.
 
-> **This module is not yet started.** Design above is the intended architecture.
+> **In progress.** Built so far (2026-07-04): the NewsItem store (`queue_store.py` — scored-item schema + exact-text dedup at enqueue) and the scorer (`scorer.py` — one OpenRouter call returns importance 0–100 + regions; tiers: <40 low / 40–69 medium / 70–84 high / ≥85 breaking; test any headline with `py modules/telegram/scorer.py "<text>"`). Next: the dispatcher (scoring loop + region routing to channels) and the human-approval flow for breaking items.
 
 ---
 

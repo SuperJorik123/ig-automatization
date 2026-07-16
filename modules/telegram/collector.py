@@ -47,10 +47,14 @@ async def _handle(event, messages) -> None:
             path = await m.download_media(file=stem)  # Telethon adds the real ext
             if path:
                 media.append({"path": path, "type": "photo" if m.photo else "video"})
-    source = getattr(event.chat, "username", None) or str(event.chat_id)
-    queue_store.enqueue(source, text, media)
+    username = getattr(event.chat, "username", None)
+    source = f"tg:@{username}" if username else f"tg:{event.chat_id}"
+    item_id = queue_store.enqueue(source, text, media)
     queue_store.set_cursor(source, max(m.id for m in messages))
-    log.info("queued a post from %s (%d media)", source, len(media))
+    if item_id is None:
+        log.info("dropped exact duplicate from %s", source)
+    else:
+        log.info("queued item %d from %s (%d media)", item_id, source, len(media))
 
 
 def main() -> None:

@@ -7,9 +7,9 @@ Called by the publisher right before fan-out: each destination channel carries a
 language within a single publish (see publisher.py) so two same-language
 channels don't pay twice.
 
-Model defaults to anthropic/claude-haiku-4-5-20251001 (cheap, fast, accurate for
-news translation). Override with TRANSLATE_MODEL in .env — any OpenRouter model
-id works, e.g. openai/gpt-4o-mini or google/gemini-flash-1.5.
+Model defaults to openai/gpt-4o-mini (cheap, fast, accurate for news
+translation). Override with TRANSLATE_MODEL in .env — any OpenRouter model id
+works.
 """
 
 import logging

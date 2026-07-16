@@ -60,10 +60,12 @@ TG_SOURCES = [s.strip() for s in os.environ.get("TG_SOURCES", "").split(",") if 
 # destination's language matches this, translation is skipped. Blank = never skip.
 SOURCE_LANG = os.environ.get("SOURCE_LANG", "").strip()
 
-# Translation via OpenRouter (openrouter.ai — OpenAI-compatible gateway).
-# Model can be any OpenRouter model id; haiku is cheap and accurate for news.
+# Translation + scoring via OpenRouter (openrouter.ai — OpenAI-compatible
+# gateway). Model ids must exist on OpenRouter — gpt-4o-mini is cheap and
+# handles both jobs well. SCORER_MODEL falls back to TRANSLATE_MODEL.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
-TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "anthropic/claude-haiku-4-5-20251001").strip()
+TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "openai/gpt-4o-mini").strip()
+SCORER_MODEL = os.environ.get("SCORER_MODEL", "").strip() or TRANSLATE_MODEL
 
 # Collector's working dir: SQLite queue + downloaded media + login session.
 TG_DATA_DIR = os.path.join(ROOT_DIR, "modules", "telegram", "data")
