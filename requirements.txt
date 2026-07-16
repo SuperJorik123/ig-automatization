@@ -16,3 +16,10 @@ python-dotenv>=1.0
 # Telegram news modules (modules/telegram)
 telethon>=1.36        # MTProto user client — reads source channels (collector)
 openai>=1.0           # OpenRouter translation (OpenAI-compatible client)
+
+# YouTube Shorts uploader (modules/youtube)
+google-api-python-client>=2.120.0
+google-auth-oauthlib>=1.2.0
+
+# Twitter/X poster (modules/twitter)
+tweepy>=4.14.0

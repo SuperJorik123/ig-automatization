@@ -44,6 +44,30 @@ IG_ACCOUNTS = [
 
 
 # --------------------------------------------------------------------------- #
+# YouTube Shorts + Twitter/X posting (modules/youtube, modules/twitter)       #
+# --------------------------------------------------------------------------- #
+
+# YouTube OAuth credentials are FILE-based, one folder per account:
+#   credentials/youtube/<account>/client_secrets.json  (from Google Cloud Console)
+#   credentials/youtube/<account>/token.pickle         (created on first login)
+# The whole credentials/ dir is git-ignored.
+YOUTUBE_CREDS_DIR = os.path.join(ROOT_DIR, "credentials", "youtube")
+
+# Twitter account names, comma-separated in .env (same shape as IG_ACCOUNTS).
+# Each name keys its TWITTER_<ACCOUNT>_* env vars.
+TWITTER_ACCOUNTS = [
+    a.strip() for a in os.environ.get("TWITTER_ACCOUNTS", "").split(",") if a.strip()
+]
+
+# Minimum smart-filter score (0-100) at which the dispatcher auto-uploads a
+# collected video to every YouTube channel. 70 = scorer's "high" tier floor.
+try:
+    YT_AUTO_MIN_SCORE = int(os.environ.get("YT_AUTO_MIN_SCORE", "70"))
+except ValueError:
+    YT_AUTO_MIN_SCORE = 70
+
+
+# --------------------------------------------------------------------------- #
 # Telegram news aggregator (modules/telegram)                                 #
 # --------------------------------------------------------------------------- #
 
@@ -92,3 +116,9 @@ def _parse_destinations(raw: str):
 # Destination channels the bot posts to (each with a target language). Add the
 # bot as an admin in every one of these.
 TG_DESTINATIONS = _parse_destinations(os.environ.get("TG_DESTINATIONS", ""))
+
+# YouTube destination channels (news bot picker + dispatcher auto-upload):
+# comma-separated "account:lang" pairs, e.g. "mirnews:en,rusnews:ru". Same
+# parser as TG_DESTINATIONS — here "chat_id" holds the ACCOUNT NAME, which
+# must match a folder under credentials/youtube/.
+YT_DESTINATIONS = _parse_destinations(os.environ.get("YT_DESTINATIONS", ""))

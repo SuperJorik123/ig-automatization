@@ -1,6 +1,6 @@
 # IG Automatization — project guide
 
-PC-side queue manager + Android driver for posting photos and scrolling reels on Instagram. Posts live in `posts/` as `NNN.jpg` + `NNN.json` (caption + hashtags); the Angular UI in `ui/` queues new ones; `modules/instagram/upload_post.py` drives IG over ADB via uiautomator2. Code is organised per platform under `modules/` (`instagram`, `telegram`, `twitter`, `facebook`), with cross-cutting pieces in `shared/` and the web layer (`server.py`, `ui/`) + media queue (`posts/`) at the repo root.
+PC-side queue manager + Android driver for posting photos and scrolling reels on Instagram. Posts live in `posts/` as `NNN.jpg` + `NNN.json` (caption + hashtags); the Angular UI in `ui/` queues new ones; `modules/instagram/upload_post.py` drives IG over ADB via uiautomator2. Code is organised per platform under `modules/` (`instagram`, `telegram`, `twitter`, `youtube`, `facebook`), with cross-cutting pieces in `shared/` and the web layer (`server.py`, `ui/`) + media queue (`posts/`) at the repo root.
 
 ## Layout
 
@@ -9,8 +9,9 @@ Per-platform modules under `modules/`, cross-cutting code under `shared/`, the w
 ```
 modules/
   instagram/   upload_post.py, main.py, dump_ui.py, human_swipe.py, analyze_swipes.py, visualize_swipes.py
-  telegram/    telegram_bot.py
-  twitter/     poster.py (stub) — download-from-X already lives in shared/reel_downloader.py
+  telegram/    telegram_bot.py (IG trigger), news_bot.py (manual broadcaster + YouTube picker), collector.py, scorer.py, dispatcher.py, publisher.py, translator.py, queue_store.py
+  twitter/     poster.py — Tweepy video+photo posting (v1.1 media upload + v2 tweet); download-from-X lives in shared/reel_downloader.py
+  youtube/     uploader.py (Data API v3 upload, per-account OAuth under credentials/youtube/), publisher.py (translate-per-channel fan-out)
   facebook/    poster.py (stub) — nothing implemented yet
 shared/
   config.py            .env loading + PHONE_ADDRESS / POSTS_DIR / credentials
@@ -35,7 +36,12 @@ Every entrypoint puts the repo root on `sys.path` (the scripts via a 3×-`dirnam
 | `modules/instagram/dump_ui.py` | Connects to the test phone and dumps the current IG screen to `ui_dump.xml`. Use whenever a selector breaks. |
 | `modules/instagram/analyze_swipes.py` / `visualize_swipes.py` | Offline analysis for the swipe model — not used at runtime. |
 | `modules/telegram/telegram_bot.py` | Telegram bot: scans a configured group for IG/Twitter URLs, downloads via `shared/reel_downloader.py`, queues into `posts/`, and posts to IG via `modules.instagram.upload_post` for each selected account (`IG_ACCOUNTS`). |
-| `modules/twitter/poster.py`, `modules/facebook/poster.py` | Posting **stubs** mirroring the IG `upload_post(...)` signature; raise `NotImplementedError`. Twitter/X *downloading* already works via `shared/reel_downloader.py`. |
+| `modules/twitter/poster.py` | Twitter/X poster (ported from the news-bot project). `post_media(file_path, caption, account_name)` detects video vs photo by extension: videos go through Tweepy v1.1 `chunked_upload` + async-processing poll, photos through `media_upload`; the tweet itself is created with the v2 Client. Credentials: five `TWITTER_<ACCOUNT>_*` vars per account in `.env` (account name uppercased, non-alphanumerics → `_`; app needs Read+Write). Keeps a back-compat `upload_post(d, ...)` wrapper (ignores `d`). CLI: `py modules/twitter/poster.py clip.mp4 --caption "..." --account name`. |
+| `modules/youtube/uploader.py` | YouTube Shorts uploader (ported from the news-bot project). `upload_short(file_path, title, description, account_name, privacy_status)` does a resumable Data API v3 upload; vertical videos ≤3 min are auto-classified as Shorts. OAuth per account: `credentials/youtube/<account>/client_secrets.json` + `token.pickle` (git-ignored). First run per account must be interactive — it opens a browser for consent and will hang headless. Quota: 1600 units/upload of a 10,000/day default budget per Google Cloud project (~6 uploads/day) — one project per account. CLI: `py modules/youtube/uploader.py clip.mp4 --title "..." --account name`. |
+| `modules/youtube/publisher.py` | YouTube twin of the telegram publisher. `publish_shorts(video_path, caption, dests)` translates the caption per channel language (reuses `modules/telegram/translator`, cached per lang), splits it (first line → title ≤100 chars, full caption → description) and uploads to each `YT_DESTINATIONS` channel. Blocking — async callers use `asyncio.to_thread`. Returns `(posted, errors)`. |
+| `modules/telegram/news_bot.py` | Manual broadcaster: post text/photo/video/album in the control group → inline picker of `TG_DESTINATIONS` channels **plus `YT_DESTINATIONS` YouTube channels when the post has a video** → caption translated per destination → Telegram fan-out and/or Shorts upload. Manual YouTube posting is limited to videos ≤20 MB (Bot API `get_file` cap); bigger ones get a clear error. |
+| `modules/telegram/dispatcher.py` | Smart-filter dispatcher: polls the SQLite queue for `new` items, scores each via `scorer.py` (OpenRouter, 0-100 + regions), and auto-uploads scored-`>= YT_AUTO_MIN_SCORE` (default 70) items **with video** to every `YT_DESTINATIONS` channel via `modules/youtube/publisher`, then `mark_posted('youtube')`. Everything else goes to `status='queued'` with score recorded for future platforms. Scoring failures stay `new` and retry. Run alongside `collector.py`. |
+| `modules/facebook/poster.py` | Posting **stub** mirroring the IG `upload_post(...)` signature; raises `NotImplementedError`. |
 | `swipe_stats.json` / `swipes.txt` | Calibration data feeding `human_swipe.py` (generated by `analyze_swipes.py`; live alongside it in `modules/instagram/`). |
 | `ui/` | Angular frontend (`ng serve` on `:4200`, proxies `/api/*` → `:8000`). |
 | `posts/` | Shared queue at the repo root. `posts/posted/` holds archives (move-on-success). |
@@ -58,6 +64,12 @@ UI (another terminal):
 Telegram bot (optional, another terminal — needs `.env` credentials):
 
     py modules/telegram/telegram_bot.py
+
+News pipeline (each in its own terminal — needs `.env` credentials):
+
+    py modules/telegram/news_bot.py     # manual broadcaster: control group → TG channels + YouTube Shorts
+    py modules/telegram/collector.py    # collects source-channel posts into the SQLite queue (first run: phone-code login)
+    py modules/telegram/dispatcher.py   # smart filter: scores queued items, auto-uploads >=YT_AUTO_MIN_SCORE videos to YouTube
 
 Post manually (skip the UI, uses the next queued image):
 

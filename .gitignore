@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# YouTube OAuth credential folders (client_secrets.json + token.pickle)
+credentials/
+
 # Telegram news aggregator runtime state — the .session file is a LOGIN
 # CREDENTIAL; media + the SQLite queue are local runtime artefacts.
 modules/telegram/data/
