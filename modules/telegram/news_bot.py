@@ -17,6 +17,14 @@ bare-URL post uses the link's own caption — the picker says which one so you
 can check before posting. Because the file is local, URL posts skip the
 20 MB Bot-API limit on the YouTube leg.
 
+Brand-it: a single-video post (uploaded or URL) with BRANDS configured first
+asks "Post as-is / Brand it". Brand-it renders one variant per selected brand
+— brands/<name>/logo.png top-right, the caption as a translated lower-third
+headline (shared/branding.py) — sends each back here, then offers a publish
+picker of brand→TG/YT/X pairs (all off; YouTube hidden over 3 minutes).
+Nothing publishes without a selection. Telegram-uploaded sources keep the
+20 MB Bot-API download cap — bigger clips must come in as URLs.
+
 Caption edit: reply to any open picker message with new text to replace the
 caption before hitting "Post to selected".
 
@@ -69,6 +77,9 @@ from modules.telegram import (  # noqa: E402
     reactions,
 )
 from modules.youtube import publisher as yt_publisher  # noqa: E402
+from modules.telegram import branded, translator  # noqa: E402
+from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
+from shared import branding  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 # python-telegram-bot's httpx client logs every 10 s getUpdates poll at INFO,
@@ -95,6 +106,10 @@ if not config.TG_DESTINATIONS and not config.YT_DESTINATIONS:
 # Bot API refuses get_file above this size; bigger videos can't be posted to
 # YouTube through the manual flow.
 _BOT_FILE_LIMIT = 20 * 1024 * 1024
+
+# Bot API refuses uploads above this; a bigger render is published normally
+# but can't be sent back into the group as a file.
+_BOT_UPLOAD_LIMIT = 50 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------- #
@@ -211,6 +226,17 @@ async def _prompt(msg, text: str, media: list) -> None:
     _pending[prompt.message_id] = state
 
 
+async def _gate(msg, text: str, media: list, files: list | None = None) -> None:
+    """Single-video post with brands configured: ask as-is vs brand-it before
+    opening any picker. State is the same _pending dict, mode-tagged."""
+    state = {"text": text, "media": media, "files": list(files or ()),
+             "sel_tg": set(), "sel_yt": set(), "sel_em": set(), "mode": "gate"}
+    prompt = await msg.reply_text(
+        "Brand this clip, or post it as-is?" + (f"\n\n📝 {text}" if text else ""),
+        reply_markup=branded.gate_keyboard())
+    _pending[prompt.message_id] = state
+
+
 def _cleanup(state: dict) -> None:
     """Remove files downloaded for this picker (URL posts). file_id-based
     media has nothing on disk."""
@@ -261,16 +287,24 @@ async def _handle_url(msg, text: str) -> None:
         return
 
     ext = os.path.splitext(path)[1].lower()
+    is_video = ext in _VIDEO_EXTS
     state = {
         "text": user_text or link_caption,
         "cap_src": "your text" if user_text else "from link",
-        "media": [{"path": path, "type": "video" if ext in _VIDEO_EXTS else "photo"}],
+        "media": [{"path": path, "type": "video" if is_video else "photo"}],
         "files": [path],
         "sel_tg": set(),
         "sel_yt": set(),
         "sel_em": set(),
     }
-    await note.edit_text(_prompt_text(state), reply_markup=_keyboard(state))
+    if is_video and config.BRANDS:
+        state["mode"] = "gate"
+        cap = state["text"]
+        await note.edit_text(
+            "Brand this clip, or post it as-is?" + (f"\n\n📝 {cap}" if cap else ""),
+            reply_markup=branded.gate_keyboard())
+    else:
+        await note.edit_text(_prompt_text(state), reply_markup=_keyboard(state))
     _pending[note.message_id] = state
 
 
@@ -298,8 +332,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         state = _pending[reply.message_id]
         state["text"] = text.strip()
         state["cap_src"] = "edited"
+        mode = state.get("mode")
+        if mode == "gate":
+            body = f"Brand this clip, or post it as-is?\n\n📝 {state['text']}"
+            markup = branded.gate_keyboard()
+        elif mode == "brand":
+            body = _brand_prompt_text(state)
+            markup = branded.brand_keyboard(state["brands"], state["sel_brands"])
+        elif mode == "publish":
+            return  # headline is already burned into the renders
+        else:
+            body = _prompt_text(state)
+            markup = _keyboard(state)
         try:
-            await reply.edit_text(_prompt_text(state), reply_markup=_keyboard(state))
+            await reply.edit_text(body, reply_markup=markup)
         except Exception:  # "message is not modified" — same caption again
             pass
         return
@@ -316,7 +362,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     gid = msg.media_group_id
     if gid is None:
-        await _prompt(msg, text, [media_item] if media_item else [])
+        if media_item and media_item["type"] == "video" and config.BRANDS:
+            await _gate(msg, text, [media_item])
+        else:
+            await _prompt(msg, text, [media_item] if media_item else [])
         return
 
     # Album part: merge into the buffer and restart the settle timer.
@@ -372,6 +421,251 @@ async def _post_to_youtube(bot, text: str, media: list, dests: list):
             os.remove(path)
         except OSError:
             pass
+
+
+# --------------------------------------------------------------------------- #
+# Brand-it flow (gate → brand picker → render → publish picker)               #
+# --------------------------------------------------------------------------- #
+
+
+def _brand_prompt_text(state: dict) -> str:
+    head = state["text"].strip()
+    lines = ["Brand for which brands?"]
+    lines.append(f"📝 {head}" if head
+                 else "⚠️ no headline yet — reply to this message with it")
+    lines.append("↩️ reply to this message to replace the headline")
+    return "\n\n".join(lines)
+
+
+async def _ensure_local_video(bot, state: dict) -> str:
+    """Local path of the source video, downloading Telegram-uploaded ones
+    (≤ 20 MB — checked at the gate). URL posts already have a path."""
+    video = next(m for m in state["media"] if m["type"] == "video")
+    if video.get("path"):
+        return video["path"]
+    dl_dir = os.path.join(config.TG_DATA_DIR, "media")
+    os.makedirs(dl_dir, exist_ok=True)
+    path = os.path.join(dl_dir, f"brand_src_{video['file_id'][-24:]}.mp4")
+    tg_file = await bot.get_file(video["file_id"])
+    await tg_file.download_to_drive(path)
+    video["path"] = path
+    state["files"].append(path)
+    return path
+
+
+async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
+    """Taps on the gate / brand picker / publish picker ("b:<verb>")."""
+    if verb == "noop":
+        await q.answer("Add brands/<name>/logo.png to enable this brand.",
+                       show_alert=True)
+        return
+
+    if verb == "asis":
+        await q.answer()
+        state["mode"] = None
+        await q.edit_message_text(_prompt_text(state),
+                                  reply_markup=_keyboard(state))
+        return
+
+    if verb == "brand":
+        video = next((m for m in state["media"] if m["type"] == "video"), None)
+        if video and not video.get("path") \
+                and (video.get("file_size") or 0) > _BOT_FILE_LIMIT:
+            await q.answer(
+                "Video too large to brand (20 MB Bot API cap) — post the "
+                "clip as a link instead.", show_alert=True)
+            return
+        await q.answer()
+        state["mode"] = "brand"
+        state["brands"] = branded.available_brands(config.BRANDS)
+        state["sel_brands"] = {i for i, b in enumerate(state["brands"])
+                               if b["has_logo"]}
+        await q.edit_message_text(
+            _brand_prompt_text(state),
+            reply_markup=branded.brand_keyboard(state["brands"],
+                                                state["sel_brands"]))
+        return
+
+    if verb.startswith("t:") and state.get("mode") == "brand":
+        await q.answer()
+        state["sel_brands"] ^= {int(verb.split(":", 1)[1])}
+        await q.edit_message_reply_markup(
+            branded.brand_keyboard(state["brands"], state["sel_brands"]))
+        return
+
+    if verb == "render" and state.get("mode") == "brand":
+        if not state["sel_brands"]:
+            await q.answer("Pick at least one brand.", show_alert=True)
+            return
+        if not state["text"].strip():
+            await q.answer("No headline — reply to the picker message with "
+                           "it first.", show_alert=True)
+            return
+        await q.answer()
+        await _do_render(q, context, state)
+        return
+
+    if verb.startswith("p:") and state.get("mode") == "publish":
+        await q.answer()
+        state["sel_pairs"] ^= {int(verb.split(":", 1)[1])}
+        await q.edit_message_reply_markup(
+            branded.publish_keyboard(state["pairs"], state["sel_pairs"]))
+        return
+
+    if verb == "publish" and state.get("mode") == "publish":
+        if not state["sel_pairs"]:
+            await q.answer("Pick at least one destination.", show_alert=True)
+            return
+        await q.answer()
+        await _do_publish(q, context, state)
+        return
+
+    if verb == "cancel":
+        await q.answer()
+        _pending.pop(q.message.message_id, None)
+        _cleanup(state)
+        await q.edit_message_text("✕ cancelled")
+        return
+
+    await q.answer()  # stale/unknown verb for this mode
+
+
+async def _do_render(q, context, state: dict) -> None:
+    """Render one variant per selected brand (headline translated per brand
+    language, translation cached), send each back into the group, then open
+    the publish picker on a fresh message. One failed brand is reported and
+    skipped — never fatal for the others."""
+    brands = [state["brands"][i] for i in sorted(state["sel_brands"])]
+    await q.edit_message_text(
+        "⏳ rendering " + ", ".join(b["name"] for b in brands) + " …")
+
+    try:
+        src = await _ensure_local_video(context.bot, state)
+        _, _, duration = await asyncio.to_thread(shorts_format.probe, src)
+    except Exception as exc:
+        log.error("brand render setup failed: %s", exc)
+        _pending.pop(q.message.message_id, None)
+        _cleanup(state)
+        await q.edit_message_text(f"❌ can't read the video: {str(exc)[:300]}")
+        return
+
+    media_dir = os.path.join(config.TG_DATA_DIR, "media")
+    renders, failures = [], []
+    cache: dict[str, str] = {}
+    for b in brands:
+        try:
+            lang = b["lang"]
+            if lang not in cache:
+                cache[lang] = (await asyncio.to_thread(
+                    translator.translate, state["text"], lang,
+                    config.SOURCE_LANG) if lang else state["text"])
+            out = os.path.join(
+                media_dir, f"brand_{q.message.message_id}_{b['name']}.mp4")
+            path = await asyncio.to_thread(
+                branding.render_branded, src, cache[lang], b["logo"], out)
+            state["files"].append(path)
+            renders.append({"brand": b, "path": path, "headline": cache[lang]})
+            size = os.path.getsize(path)
+            if size > _BOT_UPLOAD_LIMIT:
+                await q.message.chat.send_message(
+                    f"🏷 {b['name']}: rendered ({size / 1024 / 1024:.0f} MB — "
+                    "too big to send back; publishing still works)")
+            else:
+                with open(path, "rb") as fh:
+                    await q.message.chat.send_video(video=fh,
+                                                    caption=f"🏷 {b['name']}")
+        except Exception as exc:  # translator, ffmpeg, Telegram send, ...
+            log.error("brand render failed for %s: %s", b["name"], exc)
+            failures.append((b["name"], str(exc)[:200]))
+
+    if not renders:
+        _pending.pop(q.message.message_id, None)
+        _cleanup(state)
+        await q.edit_message_text(
+            "❌ all renders failed:\n"
+            + "\n".join(f"{n}: {e}" for n, e in failures))
+        return
+
+    state["mode"] = "publish"
+    state["renders"] = renders
+    state["pairs"] = branded.pairs_for(renders, duration)
+    state["sel_pairs"] = set()
+
+    summary = "🎨 rendered: " + ", ".join(r["brand"]["name"] for r in renders)
+    if failures:
+        summary += "\n" + "\n".join(f"❌ {n}: {e}" for n, e in failures)
+    await q.edit_message_text(summary)
+
+    # Fresh message so the publish picker lands BELOW the delivered clips;
+    # the state follows it.
+    _pending.pop(q.message.message_id, None)
+    if not state["pairs"]:
+        _cleanup(state)
+        await q.message.chat.send_message(
+            "no destinations configured for the rendered brands "
+            "(BRAND_<NAME>_TG/YT/TW) — files above are yours, nothing to publish")
+        return
+    prompt = await q.message.chat.send_message(
+        "Publish which?", reply_markup=branded.publish_keyboard(state["pairs"],
+                                                                set()))
+    _pending[prompt.message_id] = state
+
+
+async def _do_publish(q, context, state: dict) -> None:
+    """Push each selected pair through its platform publisher. The headline is
+    already translated per brand — Telegram destinations get lang "" so
+    publisher.publish doesn't translate again."""
+    pairs = [state["pairs"][i] for i in sorted(state["sel_pairs"])]
+    _pending.pop(q.message.message_id, None)
+    await q.edit_message_text(
+        "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
+
+    lines = []
+    for p in pairs:
+        r, b = p["render"], p["render"]["brand"]
+        try:
+            if p["platform"] == "tg":
+                posted, errors, links = await publisher.publish(
+                    context.bot, r["headline"],
+                    [{"path": r["path"], "type": "video"}],
+                    [{"chat_id": b["tg"], "lang": ""}])
+                if posted:
+                    # Same post-publish path as the manual picker (BulkFollows
+                    # per-post order + durable every-5th channel counter).
+                    await asyncio.to_thread(reactions.record_posts,
+                                            posted, links, [])
+                    lines.append(f"✅ {p['label']}")
+                    for chat_id, url in links:
+                        lines.append(f"🔗 {chat_id}: {url}")
+                for _, err in errors:
+                    lines.append(f"❌ {p['label']}: {err}")
+            elif p["platform"] == "yt":
+                # Renders are 1080x1920 by construction — upload directly,
+                # no second ensure_short pass.
+                title, description = yt_publisher.split_caption(r["headline"])
+                result = await asyncio.to_thread(
+                    yt_uploader.upload_short, r["path"], title, description,
+                    b["yt"])
+                if result.get("status") == "success":
+                    lines.append(f"✅ {p['label']}")
+                else:
+                    lines.append(f"❌ {p['label']}: "
+                                 f"{result.get('error', 'unknown error')}")
+            else:  # tw — lazy import so tweepy isn't a startup requirement
+                from modules.twitter import poster as tw_poster
+                result = await asyncio.to_thread(
+                    tw_poster.post_media, r["path"], r["headline"], b["tw"])
+                if result.get("status") == "success":
+                    lines.append(f"✅ {p['label']}")
+                else:
+                    lines.append(f"❌ {p['label']}: "
+                                 f"{result.get('error', 'unknown error')}")
+        except Exception as exc:
+            log.error("brand publish failed for %s: %s", p["label"], exc)
+            lines.append(f"❌ {p['label']}: {str(exc)[:200]}")
+
+    _cleanup(state)
+    await q.edit_message_text("\n".join(lines))
 
 
 # --------------------------------------------------------------------------- #
@@ -507,6 +801,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     data = q.data
 
+    if data.startswith("b:"):
+        await _on_brand_callback(q, context, state, data[2:])
+        return
+
     if data == "submit" and not (state["sel_tg"] or state["sel_yt"]):
         await q.answer("Pick at least one channel.", show_alert=True)
         return
@@ -595,7 +893,7 @@ def _sweep_orphans() -> None:
     if not os.path.isdir(dl_dir):
         return
     for name in os.listdir(dl_dir):
-        if name.startswith("manual_url_"):
+        if name.startswith(("manual_url_", "brand_")):
             try:
                 os.remove(os.path.join(dl_dir, name))
             except OSError:
