@@ -40,3 +40,37 @@ def test_list_is_split_and_trimmed():
 def test_empty():
     assert _parse_destinations("") == []
     assert _parse_destinations(None) == []
+
+
+from shared import config
+
+
+def test_parse_brands_names_langs_and_env_pointers():
+    env = {
+        "BRAND_MIRNEWS_TG": "@mir_news",
+        "BRAND_MIRNEWS_YT": "mirnews",
+        "BRAND_RUS_NEWS_TW": "rusnews",
+    }
+    brands = config._parse_brands("mirnews:en, rus-news:ru", env)
+    assert [b["name"] for b in brands] == ["mirnews", "rus-news"]
+    assert brands[0]["lang"] == "en" and brands[1]["lang"] == "ru"
+    # env key: name uppercased, non-alphanumerics -> "_"
+    assert brands[0]["tg"] == "@mir_news"
+    assert brands[0]["yt"] == "mirnews"
+    assert brands[0]["tw"] == ""            # unset platform -> empty string
+    assert brands[1]["tw"] == "rusnews"     # rus-news -> BRAND_RUS_NEWS_TW
+    assert brands[1]["tg"] == "" and brands[1]["yt"] == ""
+
+
+def test_parse_brands_logo_path_and_empty_input():
+    brands = config._parse_brands("mirnews:en", {})
+    assert brands[0]["logo"] == config.os.path.join(
+        config.ROOT_DIR, "brands", "mirnews", "logo.png"
+    )
+    assert config._parse_brands("", {}) == []
+    assert config._parse_brands("  ,  ", {}) == []
+
+
+def test_parse_brands_lang_optional():
+    brands = config._parse_brands("solo", {})
+    assert brands[0]["name"] == "solo" and brands[0]["lang"] == ""

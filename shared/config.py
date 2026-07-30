@@ -155,6 +155,41 @@ YT_DESTINATIONS = _parse_destinations(os.environ.get("YT_DESTINATIONS", ""))
 
 
 # --------------------------------------------------------------------------- #
+# Branded clips (shared/branding.py, news bot "Brand it" flow)                #
+# --------------------------------------------------------------------------- #
+
+
+def _parse_brands(raw: str, env):
+    """Parse BRANDS: comma-separated "name:lang" entries, e.g.
+    "mirnews:en,rusnews:ru" (lang optional). Each brand's platform accounts
+    come from BRAND_<NAME>_TG / _YT / _TW (name uppercased, non-alphanumerics
+    -> "_", same rule as TWITTER_<ACCOUNT>_*); an unset platform means the
+    brand has no pair for it in the publish picker. The logo is always
+    brands/<name>/logo.png — a missing file disables the brand in the picker
+    (checked at use time, not here, so config import never touches disk)."""
+    out = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parts = [p.strip() for p in item.split(":")]
+        name = parts[0]
+        key = "".join(c if c.isalnum() else "_" for c in name).upper()
+        out.append({
+            "name": name,
+            "lang": parts[1] if len(parts) > 1 else "",
+            "tg": (env.get(f"BRAND_{key}_TG") or "").strip(),
+            "yt": (env.get(f"BRAND_{key}_YT") or "").strip(),
+            "tw": (env.get(f"BRAND_{key}_TW") or "").strip(),
+            "logo": os.path.join(ROOT_DIR, "brands", name, "logo.png"),
+        })
+    return out
+
+
+BRANDS = _parse_brands(os.environ.get("BRANDS", ""), os.environ)
+
+
+# --------------------------------------------------------------------------- #
 # Telegram autopilot (modules/telegram/autopilot.py, hosted by news_bot.py)   #
 # --------------------------------------------------------------------------- #
 
