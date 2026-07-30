@@ -197,13 +197,25 @@ def main():
     )
     args = parser.parse_args()
 
-    result = upload_short(
-        args.video,
-        title=args.title,
-        description=args.description,
-        account_name=args.account,
-        privacy_status=args.privacy,
-    )
+    # Same Shorts guarantee as the publisher: horizontal videos get
+    # re-rendered to vertical before upload.
+    from modules.youtube import shorts_format
+    video, converted = shorts_format.ensure_short(args.video)
+
+    try:
+        result = upload_short(
+            video,
+            title=args.title,
+            description=args.description,
+            account_name=args.account,
+            privacy_status=args.privacy,
+        )
+    finally:
+        if converted:
+            try:
+                os.remove(video)
+            except OSError:
+                pass
     sys.exit(0 if result["status"] == "success" else 1)
 
 

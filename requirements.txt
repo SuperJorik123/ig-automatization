@@ -9,13 +9,16 @@ python-multipart>=0.0.9
 # Instagram media fetcher
 yt-dlp>=2024.1.1
 
-# Telegram bots (IG trigger bot + news broadcaster)
-python-telegram-bot>=20.0
+# Telegram bots (IG trigger bot + news broadcaster). The [job-queue] extra
+# pulls in APScheduler — without it Application.job_queue is None and the
+# autopilot drip inside news_bot.py can't be scheduled.
+python-telegram-bot[job-queue]>=20.0
 python-dotenv>=1.0
 
 # Telegram news modules (modules/telegram)
 telethon>=1.36        # MTProto user client — reads source channels (collector)
 openai>=1.0           # OpenRouter translation (OpenAI-compatible client)
+requests>=2.31        # BulkFollows SMM panel orders (modules/telegram/smm.py)
 
 # YouTube Shorts uploader (modules/youtube)
 google-api-python-client>=2.120.0
@@ -23,3 +26,7 @@ google-auth-oauthlib>=1.2.0
 
 # Twitter/X poster (modules/twitter)
 tweepy>=4.14.0
+
+# Tests (py -m pytest) — offline unit tests for the smart filter, the queue
+# store and the reaction ask.
+pytest>=8.0

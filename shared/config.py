@@ -33,6 +33,12 @@ DEVICE_ID = os.environ.get("PHONE_ADDRESS", "R5CX235CF9A")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
+# Separate token for the news bot. Telegram allows ONE getUpdates poller per
+# token, so telegram_bot.py (IG trigger) and news_bot.py can only run at the
+# same time on different tokens — make a second bot via @BotFather and put it
+# here. Falls back to the shared token when unset (then run one bot at a time).
+NEWS_BOT_TOKEN = os.environ.get("NEWS_BOT_TOKEN", "").strip() or TELEGRAM_BOT_TOKEN
+
 # Instagram accounts logged in on the phone, comma-separated in .env, no
 # leading `@`. Order is preserved — it drives the Telegram keyboard rows and
 # the per-URL upload order.
@@ -88,33 +94,57 @@ SOURCE_LANG = os.environ.get("SOURCE_LANG", "").strip()
 # gateway). Model ids must exist on OpenRouter — gpt-4o-mini is cheap and
 # handles both jobs well. SCORER_MODEL falls back to TRANSLATE_MODEL.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
-TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "openai/gpt-4o-mini").strip()
+TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "google/gemini-2.5-flash").strip()
 SCORER_MODEL = os.environ.get("SCORER_MODEL", "").strip() or TRANSLATE_MODEL
 
 # Collector's working dir: SQLite queue + downloaded media + login session.
 TG_DATA_DIR = os.path.join(ROOT_DIR, "modules", "telegram", "data")
 
+# BulkFollows (SMM panel) — orders placed per published Telegram post, and one
+# extra order per channel every BULKFOLLOWS_POST_THRESHOLD posts. The two
+# SERVICE ids are panel-specific numbers you copy from the BulkFollows services
+# list; with either one unset its leg is skipped (logged, never fatal).
+BULKFOLLOWS_API_KEY = os.environ.get("BULKFOLLOWS_API_KEY", "").strip()
+BULKFOLLOWS_API_URL = os.environ.get(
+    "BULKFOLLOWS_API_URL", "https://bulkfollows.com/api/v2"
+).strip()
+# Ordered per post, quantity = random 500-5000.
+BULKFOLLOWS_SERVICE_ID = os.environ.get("BULKFOLLOWS_SERVICE_ID", "").strip()
+# Ordered per channel every 5th post, quantity 10000, link = the channel.
+BULKFOLLOWS_SERVICE_ID_BONUS = os.environ.get("BULKFOLLOWS_SERVICE_ID_BONUS", "").strip()
+
 
 def _parse_destinations(raw: str):
-    """Parse TG_DESTINATIONS: comma-separated "chat_id:lang" pairs, e.g.
-    "@my_news_en:en, @my_news_ru:ru, -1001234567890:es". A bare chat with no
-    ":lang" gets an empty lang (posted untranslated). rpartition splits on the
-    LAST colon, so numeric ids like -100123... (no colon) parse cleanly."""
+    """Parse TG_DESTINATIONS: comma-separated "chat_id:lang:region" entries,
+    e.g. "@my_news_en:en:us, @my_news_ru:ru:ru, -1001234567890:es".
+
+    Each field after the chat id is optional and older two-field config keeps
+    working unchanged:
+      "@chan"            → posted untranslated, matches every item
+      "@chan:en"         → translated to en, matches every item (catch-all)
+      "@chan:en:eu"      → translated to en, only items the scorer tagged "eu"
+      "@chan:en:us+eu"   → several regions, "+"-separated
+
+    Splitting on ":" is safe — chat ids are numeric (-100123…, no colon) or
+    @usernames. An empty `regions` set means catch-all; the smart filter reads
+    it that way. YT_DESTINATIONS uses the same parser (its region field is
+    unused today) so both configs stay one shape."""
     out = []
     for item in (raw or "").split(","):
         item = item.strip()
         if not item:
             continue
-        chat, sep, lang = item.rpartition(":")
-        if sep and chat.strip() and lang.strip():
-            out.append({"chat_id": chat.strip(), "lang": lang.strip()})
-        else:
-            out.append({"chat_id": item, "lang": ""})
+        parts = [p.strip() for p in item.split(":")]
+        chat = parts[0]
+        lang = parts[1] if len(parts) > 1 else ""
+        regions = {r for r in (parts[2].split("+") if len(parts) > 2 else []) if r}
+        out.append({"chat_id": chat, "lang": lang, "regions": regions})
     return out
 
 
-# Destination channels the bot posts to (each with a target language). Add the
-# bot as an admin in every one of these.
+# Destination channels the bot posts to (each with a target language and,
+# optionally, the audience regions it serves). Add the bot as an admin in
+# every one of these.
 TG_DESTINATIONS = _parse_destinations(os.environ.get("TG_DESTINATIONS", ""))
 
 # YouTube destination channels (news bot picker + dispatcher auto-upload):
@@ -122,3 +152,64 @@ TG_DESTINATIONS = _parse_destinations(os.environ.get("TG_DESTINATIONS", ""))
 # parser as TG_DESTINATIONS — here "chat_id" holds the ACCOUNT NAME, which
 # must match a folder under credentials/youtube/.
 YT_DESTINATIONS = _parse_destinations(os.environ.get("YT_DESTINATIONS", ""))
+
+
+# --------------------------------------------------------------------------- #
+# Telegram autopilot (modules/telegram/autopilot.py, hosted by news_bot.py)   #
+# --------------------------------------------------------------------------- #
+
+
+def _int_env(name: str, default: int) -> int:
+    """Int from .env, falling back to `default` on anything unparseable — a
+    typo in one tuning knob must not stop the bot from starting."""
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+# A collected story only counts as news if it carries MEDIA — one or more
+# photos and/or videos. Text-only posts (source-channel commentary, link
+# dumps, announcements) are rejected BEFORE scoring, so they cost nothing.
+# Set to 0 to let text-only stories through. Manual posting via the news bot's
+# picker is never affected — you can always post whatever you want by hand.
+NEWS_REQUIRE_MEDIA = os.environ.get("NEWS_REQUIRE_MEDIA", "1").strip().lower() not in (
+    "0", "false", "no", "off"
+)
+
+# Minimum smart-filter score for an autopilot Telegram post. Lower than the
+# YouTube floor: a Telegram post is cheap, a Shorts upload costs API quota.
+TG_AUTO_MIN_SCORE = _int_env("TG_AUTO_MIN_SCORE", 60)
+
+# The drip sleeps a fresh random gap in this range between posts, so the
+# channels never look metronomic. 18-24 hours by default — roughly one
+# carefully chosen story a day, at an hour nobody can predict.
+TG_DRIP_MIN_S = _int_env("TG_DRIP_MIN_S", 18 * 3600)
+TG_DRIP_MAX_S = _int_env("TG_DRIP_MAX_S", 24 * 3600)
+
+# Stories older than this are never auto-posted — stale news dripping out days
+# late is worse than a quiet channel. Manual posting ignores this.
+# KEEP THIS ABOVE TG_DRIP_MAX_S/3600: a window shorter than the gap between
+# ticks means everything collected since the last post has already expired by
+# the time the next one fires, and the drip starves.
+TG_MAX_AGE_H = _int_env("TG_MAX_AGE_H", 48)
+
+# How many of the best-scoring eligible stories are compared head-to-head at
+# post time to choose the one that actually goes out (smart_filter.best_of).
+# 1 or 0 disables the comparison and posts the top-scoring story outright.
+TG_COMPARE_TOP = _int_env("TG_COMPARE_TOP", 5)
+
+# Where the "which reactions?" question is sent. Defaults to the control group
+# the news bot already listens in; set it to your personal chat id for a DM.
+TG_ASK_CHAT_ID = os.environ.get("TG_ASK_CHAT_ID", "").strip() or TELEGRAM_CHAT_ID
+
+# Start with the drip paused (still switchable at runtime with /autopilot on).
+TG_AUTOPILOT = os.environ.get("TG_AUTOPILOT", "1").strip().lower() not in ("0", "false", "no", "off")
+
+# Pin the FIRST tick after startup to a wall-clock time, "HH:MM" in the
+# machine's local timezone (e.g. "21:00"): today if that hour is still ahead,
+# otherwise tomorrow. Only the first tick — every one after it goes back to
+# the random TG_DRIP_MIN_S..TG_DRIP_MAX_S gap. Blank resumes the normal rhythm
+# from the last post. Useful for testing, and for lining the first post of a
+# fresh deployment up with a sensible hour.
+TG_FIRST_TICK = os.environ.get("TG_FIRST_TICK", "").strip()

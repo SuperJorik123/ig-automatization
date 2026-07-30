@@ -1,21 +1,27 @@
 """
 modules/telegram/dispatcher.py — the smart-filter dispatcher.
 
-Drains the collector's queue: each status='new' item is scored (scorer.py, one
-OpenRouter call), then routed:
+Drains the collector's queue. A text-only post is not news: with
+NEWS_REQUIRE_MEDIA on (the default) it goes straight to status='rejected'
+without a scoring call. Everything else is scored ONCE — this is the only
+process that writes scores, so there is no race over the queue — and then
+routed by modules/telegram/smart_filter:
 
-  score >= YT_AUTO_MIN_SCORE (default 70) AND the item has a video
-      → auto-upload to EVERY YT_DESTINATIONS channel via
-        modules/youtube/publisher (title+caption translated per channel),
-        then mark_posted('youtube')
+  smart_filter.youtube_targets(item)  (score >= YT_AUTO_MIN_SCORE + a video)
+      → upload to those YT_DESTINATIONS channels via modules/youtube/publisher
+        (title+caption translated per channel), one record_post per channel
   everything else
-      → status='queued' with score+regions recorded, waiting for future
-        platform integrations (telegram drip, twitter, ...)
+      → status='queued' with score+regions recorded
+
+Scored items stay available to the other platforms: the Telegram autopilot
+(inside news_bot.py) picks its own candidates from this same queue, and
+eligibility is per platform — an item already on YouTube is still a Telegram
+candidate. Twitter/Instagram routes will plug in the same way.
 
 A scoring failure leaves the item status='new' so it is retried on a later
 pass — items are never published unscored. An upload failure on one channel
-doesn't abort the others (publisher semantics); if EVERY channel fails the
-item goes back to 'queued' so it isn't lost.
+doesn't abort the others (publisher semantics); a channel with no record_post
+row is simply still unpublished there.
 
 Run alongside the collector (separate terminal):
     py modules/telegram/dispatcher.py
@@ -32,7 +38,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from shared import config  # noqa: E402
-from modules.telegram import queue_store, scorer  # noqa: E402
+from modules.telegram import queue_store, smart_filter  # noqa: E402
 from modules.youtube import publisher as yt_publisher  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -57,7 +63,14 @@ def process_one() -> bool:
     if item is None:
         return False
 
-    result = scorer.score(item["text"], source_hint=item["source"])
+    # Cheapest filter first: a text-only post isn't news, so it's dropped
+    # before it can cost a scoring call.
+    if not smart_filter.is_news(item):
+        queue_store.set_status(item["id"], "rejected")
+        log.info("item %d from %s: no media — rejected unscored", item["id"], item["source"])
+        return True
+
+    result = smart_filter.evaluate(item["text"], source_hint=item["source"])
     if result is None:
         log.warning("item %d: scoring failed — will retry in %ds", item["id"], SCORE_RETRY_S)
         time.sleep(SCORE_RETRY_S)
@@ -67,18 +80,23 @@ def process_one() -> bool:
     video = _first_video(item)
     log.info(
         "item %d from %s: score=%d tier=%s regions=%s video=%s",
-        item["id"], item["source"], s, scorer.tier(s), ",".join(regions),
+        item["id"], item["source"], s, result["tier"], ",".join(regions),
         "yes" if video else "no",
     )
 
-    auto_yt = s >= config.YT_AUTO_MIN_SCORE and video and config.YT_DESTINATIONS
+    # Record the verdict before routing: the Telegram autopilot picks its own
+    # candidates out of the queue and only ever sees scored items.
     queue_store.set_score(item["id"], s, regions, "queued")
-    if not auto_yt:
+
+    scored = {**item, "score": s, "regions": regions}
+    targets = smart_filter.youtube_targets(scored) if video else []
+    if not targets:
         return True
 
-    posted, errors = yt_publisher.publish_shorts(video, item["text"], config.YT_DESTINATIONS)
+    posted, errors = yt_publisher.publish_shorts(video, item["text"], targets)
+    for account in posted:
+        queue_store.record_post(item["id"], "youtube", account)
     if posted:
-        queue_store.mark_posted(item["id"], "youtube")
         log.info("item %d: uploaded to YouTube: %s", item["id"], ", ".join(posted))
     for account, err in errors:
         log.error("item %d: YouTube %s failed: %s", item["id"], account, err)

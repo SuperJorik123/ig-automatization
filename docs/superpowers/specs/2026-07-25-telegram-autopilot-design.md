@@ -24,15 +24,29 @@ filter. The routing rule is lifted out of the dispatcher into a new
 built, `evaluate()` is replaced and both routes inherit it.
 
 ```
+smart_filter.is_news(item)                 -> bool   # media required
 smart_filter.evaluate(text, source_hint) -> {"score", "regions", "tier"} | None
 smart_filter.telegram_targets(item, dests) -> [dest, ...]
 smart_filter.youtube_targets(item, dests)  -> [dest, ...]
+smart_filter.best_of(pairs, top)           -> (item, targets)
 ```
+
+`is_news` is the cheapest gate and runs first: a source post with no photo or
+video is commentary, not news. The dispatcher rejects those before they cost a
+scoring call (`NEWS_REQUIRE_MEDIA=0` disables the rule). Manual posting is
+never subject to it.
 
 `evaluate` is the brain (today: one OpenRouter call via `scorer.py`).
 The `*_targets` functions are per-platform policy. They are kept apart because
 "is this story important" and "does @news_ru want it" change on different
 schedules.
+
+`best_of` is the second half of the filter, and it runs at **publish** time.
+Scoring judges each story alone, the moment it arrives, so a day's queue
+clusters at 70-80 with no way to rank inside that cluster. With roughly one
+slot a day, the finalists are compared head-to-head (`scorer.compare`, one
+call) when the slot is actually being filled. A failed comparison falls back
+to the top score — it costs the comparison, never the post.
 
 ## Module map
 
@@ -87,12 +101,18 @@ New environment variables:
 
 | Var | Default | Meaning |
 | --- | ------- | ------- |
-| `TG_AUTO_MIN_SCORE` | `60` | Minimum score for an autopilot post |
-| `TG_DRIP_MIN_S` | `2400` | Shortest gap between drips (40 min) |
-| `TG_DRIP_MAX_S` | `5400` | Longest gap between drips (90 min) |
-| `TG_MAX_AGE_H` | `12` | Items older than this are never auto-posted |
+| `NEWS_REQUIRE_MEDIA` | `1` | Only posts with photo(s)/video(s) count as news |
+| `TG_AUTO_MIN_SCORE` | `60` | Minimum score to be eligible for an autopilot post |
+| `TG_DRIP_MIN_S` | `64800` | Shortest gap between drips (18 h) |
+| `TG_DRIP_MAX_S` | `86400` | Longest gap between drips (24 h) |
+| `TG_MAX_AGE_H` | `48` | Items older than this are never auto-posted |
+| `TG_COMPARE_TOP` | `5` | Finalists compared head-to-head at publish time (`1` disables) |
 | `TG_ASK_CHAT_ID` | `TELEGRAM_CHAT_ID` | Where the reaction ask is sent |
 | `TG_AUTOPILOT` | `1` | `0` starts the bot with the drip paused |
+
+**`TG_MAX_AGE_H` must exceed `TG_DRIP_MAX_S` in hours.** A freshness window
+shorter than the gap between ticks means everything collected since the last
+post has already expired when the next one fires, and the drip starves.
 
 ## Data model
 
@@ -118,8 +138,21 @@ CREATE TABLE asks(               -- one reaction ask per published story
     created_at TEXT NOT NULL);
 ```
 
+```sql
+CREATE TABLE channel_counters(    -- lifetime posts per channel
+    target TEXT PRIMARY KEY,
+    posts  INTEGER NOT NULL DEFAULT 0);
+```
+
 `items` gains `attempts INTEGER DEFAULT 0` (added by `init()` via a guarded
 `ALTER TABLE`, so existing databases migrate in place).
+
+`channel_counters` drives the every-5th-post BulkFollows channel order. It has
+to be durable: at roughly one post a day, an in-memory counter would need five
+days of unbroken uptime to reach the threshold, and any restart would zero it.
+The count is monotonic and callers test `n % 5`, so nothing is lost mid-cycle.
+Both autopilot and manual posts increment it — the SMM panel doesn't care
+which filled the channel.
 
 `posts` becomes the source of truth for "where has this gone". The existing
 `posted` JSON column is still stamped by `record_post` so `counts()` and the
@@ -150,13 +183,16 @@ the drip.
 ## The drip
 
 A self-rescheduling `JobQueue` job (`run_once` with a fresh random delay each
-time, so the gap is genuinely random rather than a fixed period):
+time, so the gap is genuinely random rather than a fixed period). The first
+tick after a restart is derived from the last recorded post
+(`startup_delay()`), so a daily cadence doesn't fire once per restart:
 
 ```
 tick:
   if not autopilot_enabled:        reschedule; return
   candidates = queue_store.candidates("telegram", min_score, max_age_h, limit=10)
-  item, targets = first candidate with smart_filter.telegram_targets(item, dests)
+  pairs      = [(item, targets) for each candidate with a matching channel]
+  item, targets = smart_filter.best_of(pairs)     # head-to-head, top TG_COMPARE_TOP
   if none:                         reschedule (short retry); return
 
   posted, errors, links = await publisher.publish(bot, item.text, item.media, targets)
@@ -237,6 +273,7 @@ picker's pre-post emoji selection is unchanged.
 | Failure | Behaviour |
 | ------- | --------- |
 | Item unscored | Not selectable; the dispatcher scores it later |
+| Head-to-head comparison fails | Top-scoring finalist is posted instead |
 | One channel fails to publish | Logged, other channels proceed (publisher semantics) |
 | Every channel fails | No `posts` rows, `attempts` bumped; 3 strikes → `status='failed'` |
 | Caption over the Telegram cap | Truncated after translation, logged |

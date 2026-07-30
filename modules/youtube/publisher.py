@@ -28,7 +28,7 @@ if _ROOT not in sys.path:
 
 from shared import config  # noqa: E402
 from modules.telegram import translator  # noqa: E402
-from modules.youtube import uploader  # noqa: E402
+from modules.youtube import shorts_format, uploader  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -53,25 +53,41 @@ def publish_shorts(video_path: str, caption: str, dests: list | None = None):
     succeeded, errors is a list of (account, message)."""
     if dests is None:
         dests = config.YT_DESTINATIONS
+
+    # One conversion for all channels: horizontal videos are re-rendered to
+    # vertical so YouTube classifies the upload as a Short.
+    try:
+        upload_path, converted = shorts_format.ensure_short(video_path)
+    except Exception as exc:  # too long, no video stream, ffmpeg missing, ...
+        log.error("Shorts conversion failed for %s: %s", video_path, exc)
+        return [], [(d["chat_id"], f"can't make a Short: {exc}") for d in dests]
+
     cache: dict[str, str] = {}
     posted, errors = [], []
-    for dest in dests:
-        account, lang = dest["chat_id"], dest["lang"]
-        if lang not in cache:
-            cache[lang] = (
-                translator.translate(caption, lang, config.SOURCE_LANG) if lang else caption
-            )
-        title, description = split_caption(cache[lang])
-        try:
-            result = uploader.upload_short(
-                video_path, title=title, description=description, account_name=account
-            )
-        except Exception as exc:  # missing creds folder, unreadable file, ...
-            result = {"status": "failed", "error": str(exc)}
-        if result["status"] == "success":
-            posted.append(account)
-        else:
-            err = result.get("error", "unknown error")
-            log.error("YouTube upload to %s failed: %s", account, err)
-            errors.append((account, err))
+    try:
+        for dest in dests:
+            account, lang = dest["chat_id"], dest["lang"]
+            if lang not in cache:
+                cache[lang] = (
+                    translator.translate(caption, lang, config.SOURCE_LANG) if lang else caption
+                )
+            title, description = split_caption(cache[lang])
+            try:
+                result = uploader.upload_short(
+                    upload_path, title=title, description=description, account_name=account
+                )
+            except Exception as exc:  # missing creds folder, unreadable file, ...
+                result = {"status": "failed", "error": str(exc)}
+            if result["status"] == "success":
+                posted.append(account)
+            else:
+                err = result.get("error", "unknown error")
+                log.error("YouTube upload to %s failed: %s", account, err)
+                errors.append((account, err))
+    finally:
+        if converted:
+            try:
+                os.remove(upload_path)
+            except OSError:
+                pass
     return posted, errors
