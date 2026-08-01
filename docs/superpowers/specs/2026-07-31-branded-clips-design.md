@@ -1,7 +1,7 @@
 # Branded clips — per-brand logo + headline overlay
 
 **Date:** 2026-07-31
-**Status:** approved, ready for implementation
+**Status:** implemented
 
 ## Goal
 
