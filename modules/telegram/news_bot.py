@@ -550,7 +550,7 @@ async def _do_render(q, context, state: dict) -> None:
         return
 
     media_dir = os.path.join(config.TG_DATA_DIR, "media")
-    renders, failures = [], []
+    renders, failures, warnings = [], [], []
     cache: dict[str, str] = {}
     for b in brands:
         try:
@@ -563,8 +563,18 @@ async def _do_render(q, context, state: dict) -> None:
                 media_dir, f"brand_{q.message.message_id}_{b['name']}.mp4")
             path = await asyncio.to_thread(
                 branding.render_branded, src, cache[lang], b["logo"], out)
-            state["files"].append(path)
-            renders.append({"brand": b, "path": path, "headline": cache[lang]})
+        except Exception as exc:  # translator, ffmpeg — the render itself failed
+            log.error("brand render failed for %s: %s", b["name"], exc)
+            failures.append((b["name"], str(exc)[:200]))
+            continue
+
+        # The render succeeded, so it's publishable regardless of whether the
+        # preview send below works — a failed send must not knock it out of
+        # `renders` (that would make the summary and the publish picker
+        # disagree about what's available).
+        state["files"].append(path)
+        renders.append({"brand": b, "path": path, "headline": cache[lang]})
+        try:
             size = os.path.getsize(path)
             if size > _BOT_UPLOAD_LIMIT:
                 await q.message.chat.send_message(
@@ -574,9 +584,9 @@ async def _do_render(q, context, state: dict) -> None:
                 with open(path, "rb") as fh:
                     await q.message.chat.send_video(video=fh,
                                                     caption=f"🏷 {b['name']}")
-        except Exception as exc:  # translator, ffmpeg, Telegram send, ...
-            log.error("brand render failed for %s: %s", b["name"], exc)
-            failures.append((b["name"], str(exc)[:200]))
+        except Exception as exc:  # Telegram send only — the render already succeeded
+            log.error("brand preview send failed for %s: %s", b["name"], exc)
+            warnings.append((b["name"], str(exc)[:200]))
 
     if not renders:
         _pending.pop(q.message.message_id, None)
@@ -592,22 +602,45 @@ async def _do_render(q, context, state: dict) -> None:
     state["sel_pairs"] = set()
 
     summary = "🎨 rendered: " + ", ".join(r["brand"]["name"] for r in renders)
+    if warnings:
+        summary += "\n" + "\n".join(
+            f"⚠️ {n}: rendered, preview send failed: {e}" for n, e in warnings)
     if failures:
         summary += "\n" + "\n".join(f"❌ {n}: {e}" for n, e in failures)
-    await q.edit_message_text(summary)
 
-    # Fresh message so the publish picker lands BELOW the delivered clips;
-    # the state follows it.
-    _pending.pop(q.message.message_id, None)
-    if not state["pairs"]:
+    # Everything below can fail on a network blip. If it does, the rendered
+    # files (and the downloaded source) must not be orphaned with no picker
+    # and no owner — clean up and surface an error instead of leaving them
+    # for the next restart's sweep to eventually find.
+    try:
+        await q.edit_message_text(summary)
+        if not state["pairs"]:
+            await q.message.chat.send_message(
+                "no destinations configured for the rendered brands "
+                "(BRAND_<NAME>_TG/YT/TW) — files above are yours, nothing to publish")
+            _pending.pop(q.message.message_id, None)
+            _cleanup(state)
+            return
+        # Fresh message so the publish picker lands BELOW the delivered clips.
+        # Sent BEFORE the old _pending entry is popped/reassigned, so a failed
+        # send here is caught below with the state (and its files) still
+        # intact to clean up, instead of orphaning everything silently.
+        prompt = await q.message.chat.send_message(
+            "Publish which?", reply_markup=branded.publish_keyboard(
+                state["pairs"], set()))
+    except Exception as exc:
+        log.error("brand publish-picker handoff failed: %s", exc)
+        _pending.pop(q.message.message_id, None)
         _cleanup(state)
-        await q.message.chat.send_message(
-            "no destinations configured for the rendered brands "
-            "(BRAND_<NAME>_TG/YT/TW) — files above are yours, nothing to publish")
+        try:
+            await q.message.chat.send_message(
+                f"❌ rendered but couldn't open the publish picker "
+                f"({str(exc)[:200]}) — temp files removed")
+        except Exception:
+            pass
         return
-    prompt = await q.message.chat.send_message(
-        "Publish which?", reply_markup=branded.publish_keyboard(state["pairs"],
-                                                                set()))
+
+    _pending.pop(q.message.message_id, None)
     _pending[prompt.message_id] = state
 
 
