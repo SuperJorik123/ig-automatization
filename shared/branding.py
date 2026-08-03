@@ -58,7 +58,10 @@ def _filter_graph(font_path: str, text_path: str) -> str:
         f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
         f"crop={OUT_W}:{OUT_H},gblur=sigma=30[bg];"
         f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[canvas];"
+        # setsar=1: the fit scales leave a fractional compensating SAR (e.g.
+        # 4321:4320) in the header, and players that honor it show the frame
+        # very slightly off-square. The canvas is the display shape; pin it.
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[canvas];"
         f"[1:v]scale={LOGO_W}:-1[logo];"
         f"[canvas][logo]overlay=W-w-{LOGO_MARGIN}:{LOGO_MARGIN}[branded];"
         f"[branded]drawtext=fontfile='{_ff_path(font_path)}'"

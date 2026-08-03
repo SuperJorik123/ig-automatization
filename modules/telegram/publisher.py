@@ -11,12 +11,14 @@ Telegram accepts a local path string or a file_id for photo=/video=/media=, so
 both shapes flow through `_ref` unchanged.
 """
 
+import asyncio
 import logging
 
 from telegram import InputMediaPhoto, InputMediaVideo
 
 from shared import config
 from modules.telegram import translator
+from modules.youtube import shorts_format
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +32,22 @@ CAPTION_LIMIT = 1024
 def _ref(m: dict):
     """The value to hand Telegram: a reusable file_id, else the local path."""
     return m.get("file_id") or m["path"]
+
+
+async def _vid_kwargs(m: dict) -> dict:
+    """width/height/duration for send_video. Without them Telegram clients lay
+    the inline player out from defaults and play the video visibly squashed —
+    the file itself is fine, only the playback box is wrong. Local uploads are
+    probed once (rotation-aware); file_id re-sends keep the dims Telegram
+    already stored, so they skip the probe. Best-effort: an unprobeable file
+    still gets sent, just without dims."""
+    if not m.get("file_id") and m.get("path") and not m.get("width"):
+        try:
+            w, h, dur = await asyncio.to_thread(shorts_format.probe, m["path"])
+            m.update(width=w, height=h, duration=int(dur))
+        except Exception as exc:
+            log.warning("video probe failed for %s: %s", m["path"], exc)
+    return {k: m[k] for k in ("width", "height", "duration") if m.get(k)}
 
 
 def _fit(text: str, has_media: bool) -> str:
@@ -55,14 +73,19 @@ async def _send(bot, chat_id, caption: str, media: list):
     if len(media) == 1:
         m = media[0]
         if m["type"] == "video":
-            return await bot.send_video(chat_id=chat_id, video=_ref(m), caption=caption or None)
+            return await bot.send_video(chat_id=chat_id, video=_ref(m),
+                                        caption=caption or None,
+                                        **await _vid_kwargs(m))
         return await bot.send_photo(chat_id=chat_id, photo=_ref(m), caption=caption or None)
     # Album: caption rides on the first item only.
     group = []
     for i, m in enumerate(media):
         cap = caption if i == 0 else None
-        cls = InputMediaVideo if m["type"] == "video" else InputMediaPhoto
-        group.append(cls(media=_ref(m), caption=cap))
+        if m["type"] == "video":
+            group.append(InputMediaVideo(media=_ref(m), caption=cap,
+                                         **await _vid_kwargs(m)))
+        else:
+            group.append(InputMediaPhoto(media=_ref(m), caption=cap))
     msgs = await bot.send_media_group(chat_id=chat_id, media=group)
     return msgs[0] if msgs else None
 

@@ -582,8 +582,13 @@ async def _do_render(q, context, state: dict) -> None:
                     "too big to send back; publishing still works)")
             else:
                 with open(path, "rb") as fh:
+                    # width/height matter: without them Telegram sizes the
+                    # inline player from defaults and plays the clip squashed.
                     await q.message.chat.send_video(video=fh,
-                                                    caption=f"🏷 {b['name']}")
+                                                    caption=f"🏷 {b['name']}",
+                                                    width=branding.OUT_W,
+                                                    height=branding.OUT_H,
+                                                    duration=int(duration))
         except Exception as exc:  # Telegram send only — the render already succeeded
             log.error("brand preview send failed for %s: %s", b["name"], exc)
             warnings.append((b["name"], str(exc)[:200]))
