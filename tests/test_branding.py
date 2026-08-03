@@ -27,11 +27,10 @@ def test_wrap_splits_on_word_boundaries():
     assert out.split("\n") == ["aaaa bbbb", "cccc dddd", "eeee ffff"]
 
 
-def test_wrap_defaults_cap_at_two_lines():
+def test_wrap_defaults_never_truncate():
     out = branding.wrap_headline("word " * 40)
-    lines = out.split("\n")
-    assert len(lines) == 2
-    assert lines[-1].endswith("…")
+    assert "…" not in out
+    assert out.replace("\n", " ") == ("word " * 40).strip()
 
 
 def test_wrap_truncates_beyond_max_lines_with_ellipsis():
@@ -60,10 +59,12 @@ def test_filter_graph_contains_fixed_design_constants():
     assert "gblur=sigma=30" in graph                       # blur-fill canvas
     assert "scale=180:-1[logo]" in graph                   # logo width
     assert "overlay=W-w-40:40" in graph                    # top-right margin
-    assert "fontsize=42" in graph
+    assert "fontsize=36" in graph
     assert "boxcolor=black@0.55" in graph
     assert "boxborderw=20" in graph
     assert "setsar=1" in graph                             # clean 1:1 SAR out
+    assert ":x=60:" in graph                               # left-aligned
+    assert "fade=t=out:st=10:d=1.5:alpha=1" in graph       # banner fade-out
     assert "y=h*0.72" in graph
     assert "textfile='/t/text.txt'" in graph               # never inline text
     assert "fontfile='/f/font.ttf'" in graph

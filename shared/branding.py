@@ -5,9 +5,10 @@ lower-third banner. One ffmpeg pass per call; pure — no Telegram, no network.
 The design is FIXED (same font, size, position every time): 1080x1920 canvas
 (blur-fill, the same treatment shorts_format gives horizontal videos — for an
 exact 9:16 input the background is simply invisible), logo scaled to 180 px
-wide with a 40 px top-right margin, headline centered at 72 % frame height —
-white bold 42 px, at most two tightly-spaced rows, on a translucent black
-box. The font ships in the repo
+wide with a 40 px top-right margin, headline left-aligned at 72 % frame
+height — white bold 36 px, tightly-spaced rows (as many as the text needs,
+never truncated), on a translucent black box that fades out smoothly after
+10 s. The font ships in the repo
 (assets/fonts/) so no system-font lookup can change the look.
 
 The headline reaches ffmpeg through drawtext's textfile= (a UTF-8 temp file):
@@ -27,22 +28,27 @@ FONT_PATH = os.path.join(_ROOT, "assets", "fonts", "DejaVuSans-Bold.ttf")
 OUT_W, OUT_H = 1080, 1920   # Shorts-safe vertical canvas
 LOGO_W = 180                # logo width, aspect kept
 LOGO_MARGIN = 40            # px from the top and right edges
-FONT_SIZE = 42
+FONT_SIZE = 36
 BOX_ALPHA = 0.55
 BOX_PAD = 20                # boxborderw
+TEXT_X = 60                 # left margin — the banner is left-aligned
 TEXT_Y = 0.72               # banner anchor, fraction of frame height
-LINE_WIDTH = 40             # ~chars per line at FONT_SIZE on a 1080 canvas
-MAX_LINES = 2
-LINE_SPACING = 10           # px between the two rows — tight, headline-style
+LINE_WIDTH = 44             # ~chars per line at FONT_SIZE on a 1080 canvas
+MAX_LINES = None            # no cap: a long headline gets more rows, never "…"
+LINE_SPACING = 10           # px between rows — tight, headline-style
+FADE_START = 10             # s the banner stays fully visible
+FADE_DUR = 1.5              # s of smooth fade-out after that
 
 
-def wrap_headline(text: str, width: int = LINE_WIDTH, max_lines: int = MAX_LINES) -> str:
+def wrap_headline(text: str, width: int = LINE_WIDTH,
+                  max_lines: int | None = MAX_LINES) -> str:
     """Pre-wrap for drawtext (it does no wrapping of its own). Whitespace is
-    collapsed, words wrap at `width`, anything past `max_lines` is cut with an
-    ellipsis — the font never shrinks, the design stays fixed."""
+    collapsed, words wrap at `width`. By default every word is kept — a long
+    headline just gets more rows; pass `max_lines` to cut with an ellipsis
+    instead."""
     text = " ".join((text or "").split())
     lines = textwrap.wrap(text, width=width, break_long_words=True)
-    if len(lines) > max_lines:
+    if max_lines and len(lines) > max_lines:
         lines = lines[:max_lines]
         lines[-1] = lines[-1][: width - 1].rstrip() + "…"
     return "\n".join(lines)
@@ -66,11 +72,19 @@ def _filter_graph(font_path: str, text_path: str) -> str:
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[canvas];"
         f"[1:v]scale={LOGO_W}:-1[logo];"
         f"[canvas][logo]overlay=W-w-{LOGO_MARGIN}:{LOGO_MARGIN}[branded];"
-        f"[branded]drawtext=fontfile='{_ff_path(font_path)}'"
+        # The banner lives on its own transparent layer: drawtext's alpha=
+        # fades the glyphs but not the box, so the layer is faded as a whole
+        # and text + box vanish together. The color source is unbounded —
+        # shortest=1 on the final overlay is what ends the render with the
+        # video; without it ffmpeg keeps producing frames forever.
+        f"color=black@0:size={OUT_W}x{OUT_H},format=rgba,"
+        f"drawtext=fontfile='{_ff_path(font_path)}'"
         f":textfile='{_ff_path(text_path)}'"
         f":fontcolor=white:fontsize={FONT_SIZE}:line_spacing={LINE_SPACING}"
         f":box=1:boxcolor=black@{BOX_ALPHA}:boxborderw={BOX_PAD}"
-        f":x=(w-text_w)/2:y=h*{TEXT_Y}"
+        f":x={TEXT_X}:y=h*{TEXT_Y},"
+        f"fade=t=out:st={FADE_START}:d={FADE_DUR}:alpha=1[banner];"
+        f"[branded][banner]overlay=0:0:shortest=1"
     )
 
 
