@@ -59,7 +59,7 @@ def test_filter_graph_contains_fixed_design_constants():
     assert "gblur=sigma=30" in graph                       # blur-fill canvas
     assert "scale=180:-1[logo]" in graph                   # logo width
     assert "overlay=W-w-40:40" in graph                    # top-right margin
-    assert "fontsize=36" in graph
+    assert "fontsize=41" in graph
     assert "boxcolor=black@0.55" in graph
     assert "boxborderw=20" in graph
     assert "setsar=1" in graph                             # clean 1:1 SAR out
