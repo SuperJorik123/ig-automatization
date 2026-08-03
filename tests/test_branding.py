@@ -63,7 +63,7 @@ def test_filter_graph_contains_fixed_design_constants():
     assert "boxcolor=black@0.55" in graph
     assert "boxborderw=20" in graph
     assert "setsar=1" in graph                             # clean 1:1 SAR out
-    assert ":x=60:" in graph                               # left-aligned
+    assert "x=(w-text_w)/2" in graph                       # box centered
     assert "fade=t=out:st=10:d=1.5:alpha=1" in graph       # banner fade-out
     assert "y=h*0.72" in graph
     assert "textfile='/t/text.txt'" in graph               # never inline text

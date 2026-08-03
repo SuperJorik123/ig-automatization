@@ -5,10 +5,10 @@ lower-third banner. One ffmpeg pass per call; pure — no Telegram, no network.
 The design is FIXED (same font, size, position every time): 1080x1920 canvas
 (blur-fill, the same treatment shorts_format gives horizontal videos — for an
 exact 9:16 input the background is simply invisible), logo scaled to 180 px
-wide with a 40 px top-right margin, headline left-aligned at 72 % frame
-height — white bold 36 px, tightly-spaced rows (as many as the text needs,
-never truncated), on a translucent black box that fades out smoothly after
-10 s. The font ships in the repo
+wide with a 40 px top-right margin, headline at 72 % frame height — white
+bold 36 px, tightly-spaced rows (as many as the text needs, never
+truncated), left-aligned inside a translucent black box that is centered
+on the frame and fades out smoothly after 10 s. The font ships in the repo
 (assets/fonts/) so no system-font lookup can change the look.
 
 The headline reaches ffmpeg through drawtext's textfile= (a UTF-8 temp file):
@@ -31,7 +31,6 @@ LOGO_MARGIN = 40            # px from the top and right edges
 FONT_SIZE = 36
 BOX_ALPHA = 0.55
 BOX_PAD = 20                # boxborderw
-TEXT_X = 60                 # left margin — the banner is left-aligned
 TEXT_Y = 0.72               # banner anchor, fraction of frame height
 LINE_WIDTH = 44             # ~chars per line at FONT_SIZE on a 1080 canvas
 MAX_LINES = None            # no cap: a long headline gets more rows, never "…"
@@ -81,8 +80,10 @@ def _filter_graph(font_path: str, text_path: str) -> str:
         f"drawtext=fontfile='{_ff_path(font_path)}'"
         f":textfile='{_ff_path(text_path)}'"
         f":fontcolor=white:fontsize={FONT_SIZE}:line_spacing={LINE_SPACING}"
+        # x centers the text BLOCK (text_w = widest row), so the box sits with
+        # equal margins left and right; rows stay left-aligned inside it.
         f":box=1:boxcolor=black@{BOX_ALPHA}:boxborderw={BOX_PAD}"
-        f":x={TEXT_X}:y=h*{TEXT_Y},"
+        f":x=(w-text_w)/2:y=h*{TEXT_Y},"
         f"fade=t=out:st={FADE_START}:d={FADE_DUR}:alpha=1[banner];"
         f"[branded][banner]overlay=0:0:shortest=1"
     )
