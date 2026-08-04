@@ -63,34 +63,55 @@ so it survives restarts and supports the existing per-channel mode.
 ## 3. Random / manual reaction amounts in the ask
 
 **Problem.** Reaction order quantity is always random (10–40, rolled per
-channel). The operator wants to choose an exact amount.
+channel). The operator wants exact, per-emoji amounts when they choose to.
 
-**Fix.** One new row in the ask keyboard: **🎲 Random · 25 · 50 · 100 ·
-250 · ✏️ Custom**, with the active choice marked. The amount is part of the
-ask's persisted state, and the state machine is shared, so autopilot asks
-gain the feature automatically.
+**Fix.** The ask opens on a **mode screen** with two buttons (plus Skip):
+**🎲 Random** and **✏️ Manual**. One ask per post covers all its channels;
+the existing "Per-channel…" navigation stays available in both modes.
 
-- State: `state["qty"]` — absent/`None` = random (old asks in SQLite lack
-  the key and therefore keep behaving as before), else a positive int
-  applied to **every** selected reaction on every channel.
-- `reduce` verbs: `qr` (random), `q25`/`q50`/`q100`/`q250` (presets) —
-  redraw; `qc` returns a new action `"custom"`: the caller sends a
-  **ForceReply** prompt ("Send the amount:") tied to the ask id, so the
-  operator's reply box opens automatically.
-- New reply handler in `news_bot`: a reply to that prompt parses a positive
-  int (clamped to 1..100000), writes it into the ask state in SQLite,
-  redraws the ask, and deletes the prompt. Non-numeric replies re-prompt.
-- Orders: `order_emoji` gains an optional `qty` param;
-  `apply_orders` passes `state["qty"]` when set, else the existing
-  `emoji_quantity()` roll per order.
+- **Random** → the emoji checkbox screen exactly as today → Apply → each
+  selected reaction ordered with the existing fresh 10–40 roll.
+- **Manual** → the same emoji screen, but tapping an emoji immediately
+  sends a **ForceReply** prompt ("How many ❤️?"). The operator types a
+  number; the ask redraws with the amount on the button (`❤️ ×100`).
+  They tap the next emoji, type its amount, … and press **Done** when
+  finished — every order then uses its typed amount. Tapping an already-
+  selected emoji deselects it and clears its amount.
+
+State and mechanics:
+
+- `state["amode"]`: absent = mode not chosen yet (ask renders the mode
+  screen) · `"random"` · `"manual"`. Old asks in SQLite lack the key but
+  are already past the mode screen; their verbs keep meaning random —
+  behavior unchanged.
+- `state["qty"]`: `{channel index (str) → {emoji index (str) → amount}}`,
+  manual mode only. In "all" mode a typed amount is written to every
+  channel at once (same rule as emoji toggles), so switching to
+  per-channel mode carries the amounts over as starting points.
+- `reduce`: toggling an emoji in manual mode returns a new action
+  (`"ask_qty"`, with the emoji index) instead of just redrawing — the
+  caller sends the ForceReply prompt. A new `set_qty` transition writes a
+  typed amount (clamped to 1..100000) into the state. In manual mode the
+  apply button reads **Done** and requires every selected emoji to have an
+  amount.
+- New reply handler in `news_bot`: replies to the ForceReply prompt are
+  routed to the pending (ask id, emoji) via an in-memory map, parsed as a
+  positive int, persisted to the ask state in SQLite, and the ask redraws;
+  the prompt message is deleted. Non-numeric replies re-prompt. A bot
+  restart orphans an open prompt — tapping the emoji again re-prompts, and
+  everything already typed is safe in SQLite.
+- Orders: `order_emoji` gains an optional `qty` param; `apply_orders`
+  passes the per-emoji amount in manual mode, else the existing
+  `emoji_quantity()` roll.
 
 ## Testing
 
 Offline as always (no Telegram / BulkFollows / network):
 
-- `reduce`/`orders_from`/`render` unit tests for the qty verbs, the custom
-  action, backward compatibility of qty-less states, and the manual-post
-  (`item_id=0`) rendering.
+- `reduce`/`orders_from`/`render` unit tests for the mode screen, the
+  manual flow (toggle → `ask_qty` action → `set_qty` → Done), amount
+  carry-over into per-channel mode, backward compatibility of `amode`-less
+  states, and the manual-post (`item_id=0`) rendering.
 - `download_photos` tested with a mocked `subprocess.run` (files staged on
   disk by the test), covering the 10-file cap, caption extraction, cookie
   flag presence/absence, and rename-onto-stub behavior.
@@ -101,4 +122,5 @@ Offline as always (no Telegram / BulkFollows / network):
 
 - Web dashboard / Telegram Mini App (separate future brainstorm).
 - Branding photos (gate stays video-only).
-- Per-emoji or per-channel amounts — one amount per ask.
+- Preset amount buttons (25/50/100/250) — superseded by the per-emoji
+  manual flow.
