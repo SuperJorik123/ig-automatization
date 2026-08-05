@@ -1,6 +1,6 @@
 # Photos from links, reactions for branded posts, manual reaction amounts
 
-Design approved in conversation on 2026-08-04. Four independent features in
+Design approved in conversation on 2026-08-04. Five independent features in
 the news bot, one spec because they ship together as one mini-project. The
 web-UI / Mini App direction was explicitly parked as a separate future
 project and is out of scope here.
@@ -104,7 +104,41 @@ State and mechanics:
   passes the per-emoji amount in manual mode, else the existing
   `emoji_quantity()` roll.
 
-## 4. Weekly control-group cleanup
+**Reaction delay.** Emoji orders are never placed immediately: they fire
+**20 minutes after the post went out** (`REACTION_DELAY_S`, default 1200),
+so a post doesn't get reactions the second it appears. Mechanics:
+
+- Applying an ask (or the manual picker's pre-selected emojis) writes the
+  orders into a new SQLite table (`queue_store`: link, service, quantity,
+  due-at = post time + delay) instead of calling BulkFollows directly.
+- A `news_bot` JobQueue job flushes due orders every minute; orders are
+  deleted only after a successful (or permanently failed) placement, so a
+  restart between apply and due time loses nothing.
+- If the operator answers the ask later than 20 minutes after the post,
+  the orders are already past due and fire on the next flush — effectively
+  immediately, as today.
+- The base per-post order and the every-5th channel order stay immediate —
+  the delay applies to the emoji reactions only.
+
+## 4. Twitter edge-trim before branding
+
+**Problem.** Videos downloaded from Twitter/X carry hairline artifacts on
+the left and right edges (~a few pixels each side, visible as thin lines
+once the clip is blown up on the branded canvas).
+
+**Fix.** `branding.render_branded` gains a `trim_edges` flag: when set, the
+input is cropped by **1.5 % of its width on each side** (`EDGE_TRIM =
+0.015`) before the existing fit/blur scaling — a slight zoom that removes
+the lines without visibly changing the framing. Height is untouched.
+
+- `news_bot` sets the flag for brand renders whose source was a
+  Twitter/X URL (the URL post state records its origin); Instagram and
+  Telegram-uploaded sources render exactly as today.
+- The crop happens once in the filter graph, feeding both the blur
+  background and the foreground, so the trimmed strip can't leak back in
+  from the blurred copy.
+
+## 5. Weekly control-group cleanup
 
 **Requirement.** Every week at 04:00 local time, all messages in the
 **control group** are deleted — including open pickers and unanswered
@@ -145,6 +179,11 @@ Offline as always (no Telegram / BulkFollows / network):
 - Cleanup: message-id tracking and the batch-delete/ask-closing logic
   tested against a stub bot object; the weekly schedule itself is a thin
   JobQueue registration.
+- Delay: scheduling writes rows with the right due-at, the flush places
+  only due orders and keeps future ones, and a simulated restart loses
+  nothing (all against the SQLite store with a mocked `smm`).
+- Edge-trim: filter graph contains the crop when `trim_edges` is set and
+  doesn't when not; the URL-origin plumbing from state to render call.
 
 ## Out of scope
 
