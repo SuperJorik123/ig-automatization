@@ -1,6 +1,6 @@
 # Photos from links, reactions for branded posts, manual reaction amounts
 
-Design approved in conversation on 2026-08-04. Three independent features in
+Design approved in conversation on 2026-08-04. Four independent features in
 the news bot, one spec because they ship together as one mini-project. The
 web-UI / Mini App direction was explicitly parked as a separate future
 project and is out of scope here.
@@ -104,6 +104,31 @@ State and mechanics:
   passes the per-emoji amount in manual mode, else the existing
   `emoji_quantity()` roll.
 
+## 4. Weekly control-group cleanup
+
+**Requirement.** Every week at 04:00 local time, all messages in the
+**control group** are deleted — including open pickers and unanswered
+reaction asks (those asks are closed as skipped). Destination channels are
+never touched.
+
+**Constraint.** The Bot API cannot list chat history, so the bot can only
+delete what it has recorded: every message it *sees* in the control group
+and every message it *sends* there gets its id written to a new SQLite
+table (`queue_store`), and the weekly job deletes exactly those ids.
+Messages posted while the bot was down are invisible to it and survive.
+
+- Tracking: incoming control-group updates are recorded in the message
+  handlers; outgoing messages are recorded via a small `track(msg)` helper
+  wrapped around every control-group send site in `news_bot`.
+- The job: a `news_bot` JobQueue weekly job (Mondays 04:00 local). It
+  closes any open asks as skipped, deletes the tracked messages in batches
+  of 100 (`bot.delete_messages`), tolerates per-message failures (already
+  deleted, too old for the bot's rights), and clears the table.
+- The bot needs the **"Delete messages" admin right** in the control group
+  to remove the operator's own messages; without it only the bot's own
+  recent (<48 h) messages are deletable — the job logs what it couldn't
+  delete and moves on.
+
 ## Testing
 
 Offline as always (no Telegram / BulkFollows / network):
@@ -117,6 +142,9 @@ Offline as always (no Telegram / BulkFollows / network):
   flag presence/absence, and rename-onto-stub behavior.
 - `_download_any` chain order tested with monkeypatched downloader
   functions.
+- Cleanup: message-id tracking and the batch-delete/ask-closing logic
+  tested against a stub bot object; the weekly schedule itself is a thin
+  JobQueue registration.
 
 ## Out of scope
 
