@@ -7,7 +7,8 @@ uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 
 # Instagram media fetcher
-yt-dlp>=2024.1.1
+yt-dlp>=2026.7.4      # older builds get "empty media response" on public IG reels
+gallery-dl>=1.27      # photo fallback for IG/Twitter links (shared/reel_downloader.py)
 
 # Telegram bots (IG trigger bot + news broadcaster). The [job-queue] extra
 # pulls in APScheduler — without it Application.job_queue is None and the
@@ -17,6 +18,8 @@ python-dotenv>=1.0
 
 # Telegram news modules (modules/telegram)
 telethon>=1.36        # MTProto user client — reads source channels (collector)
+qrcode>=7.4           # renders the --qr login code in the terminal (mtproto.py).
+                      # Optional: without it the login prints the raw tg:// URL.
 openai>=1.0           # OpenRouter translation (OpenAI-compatible client)
 requests>=2.31        # BulkFollows SMM panel orders (modules/telegram/smm.py)
 
@@ -26,6 +29,10 @@ google-auth-oauthlib>=1.2.0
 
 # Twitter/X poster (modules/twitter)
 tweepy>=4.14.0
+
+# Branded clips (shared/branding.py): reads the headline font's cmap so emoji
+# and keycaps the font can't draw are dropped instead of rendering as boxes.
+fonttools>=4.40
 
 # Tests (py -m pytest) — offline unit tests for the smart filter, the queue
 # store and the reaction ask.

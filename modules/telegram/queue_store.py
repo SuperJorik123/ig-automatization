@@ -120,6 +120,16 @@ def init() -> None:
                    target TEXT PRIMARY KEY,
                    posts  INTEGER NOT NULL DEFAULT 0)"""
         )
+        # Every message the bot sees or sends in the control group, for the
+        # weekly cleanup. The Bot API can't list chat history, so the bot can
+        # only ever delete what it recorded here.
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS group_messages(
+                   chat_id     TEXT NOT NULL,
+                   message_id  INTEGER NOT NULL,
+                   recorded_at TEXT NOT NULL,
+                   PRIMARY KEY(chat_id, message_id))"""
+        )
         # Added after the first release — ALTER only when the column is absent
         # so existing news.db files migrate without losing rows.
         cols = {r["name"] for r in c.execute("PRAGMA table_info(items)")}
@@ -388,3 +398,36 @@ def open_asks() -> list[dict]:
     with _conn() as c:
         rows = c.execute("SELECT * FROM asks WHERE status='open' ORDER BY id")
         return [_ask(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Control-group message tracking (weekly cleanup)                             #
+# --------------------------------------------------------------------------- #
+
+
+def track_group_message(chat_id, message_id: int) -> None:
+    """Remember one control-group message id for the weekly wipe. Idempotent."""
+    with _conn() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO group_messages(chat_id, message_id, recorded_at)"
+            " VALUES(?,?,?)",
+            (str(chat_id), message_id, _now()),
+        )
+
+
+def tracked_message_ids(chat_id) -> list[int]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT message_id FROM group_messages WHERE chat_id=?"
+            " ORDER BY message_id",
+            (str(chat_id),),
+        )
+        return [r["message_id"] for r in rows]
+
+
+def clear_group_messages(chat_id, message_ids: list[int]) -> None:
+    with _conn() as c:
+        c.executemany(
+            "DELETE FROM group_messages WHERE chat_id=? AND message_id=?",
+            [(str(chat_id), m) for m in message_ids],
+        )

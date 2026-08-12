@@ -23,6 +23,11 @@ load_dotenv(os.path.join(ROOT_DIR, ".env"))
 # holds archives. Both server.py and the platform posters read/write here.
 POSTS_DIR = os.path.join(ROOT_DIR, "posts")
 
+# Browser whose cookie jar gallery-dl may read for logged-in Instagram photo
+# downloads (e.g. "chrome"). Used ONLY by the photo fallback in
+# shared/reel_downloader.py; blank = anonymous requests.
+GALLERY_DL_COOKIES_BROWSER = os.environ.get("GALLERY_DL_COOKIES_BROWSER", "").strip()
+
 # Phone address for uiautomator2 / adb. WiFi-debugging IP:port is preferred;
 # the USB serial is the fallback so re-tethering still works if .env is wiped
 # or PHONE_ADDRESS is unset. Update PHONE_ADDRESS in .env when the IP drifts.
@@ -81,6 +86,16 @@ except ValueError:
 # Bots can't read other channels' history, so collection runs as your account.
 TELEGRAM_API_ID = os.environ.get("TELEGRAM_API_ID", "").strip()
 TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "").strip()
+
+# Big files in the news bot: reuse the MTProto credentials above to download
+# (and send back) videos past the Bot API's 20 MB download / 50 MB upload caps,
+# up to Telegram's own 2 GB. Needs a one-off login of its own session:
+#   py modules/telegram/mtproto.py --login
+# Set to 0 to stay on the Bot API alone (bigger clips then fail with a clear
+# error instead of being fetched). Ignored when API_ID/API_HASH are unset.
+TG_BIG_FILES = os.environ.get("TG_BIG_FILES", "1").strip().lower() not in (
+    "0", "false", "no", "off"
+)
 
 # Source channels the collector reads (comma-separated @usernames or numeric ids).
 # You must already be a member of each private one.

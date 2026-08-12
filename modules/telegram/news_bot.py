@@ -14,23 +14,34 @@ URL posts: drop an Instagram reel / Twitter-X status link instead of a file.
 The bot downloads the media via shared/reel_downloader (yt-dlp), then shows
 the same picker. Caption rule: any text you wrote around the URL wins; a
 bare-URL post uses the link's own caption — the picker says which one so you
-can check before posting. Because the file is local, URL posts skip the
-20 MB Bot-API limit on the YouTube leg.
+can check before posting. The file is local, so nothing has to be fetched.
 
 Brand-it: a single-video post (uploaded or URL) with BRANDS configured first
 asks "Post as-is / Brand it". Brand-it renders one variant per selected brand
 — brands/<name>/logo.png top-right, the caption as a translated lower-third
 headline (shared/branding.py) — sends each back here, then offers a publish
 picker of brand→TG/YT/X pairs (all off; YouTube hidden over 3 minutes).
-Nothing publishes without a selection. Telegram-uploaded sources keep the
-20 MB Bot-API download cap — bigger clips must come in as URLs.
+Nothing publishes without a selection.
 
 Caption edit: reply to any open picker message with new text to replace the
 caption before hitting "Post to selected".
 
-YouTube limitation: the Bot API cannot download files over 20 MB, so manual
-YouTube posting of Telegram-uploaded videos fails with a clear error for
-bigger ones. (URL posts and the collector → dispatcher path are unaffected.)
+Big files: posting to Telegram channels has never had a size limit (the bot
+re-sends the file_id, so the bytes never leave Telegram). Branding and the
+YouTube leg do need the file on disk, and the Bot API refuses to hand over
+anything past 20 MB. Those two go through the MTProto user client instead
+(modules/telegram/mtproto.py — up to 2 GB), which needs one login:
+
+    py modules/telegram/mtproto.py --login
+
+Without it the old 20 MB ceiling applies to those two legs, and the bot says
+so instead of failing vaguely.
+
+Weekly cleanup: every message the bot sees or sends in the control group is
+recorded (queue_store.group_messages), and Mondays at 04:00 local the group is
+wiped — open reaction asks closed as skipped, tracked messages deleted
+(modules/telegram/cleanup.py). Give the bot the "Delete messages" admin right
+or it can only remove its own recent ones. Destination channels are untouched.
 
 Autopilot: this process also hosts the Telegram drip
 (modules/telegram/autopilot.py) as a JobQueue job — every random 18-24 hours it
@@ -49,6 +60,7 @@ Run:  py modules/telegram/news_bot.py
 """
 
 import asyncio
+import datetime as dt
 import logging
 import os
 import sys
@@ -72,6 +84,8 @@ from telegram.ext import (  # noqa: E402
 from shared import config, reel_downloader  # noqa: E402
 from modules.telegram import (  # noqa: E402
     autopilot,
+    cleanup,
+    mtproto,
     publisher,
     queue_store,
     reactions,
@@ -103,12 +117,14 @@ if not config.TG_DESTINATIONS and not config.YT_DESTINATIONS:
         "YT_DESTINATIONS (yt_account:lang)"
     )
 
-# Bot API refuses get_file above this size; bigger videos can't be posted to
-# YouTube through the manual flow.
+# Bot API refuses get_file above this size. Past it we go through the MTProto
+# user client (modules/telegram/mtproto.py, up to 2 GB); these two constants
+# only decide WHICH transport is used, and are the hard ceiling when the user
+# client isn't logged in.
 _BOT_FILE_LIMIT = 20 * 1024 * 1024
 
-# Bot API refuses uploads above this; a bigger render is published normally
-# but can't be sent back into the group as a file.
+# Bot API refuses uploads above this; a bigger render goes back into the group
+# through the user client instead, and publishes either way.
 _BOT_UPLOAD_LIMIT = 50 * 1024 * 1024
 
 
@@ -140,16 +156,31 @@ _ALBUM_SETTLE_S = 1.5
 
 
 def _extract_media(msg):
-    """file_id + kind for a photo/video message, else None (text-only)."""
+    """file_id + kind for a photo/video message, else None (text-only).
+
+    chat_id/msg_id ride along because a Bot-API file_id is useless to the
+    MTProto user client that fetches oversized videos — it re-reads the
+    original message instead (see modules/telegram/mtproto.py)."""
+    src = {"chat_id": msg.chat_id, "msg_id": msg.message_id}
     if msg.photo:
-        return {"file_id": msg.photo[-1].file_id, "type": "photo"}
+        return {"file_id": msg.photo[-1].file_id, "type": "photo", **src}
     if msg.video:
         return {
             "file_id": msg.video.file_id,
             "type": "video",
             "file_size": msg.video.file_size or 0,
+            **src,
         }
     return None
+
+
+def _track(msg):
+    """Record a control-group message for the weekly cleanup (incoming AND
+    outgoing — the Bot API can't list history, so anything not recorded here
+    survives the wipe). Returns `msg` so send sites can wrap in place."""
+    if msg is not None and msg.chat.id == CHAT_ID:
+        queue_store.track_group_message(CHAT_ID, msg.message_id)
+    return msg
 
 
 def _has_video(media: list) -> bool:
@@ -222,7 +253,8 @@ async def _prompt(msg, text: str, media: list) -> None:
     """Reply to the news message with the channel picker."""
     state = {"text": text, "media": media, "files": [],
              "sel_tg": set(), "sel_yt": set(), "sel_em": set()}
-    prompt = await msg.reply_text(_prompt_text(state), reply_markup=_keyboard(state))
+    prompt = _track(await msg.reply_text(_prompt_text(state),
+                                         reply_markup=_keyboard(state)))
     _pending[prompt.message_id] = state
 
 
@@ -231,9 +263,9 @@ async def _gate(msg, text: str, media: list, files: list | None = None) -> None:
     opening any picker. State is the same _pending dict, mode-tagged."""
     state = {"text": text, "media": media, "files": list(files or ()),
              "sel_tg": set(), "sel_yt": set(), "sel_em": set(), "mode": "gate"}
-    prompt = await msg.reply_text(
+    prompt = _track(await msg.reply_text(
         "Brand this clip, or post it as-is?" + (f"\n\n📝 {text}" if text else ""),
-        reply_markup=branded.gate_keyboard())
+        reply_markup=branded.gate_keyboard()))
     _pending[prompt.message_id] = state
 
 
@@ -245,21 +277,6 @@ def _cleanup(state: dict) -> None:
             os.remove(path)
         except OSError:
             pass
-
-
-def _download_any(url: str, dest_path: str) -> tuple[str, str]:
-    """download_media, video-first: a URL doesn't say whether it holds a video
-    or a photo, so try the mp4-steered "reel" mode and fall back to "post"
-    (best format, typically a jpg). When both fail the FIRST error is
-    re-raised — it names the real problem (login gate, dead link); the
-    fallback's usually just repeats it."""
-    try:
-        return reel_downloader.download_media(url, dest_path, kind="reel")
-    except RuntimeError as exc:
-        try:
-            return reel_downloader.download_media(url, dest_path, kind="post")
-        except RuntimeError:
-            raise exc
 
 
 async def _handle_url(msg, text: str) -> None:
@@ -276,23 +293,30 @@ async def _handle_url(msg, text: str) -> None:
         end += 1
     user_text = (text[:start] + text[end:]).strip()
 
-    note = await msg.reply_text("⏳ downloading …")
+    note = _track(await msg.reply_text("⏳ downloading …"))
     dest = os.path.join(config.TG_DATA_DIR, "media", f"manual_url_{msg.message_id}.mp4")
     try:
-        # yt-dlp is blocking — keep the event loop free.
-        path, link_caption = await asyncio.to_thread(_download_any, url, dest)
+        # yt-dlp / gallery-dl are blocking — keep the event loop free.
+        paths, link_caption = await asyncio.to_thread(
+            reel_downloader.download_any, url, dest)
     except Exception as exc:
         log.error("URL download failed for %s: %s", url, exc)
         await note.edit_text(f"❌ download failed: {str(exc)[:300]}")
         return
 
-    ext = os.path.splitext(path)[1].lower()
-    is_video = ext in _VIDEO_EXTS
+    is_video = (len(paths) == 1
+                and os.path.splitext(paths[0])[1].lower() in _VIDEO_EXTS)
     state = {
         "text": user_text or link_caption,
         "cap_src": "your text" if user_text else "from link",
-        "media": [{"path": path, "type": "video" if is_video else "photo"}],
-        "files": [path],
+        # One media item per file: a photo carousel becomes a Telegram album
+        # via the existing publisher album path.
+        "media": [{"path": p, "type": "video" if is_video else "photo"}
+                  for p in paths],
+        "files": list(paths),
+        # Twitter clips carry hairline edge artifacts; the brand render reads
+        # this to decide the edge-trim.
+        "origin": "twitter" if reel_downloader.is_twitter_url(url) else "instagram",
         "sel_tg": set(),
         "sel_yt": set(),
         "sel_em": set(),
@@ -324,6 +348,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     msg = update.effective_message
     if msg is None:
         return
+    _track(msg)  # the operator's own messages get wiped weekly too
     text = msg.caption or msg.text or ""
 
     # Reply to an open picker = replace that post's caption (any post type).
@@ -381,46 +406,73 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     entry["task"] = asyncio.create_task(_flush_album(gid))
 
 
+def _too_big_error(size: int) -> str:
+    """Message for a video neither transport can fetch."""
+    return (f"video is {mtproto.human_size(size)} and the Bot API caps "
+            f"downloads at 20 MB — {mtproto.unavailable_reason()}. "
+            f"Or post the clip as a URL instead.")
+
+
+async def _fetch_video(bot, video: dict, dest_stem: str) -> str:
+    """Local path of a post's video, downloading it if it only exists on
+    Telegram. Returns the real path (the extension comes from the source).
+
+    Transport order: a URL post is already on disk; anything the user client
+    can reach comes down through MTProto at up to 2 GB; the Bot API's 20 MB
+    `get_file` is the fallback for when that client isn't logged in."""
+    if video.get("path"):  # URL post — nothing to fetch
+        return video["path"]
+
+    size = video.get("file_size") or 0
+    if video.get("msg_id") and await mtproto.ensure_ready():
+        try:
+            return await mtproto.download(video["chat_id"], video["msg_id"],
+                                          dest_stem)
+        except Exception as exc:
+            # Small files can still go the Bot-API way; big ones are stuck, and
+            # the raise below names the real reason.
+            log.warning("MTProto download failed (%s) — falling back to the "
+                        "Bot API", exc)
+            if size > _BOT_FILE_LIMIT:
+                raise RuntimeError(f"big-file download failed: {exc}") from exc
+
+    if size > _BOT_FILE_LIMIT:
+        raise RuntimeError(_too_big_error(size))
+    path = dest_stem + ".mp4"
+    tg_file = await bot.get_file(video["file_id"])
+    await tg_file.download_to_drive(path)
+    return path
+
+
 async def _post_to_youtube(bot, text: str, media: list, dests: list):
     """Upload the post's video as a Short to each selected YouTube channel
     (translated per channel). URL posts already have the file on disk; a
-    Telegram-uploaded video is downloaded first (≤20 MB — Bot API cap).
+    Telegram-uploaded video is fetched first — see _fetch_video.
     Returns the same (posted, errors) shape as the Telegram publisher."""
     video = next((m for m in media if m["type"] == "video"), None)
     if video is None:
         return [], [(d["chat_id"], "post has no video") for d in dests]
 
-    if video.get("path"):  # URL post — local file, no Bot-API size cap
-        try:
-            return await asyncio.to_thread(
-                yt_publisher.publish_shorts, video["path"], text, dests
-            )
-        except Exception as exc:  # translator/network failure surfacing raw
-            log.error("manual YouTube post failed: %s", exc)
-            return [], [(d["chat_id"], str(exc)) for d in dests]
-
-    size = video.get("file_size") or 0
-    if size > _BOT_FILE_LIMIT:
-        err = f"video too large for manual posting ({size / 1024 / 1024:.0f} MB > 20 MB limit)"
-        return [], [(d["chat_id"], err) for d in dests]
-
     dl_dir = os.path.join(config.TG_DATA_DIR, "media")
     os.makedirs(dl_dir, exist_ok=True)
     # file_id chars are filename-safe (base64url alphabet); last chars suffice.
-    path = os.path.join(dl_dir, f"manual_{video['file_id'][-24:]}.mp4")
+    stem = os.path.join(dl_dir, f"manual_{video['file_id'][-24:]}")
+    path = None
     try:
-        tg_file = await bot.get_file(video["file_id"])
-        await tg_file.download_to_drive(path)
+        path = await _fetch_video(bot, video, stem)
         # Uploads are blocking network calls — keep the bot's event loop free.
         return await asyncio.to_thread(yt_publisher.publish_shorts, path, text, dests)
-    except Exception as exc:  # get_file size refusal, network, ...
+    except Exception as exc:  # download refusal, network, ...
         log.error("manual YouTube post failed: %s", exc)
         return [], [(d["chat_id"], str(exc)) for d in dests]
     finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        # Only a file WE downloaded gets removed — a URL post's file belongs to
+        # the picker state and is cleaned up with it.
+        if path and path != video.get("path"):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -438,16 +490,17 @@ def _brand_prompt_text(state: dict) -> str:
 
 
 async def _ensure_local_video(bot, state: dict) -> str:
-    """Local path of the source video, downloading Telegram-uploaded ones
-    (≤ 20 MB — checked at the gate). URL posts already have a path."""
+    """Local path of the source video, downloading Telegram-uploaded ones (the
+    gate already checked a transport can carry it). URL posts have a path
+    already. The download is memoised on the media dict so a second render
+    doesn't re-fetch a gigabyte."""
     video = next(m for m in state["media"] if m["type"] == "video")
     if video.get("path"):
         return video["path"]
     dl_dir = os.path.join(config.TG_DATA_DIR, "media")
     os.makedirs(dl_dir, exist_ok=True)
-    path = os.path.join(dl_dir, f"brand_src_{video['file_id'][-24:]}.mp4")
-    tg_file = await bot.get_file(video["file_id"])
-    await tg_file.download_to_drive(path)
+    stem = os.path.join(dl_dir, f"brand_src_{video['file_id'][-24:]}")
+    path = await _fetch_video(bot, video, stem)
     video["path"] = path
     state["files"].append(path)
     return path
@@ -468,12 +521,14 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         return
 
     if verb == "brand":
+        # Fail here, on the tap, rather than after a minute of rendering setup.
         video = next((m for m in state["media"] if m["type"] == "video"), None)
-        if video and not video.get("path") \
-                and (video.get("file_size") or 0) > _BOT_FILE_LIMIT:
-            await q.answer(
-                "Video too large to brand (20 MB Bot API cap) — post the "
-                "clip as a link instead.", show_alert=True)
+        size = (video or {}).get("file_size") or 0
+        if video and not video.get("path") and size > _BOT_FILE_LIMIT \
+                and not await mtproto.ensure_ready():
+            # answerCallbackQuery caps its text at 200 chars.
+            await q.answer(("Too large to brand: " + _too_big_error(size))[:200],
+                           show_alert=True)
             return
         await q.answer()
         state["mode"] = "brand"
@@ -576,19 +631,28 @@ async def _do_render(q, context, state: dict) -> None:
         renders.append({"brand": b, "path": path, "headline": cache[lang]})
         try:
             size = os.path.getsize(path)
-            if size > _BOT_UPLOAD_LIMIT:
-                await q.message.chat.send_message(
-                    f"🏷 {b['name']}: rendered ({size / 1024 / 1024:.0f} MB — "
-                    "too big to send back; publishing still works)")
+            if size > _BOT_UPLOAD_LIMIT and await mtproto.ensure_ready():
+                # Past the Bot API's 50 MB upload cap the preview comes from
+                # your own account instead — the clip still lands in the group.
+                # Not _track()ed: it's a Telethon message, and the weekly wipe
+                # deletes through the BOT, which can't remove your own posts.
+                await mtproto.send_video(q.message.chat.id, path,
+                                         f"🏷 {b['name']}",
+                                         branding.OUT_W, branding.OUT_H,
+                                         int(duration))
+            elif size > _BOT_UPLOAD_LIMIT:
+                _track(await q.message.chat.send_message(
+                    f"🏷 {b['name']}: rendered ({mtproto.human_size(size)} — "
+                    f"too big to send back, {mtproto.unavailable_reason()}; "
+                    "publishing still works)"))
             else:
                 with open(path, "rb") as fh:
                     # width/height matter: without them Telegram sizes the
                     # inline player from defaults and plays the clip squashed.
-                    await q.message.chat.send_video(video=fh,
-                                                    caption=f"🏷 {b['name']}",
-                                                    width=branding.OUT_W,
-                                                    height=branding.OUT_H,
-                                                    duration=int(duration))
+                    _track(await q.message.chat.send_video(
+                        video=fh, caption=f"🏷 {b['name']}",
+                        width=branding.OUT_W, height=branding.OUT_H,
+                        duration=int(duration)))
         except Exception as exc:  # Telegram send only — the render already succeeded
             log.error("brand preview send failed for %s: %s", b["name"], exc)
             warnings.append((b["name"], str(exc)[:200]))
@@ -620,9 +684,9 @@ async def _do_render(q, context, state: dict) -> None:
     try:
         await q.edit_message_text(summary)
         if not state["pairs"]:
-            await q.message.chat.send_message(
+            _track(await q.message.chat.send_message(
                 "no destinations configured for the rendered brands "
-                "(BRAND_<NAME>_TG/YT/TW) — files above are yours, nothing to publish")
+                "(BRAND_<NAME>_TG/YT/TW) — files above are yours, nothing to publish"))
             _pending.pop(q.message.message_id, None)
             _cleanup(state)
             return
@@ -630,17 +694,17 @@ async def _do_render(q, context, state: dict) -> None:
         # Sent BEFORE the old _pending entry is popped/reassigned, so a failed
         # send here is caught below with the state (and its files) still
         # intact to clean up, instead of orphaning everything silently.
-        prompt = await q.message.chat.send_message(
+        prompt = _track(await q.message.chat.send_message(
             "Publish which?", reply_markup=branded.publish_keyboard(
-                state["pairs"], set()))
+                state["pairs"], set())))
     except Exception as exc:
         log.error("brand publish-picker handoff failed: %s", exc)
         _pending.pop(q.message.message_id, None)
         _cleanup(state)
         try:
-            await q.message.chat.send_message(
+            _track(await q.message.chat.send_message(
                 f"❌ rendered but couldn't open the publish picker "
-                f"({str(exc)[:200]}) — temp files removed")
+                f"({str(exc)[:200]}) — temp files removed"))
         except Exception:
             pass
         return
@@ -759,6 +823,9 @@ async def _on_ask_callback(q, context) -> None:
 
 async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/queue — what the smart filter is holding and what goes out next."""
+    # Commands bypass on_message (~filters.COMMAND), so each one tracks its own
+    # trigger message for the weekly wipe.
+    _track(update.effective_message)
     counts = queue_store.counts()
     # compare=False: a status command shouldn't burn a model call. The real
     # pick is made head-to-head at post time, so this is the front-runner.
@@ -782,35 +849,38 @@ async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     open_n = len(queue_store.open_asks())
     if open_n:
         lines.append(f"\n🎛 {open_n} reaction ask(s) waiting — /asks")
-    await update.effective_message.reply_text("\n".join(lines))
+    _track(await update.effective_message.reply_text("\n".join(lines)))
 
 
 async def cmd_autopilot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/autopilot [on|off] — pause or resume the drip without a restart."""
+    _track(update.effective_message)
     arg = (context.args[0].lower() if context.args else "")
     if arg in ("on", "off"):
         autopilot.set_enabled(arg == "on")
-    await update.effective_message.reply_text(
+    _track(await update.effective_message.reply_text(
         f"autopilot is {'on' if autopilot.is_enabled() else 'paused'}"
         + ("" if arg in ("on", "off") else "  (use /autopilot on|off to change)")
-    )
+    ))
 
 
 async def cmd_asks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/asks — re-render every unanswered reaction ask, including any whose
     message never made it out because the bot died mid-tick."""
+    _track(update.effective_message)
     asks = queue_store.open_asks()
     if not asks:
-        await update.effective_message.reply_text("no open reaction asks")
+        _track(await update.effective_message.reply_text("no open reaction asks"))
         return
     for ask in asks:
         await autopilot.refresh_ask(context.bot, ask)
-    await update.effective_message.reply_text(f"re-sent {len(asks)} open ask(s)")
+    _track(await update.effective_message.reply_text(f"re-sent {len(asks)} open ask(s)"))
 
 
 async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/next — run one drip right now. The scheduled tick is untouched."""
-    msg = await update.effective_message.reply_text("⏳ running one drip …")
+    _track(update.effective_message)
+    msg = _track(await update.effective_message.reply_text("⏳ running one drip …"))
     await msg.edit_text(await autopilot.tick(context.bot))
 
 
@@ -931,22 +1001,57 @@ def _sweep_orphans() -> None:
     if not os.path.isdir(dl_dir):
         return
     for name in os.listdir(dl_dir):
-        if name.startswith(("manual_url_", "brand_")):
+        if name.startswith(("manual_", "brand_")):
             try:
                 os.remove(os.path.join(dl_dir, name))
             except OSError:
                 pass
 
 
+async def _weekly_cleanup_job(context) -> None:
+    """Mondays 04:00 local: wipe the control group (tracked messages + open
+    asks). Needs the "Delete messages" admin right for the operator's own
+    messages."""
+    try:
+        deleted, failed = await cleanup.wipe_chat(context.bot, CHAT_ID)
+        log.info("weekly cleanup: %d deleted, %d failed", deleted, failed)
+    except Exception:
+        log.exception("weekly cleanup crashed — next Monday retries")
+
+
 async def _on_start(app) -> None:
-    """Queue the autopilot's first tick once the event loop is running."""
+    """Queue the autopilot's first tick once the event loop is running, register
+    the weekly cleanup, and connect the big-file client so its state is known
+    (and logged) before the first post rather than discovered mid-upload."""
     autopilot.schedule(app)
+    if app.job_queue is not None:
+        # A tz-aware time is required for "local" — a naive one is read as UTC.
+        # See cleanup.MONDAY for the day-index trap.
+        local_tz = dt.datetime.now().astimezone().tzinfo
+        app.job_queue.run_daily(_weekly_cleanup_job,
+                                time=dt.time(4, 0, tzinfo=local_tz),
+                                days=(cleanup.MONDAY,), name="weekly-cleanup")
+        log.info("weekly control-group cleanup scheduled: Mondays 04:00 %s", local_tz)
+    else:
+        log.warning("no job queue — weekly cleanup NOT scheduled "
+                    "(install python-telegram-bot[job-queue])")
+    if await mtproto.ensure_ready():
+        log.info("big files: on — videos up to 2 GB can be branded and sent to YouTube")
+    else:
+        log.info("big files: off (%s) — videos over 20 MB can only be posted "
+                 "to Telegram channels", mtproto.unavailable_reason())
+
+
+async def _on_shutdown(app) -> None:
+    """Release the Telethon session file on the way out."""
+    await mtproto.close()
 
 
 def main() -> None:
     _sweep_orphans()
     queue_store.init()  # the autopilot reads/writes the same DB as the collector
-    app = Application.builder().token(config.NEWS_BOT_TOKEN).post_init(_on_start).build()
+    app = (Application.builder().token(config.NEWS_BOT_TOKEN)
+           .post_init(_on_start).post_shutdown(_on_shutdown).build())
     control = filters.Chat(CHAT_ID)
     app.add_handler(CommandHandler("queue", cmd_queue, filters=control))
     app.add_handler(CommandHandler("autopilot", cmd_autopilot, filters=control))

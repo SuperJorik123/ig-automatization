@@ -151,6 +151,8 @@ async def deliver_ask(bot, ask_id: int, state: dict) -> None:
     except Exception as exc:
         log.error("could not send reaction ask %d: %s", ask_id, exc)
         return
+    # Ask messages count for the weekly control-group wipe too.
+    queue_store.track_group_message(ask_chat_id(), msg.message_id)
     queue_store.bind_ask(ask_id, ask_chat_id(), msg.message_id)
 
 

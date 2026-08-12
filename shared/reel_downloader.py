@@ -8,10 +8,19 @@ directly, returns a CDN URL on fbcdn.net, and streams the MP4 from
 there. No third-party scraper, no client token to harvest, no Selenium.
 """
 
+import json
+import logging
 import os
 import re
+import shutil
+import subprocess
+import sys
 
 import yt_dlp
+
+from shared import config
+
+log = logging.getLogger(__name__)
 
 
 # IG URLs look like https://www.instagram.com/{reel,reels,p,tv}/<shortcode>/...
@@ -83,7 +92,14 @@ def download_media(url: str, dest_path: str, kind: str = "reel") -> tuple[str, s
             info = ydl.extract_info(url, download=True)
             path = ydl.prepare_filename(info)
     except yt_dlp.utils.DownloadError as exc:
-        raise RuntimeError(f"yt-dlp failed for {url!r}: {exc}") from exc
+        hint = ""
+        # IG breaks yt-dlp's extractor every few months and the resulting
+        # "empty media response" reads like a login gate even on public
+        # reels — say so, the fix is an upgrade, not cookies.
+        if "empty media response" in str(exc):
+            hint = (" — if the post IS public in a logged-out browser, yt-dlp "
+                    "is outdated: py -m pip install -U yt-dlp, then restart the bot")
+        raise RuntimeError(f"yt-dlp failed for {url!r}: {exc}{hint}") from exc
     if not os.path.exists(path):
         raise RuntimeError(f"yt-dlp returned success but file missing: {path}")
     caption = (info.get("description") or "").strip()
@@ -101,3 +117,99 @@ def download_media(url: str, dest_path: str, kind: str = "reel") -> tuple[str, s
 def download_reel(url: str, dest_path: str) -> str:
     path, _caption = download_media(url, dest_path, kind="reel")
     return path
+
+
+# Telegram albums cap at 10 items; extra carousel photos are dropped (logged).
+MAX_PHOTOS = 10
+
+# gallery-dl is invoked as a module, not as the `gallery-dl` console script:
+# pip's Scripts/ dir isn't on PATH on this machine, so the bare name fails.
+GALLERY_DL_CMD = [sys.executable, "-m", "gallery_dl"]
+
+
+def download_photos(url: str, dest_stub: str) -> tuple[list[str], str]:
+    """Photo fallback via the gallery-dl CLI — handles IG photo posts (which
+    yt-dlp can't, login-gated) and photo-only tweets. Downloads into a
+    per-call temp dir next to `dest_stub`, then renames onto
+    `<stub>_1.jpg`-style names so the caller's cleanup conventions (the
+    manual_url_* sweep) keep working.
+
+    Cookies: with GALLERY_DL_COOKIES_BROWSER set (e.g. "chrome"), gallery-dl
+    reads that browser's logged-in Instagram session; blank = anonymous.
+
+    Returns (absolute photo paths, caption). Caption is best-effort from
+    gallery-dl's metadata sidecars — empty string when absent. Raises
+    RuntimeError when gallery-dl is missing or nothing was downloaded."""
+    dest_dir = os.path.dirname(dest_stub) or "."
+    os.makedirs(dest_dir, exist_ok=True)
+    stem, _ = os.path.splitext(dest_stub)
+    tmp_dir = stem + "_gdl"
+
+    cmd = GALLERY_DL_CMD + ["-D", tmp_dir, "--write-info-json", url]
+    if config.GALLERY_DL_COOKIES_BROWSER:
+        i = len(GALLERY_DL_CMD)
+        cmd[i:i] = ["--cookies-from-browser", config.GALLERY_DL_COOKIES_BROWSER]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "gallery-dl is not installed (py -m pip install gallery-dl)"
+        ) from exc
+
+    try:
+        names = sorted(os.listdir(tmp_dir)) if os.path.isdir(tmp_dir) else []
+        images = [n for n in names if not n.endswith(".json")]
+
+        caption = ""
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(tmp_dir, name), encoding="utf-8") as fh:
+                    meta = json.load(fh)
+                # IG calls it description, Twitter content — take whichever.
+                caption = (meta.get("description") or meta.get("content") or "").strip()
+            except (OSError, ValueError):
+                continue
+            if caption:
+                break
+
+        if not images:
+            tail = (proc.stderr or "").strip()[-300:]
+            raise RuntimeError(f"gallery-dl found no media for {url!r}: {tail}")
+
+        if len(images) > MAX_PHOTOS:
+            log.warning("carousel has %d photos — keeping the first %d "
+                        "(Telegram album cap)", len(images), MAX_PHOTOS)
+        paths = []
+        for i, name in enumerate(images[:MAX_PHOTOS], start=1):
+            ext = os.path.splitext(name)[1] or ".jpg"
+            target = f"{stem}_{i}{ext}"
+            os.replace(os.path.join(tmp_dir, name), target)
+            paths.append(os.path.abspath(target))
+        return paths, caption
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def download_any(url: str, dest_stub: str) -> tuple[list[str], str]:
+    """Everything-downloader, video-first: yt-dlp "reel" (mp4-steered) →
+    yt-dlp "post" (best format) → gallery-dl photos. A URL doesn't say what
+    it holds, so the chain just tries in order of likelihood. When every
+    stage fails the FIRST yt-dlp error is re-raised — it names the real
+    problem (login gate, dead link); the fallbacks usually just repeat it.
+
+    Returns (paths, caption): one path for a video, up to MAX_PHOTOS for a
+    photo carousel."""
+    try:
+        path, caption = download_media(url, dest_stub, kind="reel")
+        return [path], caption
+    except RuntimeError as first:
+        try:
+            path, caption = download_media(url, dest_stub, kind="post")
+            return [path], caption
+        except RuntimeError:
+            try:
+                return download_photos(url, dest_stub)
+            except RuntimeError:
+                raise first

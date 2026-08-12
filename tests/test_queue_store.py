@@ -176,3 +176,22 @@ def test_init_is_idempotent(store):
     item_id = add(store)
     store.init()
     assert store.get_item(item_id) is not None
+
+
+# --- control-group message tracking -----------------------------------------
+
+def test_track_and_clear_group_messages(store):
+    store.track_group_message("-100777", 5)
+    store.track_group_message("-100777", 3)
+    store.track_group_message("-100777", 3)      # duplicate — idempotent
+    store.track_group_message("-100999", 8)      # different chat
+
+    assert store.tracked_message_ids("-100777") == [3, 5]
+    store.clear_group_messages("-100777", [3])
+    assert store.tracked_message_ids("-100777") == [5]
+    assert store.tracked_message_ids("-100999") == [8]
+
+
+def test_track_group_message_accepts_int_chat_id(store):
+    store.track_group_message(-100777, 12)
+    assert store.tracked_message_ids("-100777") == [12]
