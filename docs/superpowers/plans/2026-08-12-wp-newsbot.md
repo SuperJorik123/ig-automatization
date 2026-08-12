@@ -91,7 +91,7 @@ Python 3.11+, python-telegram-bot v20 (JobQueue), `requests` (WP REST + BulkFoll
 **Interfaces:**
 - Produces: `config.NR_SITES: list[dict]` — one entry per site, loaded from `modules/newsroom/sites/*.json`; `config.NR_BOT_TOKEN`, `NR_BULKFOLLOWS_API_KEY`, `NR_BULKFOLLOWS_API_URL`, `NR_POLL_S`, `NR_DRY_RUN`, `NR_REACTION_DELAY_S`, `NR_DATA_DIR`, `NR_BACKFILL`.
 
-- [ ] **Step 1: Site config shape**
+- [x] **Step 1: Site config shape**
 
 Create `modules/newsroom/sites/example.json`:
 
@@ -117,7 +117,7 @@ Every knob that could plausibly differ per client channel is per site, **includi
 
 The real site files are committed alongside (they are configuration, not secrets — all keys live in `.env`). If the client's channel list must stay out of git, add `modules/newsroom/sites/*.json` to `.gitignore` with `!example.json` and document it in `START.md` instead.
 
-- [ ] **Step 2: Config block**
+- [x] **Step 2: Config block**
 
 Append to `shared/config.py`, after the autopilot block:
 
@@ -131,7 +131,7 @@ with, in order: `NR_DATA_DIR` (`<root>/modules/newsroom/data`), `NR_BOT_TOKEN`, 
 
 `_load_sites()` reads every `*.json` under `modules/newsroom/sites/` except `example.json`, skips `enabled: false`, and fills defaults for missing keys. It must **never raise on a malformed file** — log the filename and skip it, the same way `_int_env` swallows a bad tuning knob. One typo in site #4 must not stop the other six from posting.
 
-- [ ] **Step 3: Tests**
+- [x] **Step 3: Tests**
 
 `tests/test_newsroom_config.py`: `_load_sites` on a tmp dir — defaults filled, `enabled: false` skipped, malformed JSON skipped not raised, `example.json` ignored.
 
@@ -148,7 +148,7 @@ Run: `py -m pytest tests/test_newsroom_config.py -q`
 **Interfaces:**
 - `init()`, `seen_ids(site) -> set[int]`, `add_article(...) -> int|None`, `pending(site) -> list[Row]`, `mark(article_id, status)`, `record_post(article_id, site, chat_id, message_id, link) -> int`, `bump_channel_posts(chat_id) -> int`, `record_order(post_id, kind, service, quantity, result)`, `recent_posts(chat_id, n)`.
 
-- [ ] **Step 1: Schema**
+- [x] **Step 1: Schema**
 
 ```sql
 articles(id, site, wp_id, url, title, body, media_url, media_type,
@@ -165,11 +165,11 @@ Two things this schema exists to guarantee:
 1. **`UNIQUE(site, wp_id)` is the duplicate guard**, keyed on WordPress's own post id — not the URL (slugs get edited), not the title (republished posts reuse them). Re-inserting a seen article is a no-op, so a poll that overlaps a previous poll is free.
 2. **`orders` is written before the panel call and updated after.** `smm.place_order` never raises by design, which means a failed order is otherwise invisible; this table is both the crash-recovery record and the replay list when the panel is down.
 
-- [ ] **Step 2: `init()` migrates in place**
+- [x] **Step 2: `init()` migrates in place**
 
 Same contract as `queue_store.init()` — `CREATE TABLE IF NOT EXISTS` plus additive `ALTER TABLE` guarded by a column check. Safe on every startup.
 
-- [ ] **Step 3: Tests**
+- [x] **Step 3: Tests**
 
 Point `config.NR_DATA_DIR` at `tmp_path`. Cover: double-insert of the same `(site, wp_id)` returns None the second time; `bump_channel_posts` counts per chat_id independently (**the every-5th trigger must not leak across the 7 channels** — this is the single easiest thing to get wrong here); `init()` twice is a no-op.
 
@@ -184,7 +184,7 @@ Point `config.NR_DATA_DIR` at `tmp_path`. Cover: double-insert of the same `(sit
 **Interfaces:**
 - `fetch_recent(site: dict, limit: int = 20) -> list[dict]` — normalised `{wp_id, url, title, body, media_url, media_type, published_at}`. Raises `RuntimeError` on HTTP/parse failure (caller logs and skips that site this tick).
 
-- [ ] **Step 1: The request**
+- [x] **Step 1: The request**
 
 ```
 GET {wp_base}/posts?per_page=20&orderby=date&order=desc&status=publish&_embed
@@ -194,13 +194,13 @@ GET {wp_base}/posts?per_page=20&orderby=date&order=desc&status=publish&_embed
 
 **Do not use `?after=<watermark>`.** WordPress allows backdated posts, and scheduled posts appear at their scheduled time; either can land *behind* a date watermark and be skipped forever. Fetching the last 20 every tick and filtering against `seen_ids()` cannot miss anything and costs one request.
 
-- [ ] **Step 2: Normalisation**
+- [x] **Step 2: Normalisation**
 
 - `title.rendered` and `excerpt.rendered` / `content.rendered` arrive as **HTML with entities** (`&#8217;`, `<p>`, `&nbsp;`). Strip tags and unescape entities before the text ever reaches the LLM or Telegram.
 - Featured media: `_embedded["wp:featuredmedia"][0]["source_url"]`, with `media_type` from the mime type. **Every level of that path can be missing** — a post with no featured image is normal, not an error; it becomes a text-only Telegram post.
 - `date_gmt` is the timestamp to store (`date` is site-local and ambiguous).
 
-- [ ] **Step 3: Tests**
+- [x] **Step 3: Tests**
 
 Mock `requests.get` with a recorded WP payload fixture. Cover: entity/tag stripping, missing `wp:featuredmedia` at each level, video mime type detection, HTTP 500 → `RuntimeError`, non-JSON body → `RuntimeError`.
 
@@ -215,19 +215,19 @@ Mock `requests.get` with a recorded WP payload fixture. Cover: entity/tag stripp
 **Interfaces:**
 - `to_telegram(article: dict, site: dict) -> str` — the post body, link **not** appended (Task 5 owns length-fitting). Returns a deterministic fallback (title + first paragraph) when the API key is missing or the call fails — never raises, exactly like `translator.translate`.
 
-- [ ] **Step 1: The prompt**
+- [x] **Step 1: The prompt**
 
 Built on `translator.py`'s structure. Constraints to encode: FAITHFUL (no fact not in the source — this is the client's reputation), length target ~600 chars so the post still fits Telegram's 1024-char *caption* limit once the link is appended, a strong lede, no invented quotes, no hashtag invention, plain text only (no Markdown — Telegram parse modes and LLM output are a bad mix). `site["rewrite_hint"]` is appended for per-channel tone.
 
-- [ ] **Step 2: The client**
+- [x] **Step 2: The client**
 
 Copy `translator.py`'s module-level `OpenAI(base_url="https://openrouter.ai/api/v1")` construction and its `APIError` handling verbatim. `temperature=0.3`.
 
-- [ ] **Step 3: The eyeball harness**
+- [x] **Step 3: The eyeball harness**
 
 `py modules/newsroom/rewrite.py --sample <site> [-n 10]` prints the last N articles' source next to the generated post. **Build this in Task 4, not later.** Everything else in this plan is deterministic and unit-testable; "article → good Telegram post" is taste work that needs 50 outputs reviewed side by side, and it is the only part of this project whose calendar time is measured in weeks rather than hours.
 
-- [ ] **Step 4: Tests**
+- [x] **Step 4: Tests**
 
 Mock the OpenAI client. Cover: fallback when `OPENROUTER_API_KEY` is unset, fallback on `APIError`, empty completion falls back, `rewrite_hint` reaches the system prompt.
 
@@ -242,25 +242,25 @@ Mock the OpenAI client. Cover: fallback when `OPENROUTER_API_KEY` is unset, fall
 **Interfaces:**
 - `async publish(bot, site, article, text) -> tuple[int|None, str|None]` — `(message_id, t.me link)`.
 
-- [ ] **Step 1: Copy the sending core**
+- [x] **Step 1: Copy the sending core**
 
 `_ref`, `_fit`, and the single-media branch of `_send` from `publisher.py`. The album branch is **commented out with a `# DORMANT:` marker** — WP featured media is one item, but a future gallery-post feature would want it back.
 
 `_vid_kwargs`'s ffprobe call is likewise commented out: without width/height/duration Telegram lays the inline player out from defaults and plays the video visibly squashed, so if the client's sites post video this must be re-enabled — and that is the moment the branch grows an ffmpeg dependency. **Verify early whether these sites publish video at all**; if they are photo-only, this stays dormant and the deployment stays dependency-free.
 
-- [ ] **Step 2: Media by URL**
+- [x] **Step 2: Media by URL**
 
 Telegram accepts a **remote URL** for `photo=`/`video=` — the featured-media URL can be passed straight through with no download step, which is why this bot needs no media directory and no MTProto big-file path. Fall back to a text-only send when Telegram rejects the URL (it will, occasionally, for large files or slow origins); a post without its image still ships.
 
-- [ ] **Step 3: Append the link and fit**
+- [x] **Step 3: Append the link and fit**
 
 Append `\n\n🔗 {article.url}` **after** the rewrite, then `_fit(..., has_media=bool(media))`. Order matters: `_fit` truncates the tail, so appending afterwards would push the link back over the limit — and a post whose link got truncated fails step 6 of the client's flow silently.
 
-- [ ] **Step 4: `NR_DRY_RUN`**
+- [x] **Step 4: `NR_DRY_RUN`**
 
 When set, log the exact text, chat_id and media URL, return `(None, None)`, and place no orders. This is the mode the operator reviews output in for the first week.
 
-- [ ] **Step 5: Tests**
+- [x] **Step 5: Tests**
 
 Fake bot object recording calls. Cover: link appended before trimming; caption over 1024 with media is trimmed and the link survives; no media → `send_message` with the 4096 limit; dry-run sends nothing; `message.link` absent → `(id, None)`.
 
@@ -276,7 +276,7 @@ Fake bot object recording calls. Cover: link appended before trimming; caption o
 **Interfaces:**
 - `random_emojis(site) -> list[dict]`, `order_post(site, post_id, link)`, `order_channel_threshold(site, post_id, link)`, `order_emoji(site, post_id, link, emoji)`, `after_publish(site, post_id, chat_id, link)`.
 
-- [ ] **Step 1: Copy the catalogue and order wrappers**
+- [x] **Step 1: Copy the catalogue and order wrappers**
 
 `EMOJI_SERVICES`, `face`, `channel_link`, `order_post`, `order_emoji`, `order_channel_threshold`, and the `record_posts` counter logic from `reactions.py` lines 45-158.
 
@@ -284,7 +284,7 @@ Fake bot object recording calls. Cover: link appended before trimming; caption o
 
 `channel_link` derives the channel URL by dropping the message id off the post link. It is the only thing that yields a usable URL for a numeric `-100…` chat id, so **the bonus order depends on the post link having been captured** — a post with no public link can be counted but not ordered against.
 
-- [ ] **Step 2: Random emoji selection**
+- [x] **Step 2: Random emoji selection**
 
 ```python
 def random_emojis(site: dict) -> list[dict]:
@@ -297,11 +297,11 @@ def random_emojis(site: dict) -> list[dict]:
 
 The ask state machine that used to choose these is **not** copied — a `# DORMANT:` note in `orders.py` points at `master`'s `reactions.py` for the day the client wants manual control.
 
-- [ ] **Step 3: Every order writes an `orders` row**
+- [x] **Step 3: Every order writes an `orders` row**
 
 Before the call (`error` NULL, `panel_order` NULL), updated after. A crash between publish and order leaves a row that says so.
 
-- [ ] **Step 4: Tests**
+- [x] **Step 4: Tests**
 
 Mock `smm.place_order`. Cover: phase-1 quantity inside `views_phase1`; the 5th call for a chat_id fires the bonus and the 4th does not; two chat_ids count independently; `random_emojis` never returns an emoji outside the pool and never exceeds the pool size; an emoji pool naming an unknown service yields no order.
 
@@ -313,25 +313,25 @@ Mock `smm.place_order`. Cover: phase-1 quantity inside `views_phase1`; the 5th c
 - Create: `modules/newsroom/main.py`
 - Test: `tests/test_newsroom_main.py` (pure helpers only)
 
-- [ ] **Step 1: Entrypoint**
+- [x] **Step 1: Entrypoint**
 
 Standard 3×-`dirname` `sys.path` bootstrap, `Application.builder().token(config.NR_BOT_TOKEN)`, `store.init()`, one JobQueue `run_repeating` job per enabled site with a staggered `first=` (7 sites all firing on the same second is a needless burst against both WP and the panel).
 
 No command handlers, no `getUpdates` need — but PTB's `Application` polls anyway, so the token must still be exclusive to this bot.
 
-- [ ] **Step 2: The tick**
+- [x] **Step 2: The tick**
 
 Per site: `wp.fetch_recent` → insert unseen → for each `pending` article, oldest first: `rewrite.to_telegram` → `publish.publish` → `store.record_post` → `orders.after_publish` → `mark(posted)`. Any exception marks the article `failed` and moves to the next — **one bad article must never wedge a site's queue**.
 
-- [ ] **Step 3: The backfill guard**
+- [x] **Step 3: The backfill guard**
 
 On the **first tick for a site** (no rows in `articles` for it), insert the fetched articles as `skipped` and post nothing, unless `NR_BACKFILL=1`. Without this, adding site #8 dumps 20 back-articles into a live client channel in one burst — unrecoverable, and visible to the client's subscribers.
 
-- [ ] **Step 4: Reaction delay**
+- [x] **Step 4: Reaction delay**
 
 Schedule the emoji orders `NR_REACTION_DELAY_S` (default 1200 s) after publish via `run_once`. Reactions appearing the same second as the post is the most legible bot tell there is. The delay is best-effort and in-memory: if the process restarts inside the window those reactions are lost, which is acceptable — the post and its views already shipped. (Persisting them is what `master`'s `queue_store` delayed-order table does, if it ever matters.)
 
-- [ ] **Step 5: CLI**
+- [x] **Step 5: CLI**
 
 `py modules/newsroom/main.py --once [--dry-run] [--site <name>]` — one tick, no scheduler. This is how the operator verifies a new site before enabling it.
 
@@ -345,7 +345,7 @@ Schedule the emoji orders `NR_REACTION_DELAY_S` (default 1200 s) after publish v
 - Modify: `CLAUDE.md` (branch section)
 - Modify: `START.md`
 
-- [ ] **Step 1: `# DORMANT:` convention**
+- [x] **Step 1: `# DORMANT:` convention**
 
 Every capability dropped from a copied module is commented out in place, never deleted, in one shape:
 
@@ -362,15 +362,15 @@ The marker states **what it did and what re-enabling costs**, so the next reader
 
 Inventory: album send (`publish.py`), `_vid_kwargs` ffprobe (`publish.py`), the reactions ask (`orders.py`, pointer to `master`), the translation leg (`rewrite.py`, pointer to `translator.py`).
 
-- [ ] **Step 2: Dormant entrypoints**
+- [x] **Step 2: Dormant entrypoints**
 
 Nothing on `master` is modified. `news_bot.py`, `collector.py`, `dispatcher.py`, `upload_post.py`, `server.py` and `ui/` remain fully functional and are simply **not started** on this branch. `modules/newsroom/README.md` states this explicitly with the list, so a future reader does not assume the tree is dead code.
 
-- [ ] **Step 3: Branch section in `CLAUDE.md`**
+- [x] **Step 3: Branch section in `CLAUDE.md`**
 
 At the top of `CLAUDE.md`, a short block: this branch is the client bot, it never merges to `master`, its flow is WP → TG only, its entrypoint is `modules/newsroom/main.py`, its DB is `data/newsroom.db`, its token is `NR_BOT_TOKEN`, and everything else in the tree is inherited and dormant. Add the `modules/newsroom/` table rows in the existing Files-table style.
 
-- [ ] **Step 4: Run instructions in `START.md`**
+- [x] **Step 4: Run instructions in `START.md`**
 
 Install, `.env` keys, adding a site, the dry-run first week, and the `--once --site` verification step.
 
@@ -378,15 +378,15 @@ Install, `.env` keys, adding a site, the dry-run first week, and the `--once --s
 
 ### Task 9: Deployment
 
-- [ ] **Step 1: Isolation checklist**
+- [x] **Step 1: Isolation checklist**
 
 Separate checkout (or `git worktree`) of `client/wp-newsbot`, separate venv, separate `.env`, separate service. The failure this prevents: a `git pull` for the operator's own work restarting a client's 7 live channels, or a dev run publishing real articles.
 
-- [ ] **Step 2: Service**
+- [x] **Step 2: Service**
 
 Windows: NSSM or Task Scheduler on `py modules/newsroom/main.py`. Linux: a systemd unit with `Restart=always`. Log to a rotating file — the BulkFollows request/response lines are the audit trail for money spent.
 
-- [ ] **Step 3: First-run sequence**
+- [x] **Step 3: First-run sequence**
 
 1. `NR_DRY_RUN=1`, one site enabled, `--once` → review the rewrite output.
 2. Repeat until the prompt is right (expect days, not minutes).
