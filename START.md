@@ -25,3 +25,32 @@ Once `py modules/telegram/telegram_bot.py` is running, every message in the conf
 Concurrency: a single `asyncio.Lock` serialises uploads (the phone can only do one IG flow at a time); blocking download + uiautomator2 work runs in a worker thread via `asyncio.to_thread` so the bot stays responsive to new messages. No dedup — pasting the same URL twice posts it twice.
 
 See `CLAUDE.md` for full architecture and the IG creation flow walkthrough.
+
+## Client newsroom bot (branch `client/wp-newsbot`)
+
+A separate product in `modules/newsroom/`: watches N WordPress sites and posts
+each new article to that site's Telegram channel, then buys views and
+reactions. Nothing above is involved — its own bot token, database and
+BulkFollows balance. Full detail in `modules/newsroom/README.md`.
+
+**Setup:** `.env` needs `NR_BOT_TOKEN` (a *different* bot from the two above —
+one getUpdates poller per token), `NR_BULKFOLLOWS_API_KEY` (the client's panel
+account) and `OPENROUTER_API_KEY`. One JSON file per site under
+`modules/newsroom/sites/`, copied from `example.json`. Add the bot as an admin
+of every channel.
+
+**Run:** `py modules/newsroom/main.py`
+
+**Verify a site before enabling it:**
+`py modules/newsroom/main.py --once --site <name> --dry-run`
+
+**Tune the rewrite prompt:** `py modules/newsroom/rewrite.py --sample <name> -n 10`
+— prints source next to generated post, publishes nothing. This is the part
+that takes real time; everything else is deterministic.
+
+**First run:** keep `NR_DRY_RUN=1` until you have read a week of generated
+posts. A site's first live tick is backfill-guarded, so it starts from the next
+article the site publishes rather than dumping its back catalogue.
+
+**Deploy** from its own checkout, venv and service — a `git pull` for your own
+work must not restart a client's live channels.
