@@ -34,3 +34,6 @@ dist/
 # OS
 Thumbs.db
 .DS_Store
+
+# Client newsroom bot runtime state (SQLite store)
+modules/newsroom/data/
