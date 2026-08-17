@@ -77,6 +77,9 @@ def main(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "NR_DRY_RUN", False)
     monkeypatch.setattr(config, "NR_BACKFILL", False)
     monkeypatch.setattr(config, "NR_REACTION_DELAY_S", 1200)
+    monkeypatch.setattr(config, "NR_EMOJI_SERVICES", [
+        {"name": "heart", "emoji": "❤️", "service": "5108"},
+    ])
 
     from modules.newsroom import store as store_mod
     importlib.reload(store_mod)
@@ -272,6 +275,68 @@ def test_dry_run_does_not_queue_a_backlog_for_go_live(main, monkeypatch):
     run(main.tick(bot, _site()))
 
     assert bot.sent == []
+
+
+# --------------------------------------------------------------------------- #
+# --force-latest                                                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_force_latest_reposts_an_already_seen_article(main):
+    run(main.tick(FakeBot(), _site()))  # article 1 recorded as seen
+    bot = FakeBot()
+
+    summary = run(main.force_latest(bot, _site()))
+
+    assert "posted" in summary
+    assert len(bot.sent) == 1
+    assert "Story 1" in bot.sent[0]["text"]
+
+
+def test_force_latest_picks_the_newest_article(main):
+    run(main.tick(FakeBot(), _site()))
+    main.articles = [_article(3), _article(2), _article(1)]  # API order: newest first
+    bot = FakeBot()
+
+    run(main.force_latest(bot, _site()))
+
+    assert len(bot.sent) == 1
+    assert "Story 3" in bot.sent[0]["text"]
+
+
+def test_force_latest_runs_the_full_order_pipeline(main):
+    run(main.tick(FakeBot(), _site()))
+
+    run(main.force_latest(FakeBot(), _site()))
+
+    kinds = [p[2] for p in main.placed]
+    heart = next(e for e in main.orders.EMOJI_SERVICES if e["name"] == "heart")
+    assert "V1" in kinds              # views order
+    assert heart["service"] in kinds  # reactions, ordered inline (no scheduler)
+
+
+def test_force_latest_on_a_virgin_site_keeps_the_backfill_guard(main):
+    # Forcing the latest must not turn the other back-articles into pending
+    # work — the next normal tick would dump them into the channel.
+    main.articles = [_article(3), _article(2), _article(1)]
+    run(main.force_latest(FakeBot(), _site()))
+
+    bot = FakeBot()
+    summary = run(main.tick(bot, _site()))
+
+    assert bot.sent == []
+    assert "nothing new" in summary
+
+
+def test_force_latest_respects_dry_run(main, monkeypatch):
+    run(main.tick(FakeBot(), _site()))
+    monkeypatch.setattr(main.config, "NR_DRY_RUN", True)
+    bot = FakeBot()
+
+    run(main.force_latest(bot, _site()))
+
+    assert bot.sent == []
+    assert main.placed == []
 
 
 # --------------------------------------------------------------------------- #

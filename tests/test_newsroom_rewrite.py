@@ -216,3 +216,71 @@ def test_empty_article_yields_empty_string(client):
 
     assert rewrite.to_telegram({"title": "", "body": ""}) == ""
     assert calls.calls == []  # no reason to pay for a call with nothing to say
+
+
+# --------------------------------------------------------------------------- #
+# The per-site length target                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_site_post_chars_lands_in_the_system_prompt(client):
+    calls = client()
+
+    rewrite.to_telegram(ARTICLE, {"post_chars": 400})
+
+    system = calls.calls[0]["messages"][0]["content"]
+    assert "400 is a HARD LIMIT" in system
+    assert "about 300 characters" in system  # the aim point sits under the cap
+
+
+def test_missing_post_chars_uses_the_default(client):
+    calls = client()
+
+    rewrite.to_telegram(ARTICLE)
+
+    system = calls.calls[0]["messages"][0]["content"]
+    assert f"{rewrite.TARGET_CHARS} is a HARD LIMIT" in system
+
+
+def test_bad_post_chars_costs_the_default_not_the_run(client):
+    calls = client()
+
+    rewrite.to_telegram(ARTICLE, {"post_chars": "five hundred"})
+
+    system = calls.calls[0]["messages"][0]["content"]
+    assert f"{rewrite.TARGET_CHARS} is a HARD LIMIT" in system
+
+
+def test_fallback_respects_the_site_target(monkeypatch):
+    monkeypatch.setattr(rewrite, "_client", None)
+
+    got = rewrite.to_telegram({**ARTICLE, "body": "y" * 5000}, {"post_chars": 200})
+
+    assert len(got) <= 200
+
+
+def test_an_overlong_completion_is_trimmed_to_the_target(client):
+    # Models cannot count characters; the target is enforced here, not hoped
+    # for. The cut lands on a sentence end, never mid-sentence.
+    client(_reply("First fact here. Second fact here. " * 30))
+
+    got = rewrite.to_telegram(ARTICLE, {"post_chars": 200})
+
+    assert len(got) <= 200
+    assert got.endswith(".")
+
+
+def test_a_completion_inside_the_target_is_untouched(client):
+    client(_reply("Short post. Two sentences."))
+
+    assert rewrite.to_telegram(ARTICLE, {"post_chars": 200}) == "Short post. Two sentences."
+
+
+def test_one_monster_sentence_gets_a_word_boundary_cut(client):
+    client(_reply("word " * 100))
+
+    got = rewrite.to_telegram(ARTICLE, {"post_chars": 50})
+
+    assert len(got) <= 50
+    assert got.endswith("…")
+    assert not got[:-1].endswith(" ")  # cut between words, not inside one

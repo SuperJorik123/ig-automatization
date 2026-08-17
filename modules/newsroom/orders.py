@@ -27,27 +27,20 @@ Blocking HTTP — async callers hand these to asyncio.to_thread.
 import logging
 import random
 
+from shared import config
 from modules.newsroom import smm, store
 
 log = logging.getLogger(__name__)
 
-# Reaction services on BulkFollows: one service id per emoji, ordered against
-# the post link. `name` (not the glyph) is what goes into the logs — the
-# Windows console can't encode emoji and would mangle the line. A site picks
-# which of these it uses via its emoji_pool; the full list is never the
-# default, because 💩/🤡/🤮 on a client's news post is not a bug the client
-# will accept as a random draw.
-EMOJI_SERVICES = [
-    {"emoji": "❤️", "name": "heart",     "service": "5108"},
-    {"emoji": "👍", "name": "like",      "service": "5110"},
-    {"emoji": "👎", "name": "dislike",   "service": "5691"},
-    {"emoji": "💩", "name": "shit",      "service": "9279"},
-    {"emoji": "🤡", "name": "clown",     "service": "9291"},
-    {"emoji": "🤮", "name": "throw up",  "service": "5702"},
-    # A mixed set, not one reaction — no single glyph represents it.
-    {"emoji": "🙂", "name": "positive", "label": "Positive emojis", "service": "9271"},
-    {"emoji": "😃", "name": "grinning",  "service": "5699"},
-]
+# Reaction services on BulkFollows: one service id per reaction, ordered
+# against the post link. The catalogue comes from NR_EMOJI_SERVICES in .env —
+# service ids are panel-account data, not code, and the panel has renumbered
+# them once already. A site picks which of these it uses via its emoji_pool
+# (by name: the glyph itself, or a word like "positive" for a mixed set); the
+# full catalogue is never the default, because the panel's list includes
+# 💩/🖕/🤮 and those on a client's news post is not a bug the client will
+# accept as a random draw.
+EMOJI_SERVICES = config.NR_EMOJI_SERVICES
 
 _BY_NAME = {e["name"]: e for e in EMOJI_SERVICES}
 

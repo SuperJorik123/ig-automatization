@@ -319,6 +319,36 @@ NR_BULKFOLLOWS_API_URL = os.environ.get(
     "NR_BULKFOLLOWS_API_URL", "https://bulkfollows.com/api/v2"
 ).strip()
 
+
+def _parse_emoji_services(raw: str) -> list:
+    """NR_EMOJI_SERVICES ("name:id" pairs, comma-separated) into the catalogue
+    orders.py draws reactions from: [{"name", "emoji", "service"}, ...].
+
+    The name is what a site's emoji_pool refers to — the emoji glyph itself
+    for a single reaction, a plain word ("positive") for the panel's mixed
+    sets. A malformed pair is logged and dropped, never fatal: one typo must
+    cost one reaction, not every channel's orders."""
+    out = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, service = part.rpartition(":")
+        name, service = name.strip(), service.strip()
+        if not sep or not name or not service.isdigit():
+            logging.getLogger(__name__).warning(
+                "NR_EMOJI_SERVICES: bad entry %r (want name:id) — skipped", part)
+            continue
+        out.append({"name": name, "emoji": name, "service": service})
+    return out
+
+
+# Reaction service catalogue for the CLIENT's panel account. Service ids are
+# panel-account data, not code — they changed once already and will again,
+# which is why they live here and not in orders.py. Sites still opt in to a
+# subset by name via their emoji_pool; an empty catalogue means no reactions.
+NR_EMOJI_SERVICES = _parse_emoji_services(os.environ.get("NR_EMOJI_SERVICES", ""))
+
 # Model that rewrites an article into a Telegram post. Falls back to the
 # translator's model, which is already tuned for faithful news prose.
 NR_REWRITE_MODEL = os.environ.get("NR_REWRITE_MODEL", "").strip() or TRANSLATE_MODEL
@@ -338,6 +368,10 @@ _SITE_DEFAULTS = {
     "emoji_count": [2, 4],
     "emoji_quantity": [10, 40],
     "rewrite_hint": "",
+    # Max characters of the generated post ("and shorter when the story is
+    # small"). Telegram's media-caption ceiling is 1024 and publish.py appends
+    # the article link after this, so keep well under.
+    "post_chars": 500,
 }
 
 

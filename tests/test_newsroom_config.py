@@ -138,3 +138,30 @@ def test_defaults_are_not_shared_between_sites(tmp_path):
     first["views_phase1"].append(99)
 
     assert second["views_phase1"] == [500, 5000]
+
+
+# --------------------------------------------------------------------------- #
+# The reaction catalogue (NR_EMOJI_SERVICES)                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_emoji_services_parses_glyphs_and_words():
+    got = config._parse_emoji_services("❤️:14433, 👍:14437 ,positive:14430")
+
+    assert got == [
+        {"name": "❤️", "emoji": "❤️", "service": "14433"},
+        {"name": "👍", "emoji": "👍", "service": "14437"},
+        {"name": "positive", "emoji": "positive", "service": "14430"},
+    ]
+
+
+def test_a_bad_emoji_entry_is_dropped_not_fatal():
+    # One typo must cost one reaction, not every channel's orders.
+    got = config._parse_emoji_services("❤️:14433,👍-14437,🔥:,:14436,🤣:14481")
+
+    assert [e["service"] for e in got] == ["14433", "14481"]
+
+
+def test_an_empty_emoji_catalogue_is_empty_not_an_error():
+    assert config._parse_emoji_services("") == []
+    assert config._parse_emoji_services(" , ,") == []

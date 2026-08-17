@@ -41,11 +41,23 @@ _client = (
     else None
 )
 
-# Characters the generated post should stay under. Telegram's caption ceiling
-# is 1024; publish.py then appends "\n\n🔗 <url>", and a WordPress permalink
-# with a long slug runs well past 100 characters. 800 leaves comfortable room
-# and still reads as a full post rather than a teaser.
-TARGET_CHARS = 800
+# Characters the generated post should stay under when the site does not say
+# otherwise (`post_chars` in the site file). Telegram's caption ceiling is
+# 1024; publish.py then appends "\n\n🔗 <url>", and a WordPress permalink with
+# a long slug runs well past 100 characters — but the binding constraint is
+# editorial: the client wants a short post, not the whole article.
+TARGET_CHARS = 500
+
+
+def _target(site: dict | None) -> int:
+    """The site's length target, tolerating a malformed value the same way
+    orders._rand_range does — a typo costs the site the default, not the run."""
+    try:
+        n = int((site or {}).get("post_chars") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return n if n > 0 else TARGET_CHARS
+
 
 _SYSTEM = (
     "You are the editor of a Telegram news channel. You are given one article "
@@ -59,9 +71,11 @@ _SYSTEM = (
     "single rule that matters most.\n"
     "LEDE — open with the news itself, in the first sentence. No throat-"
     "clearing, no scene-setting, no rhetorical question, no 'Breaking:'.\n"
-    "LENGTH — under {target} characters, and shorter when the story is small. "
-    "This is a post, not the article: carry the news and the one or two facts "
-    "that make it land, and leave the rest for the click.\n"
+    "LENGTH — aim for about {aim} characters, shorter when the story is "
+    "small; {target} is a HARD LIMIT past which the post is cut off "
+    "mid-sentence. That budget fits the news plus one or two supporting facts "
+    "— pick the facts that make it land and leave everything else for the "
+    "click. Do not try to compress the whole article in.\n"
     "REGISTER — neutral, professional news style, the way a wire service "
     "writes. No hype, no editorialising, no exclamation marks, no emoji, no "
     "hashtags, no invented quotes, and never a quotation mark around words "
@@ -76,14 +90,34 @@ _SYSTEM = (
 )
 
 
-def _fallback(article: dict) -> str:
+def _shorten(text: str, target: int) -> str:
+    """Enforce the length target the model was asked for and routinely misses —
+    models cannot count characters, so past a point this is the only guarantee.
+
+    Cuts at the last sentence end inside the budget, so an over-long post loses
+    its final fact instead of ending mid-sentence; a single monster sentence
+    falls back to a word-boundary cut with an ellipsis."""
+    if len(text) <= target:
+        return text
+    head = text[:target]
+    cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "),
+              head.rfind(".\n"), head.rfind("!\n"), head.rfind("?\n"))
+    if head.endswith((".", "!", "?")):
+        return head
+    if cut > 0:
+        return head[:cut + 1]
+    spaced = head.rsplit(" ", 1)[0].rstrip(",;:—- ")
+    return (spaced or head[:target - 1]) + "…"
+
+
+def _fallback(article: dict, target: int = TARGET_CHARS) -> str:
     """What ships when the model is unavailable. The article's title and its
     opening paragraph: dull, but every word of it came from the source."""
     title = (article.get("title") or "").strip()
     body = (article.get("body") or "").strip()
     first = next((p.strip() for p in body.split("\n\n") if p.strip()), "")
     out = "\n\n".join(p for p in (title, first) if p)
-    return out[:TARGET_CHARS].rstrip()
+    return out[:target].rstrip()
 
 
 def _prompt(article: dict) -> str:
@@ -109,11 +143,14 @@ def to_telegram(article: dict, site: dict | None = None) -> str:
     if not (article.get("body") or article.get("title")):
         return ""
 
+    target = _target(site)
     if _client is None:
         log.warning("OPENROUTER_API_KEY not set — posting the article's own lede")
-        return _fallback(article)
+        return _fallback(article, target)
 
-    system = _SYSTEM.format(target=TARGET_CHARS)
+    # The aim sits well under the cap: models track an aim point far better
+    # than a ceiling, and "about 375" is what actually lands posts under 500.
+    system = _SYSTEM.format(target=target, aim=max(1, target * 3 // 4))
     hint = (site.get("rewrite_hint") or "").strip()
     if hint:
         # Per-channel tone, appended rather than interpolated into the rules
@@ -134,17 +171,19 @@ def to_telegram(article: dict, site: dict | None = None) -> str:
     except APIError as exc:
         log.error("rewrite failed for %s: %s — posting the article's own lede",
                   article.get("url"), exc)
-        return _fallback(article)
+        return _fallback(article, target)
     except Exception as exc:  # transport, auth, malformed response
         log.error("rewrite failed for %s: %s — posting the article's own lede",
                   article.get("url"), exc)
-        return _fallback(article)
+        return _fallback(article, target)
 
     try:
         out = (resp.choices[0].message.content or "").strip()
     except (AttributeError, IndexError, TypeError):
         out = ""
-    return out or _fallback(article)
+    if not out:
+        return _fallback(article, target)
+    return _shorten(out, target)
 
 
 # --------------------------------------------------------------------------- #

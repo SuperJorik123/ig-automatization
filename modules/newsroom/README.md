@@ -84,6 +84,8 @@ py modules/newsroom/main.py                      # the scheduler
 py modules/newsroom/main.py --once               # one tick per site, then exit
 py modules/newsroom/main.py --once --site acme   # one site
 py modules/newsroom/main.py --once --dry-run     # publishing nothing
+py modules/newsroom/main.py --force-latest --site acme   # re-post the site's newest
+                                                 # article end to end, seen or not
 py modules/newsroom/rewrite.py --sample acme -n 10   # tune the prompt
 ```
 
@@ -113,6 +115,10 @@ channel, not the run.
   `NEWS_BOT_TOKEN`. One `getUpdates` poller per token; sharing one means
   whichever process starts second silently breaks the first.
 - `NR_BULKFOLLOWS_API_KEY` — the client's panel account, not the operator's.
+- `NR_EMOJI_SERVICES` — the reaction catalogue, `name:id` pairs (the emoji
+  glyph itself, or `positive`/`negative` for the panel's mixed sets). Service
+  ids are panel-account data and get renumbered; this is why they are not in
+  code. Sites opt in to a subset by name via `emoji_pool`.
 - `OPENROUTER_API_KEY` — shared with the rest of the repo; the rewrite falls
   back to the article's own lede without it.
 - `NR_DRY_RUN=1` until a week of generated posts has been reviewed.

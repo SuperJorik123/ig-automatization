@@ -148,6 +148,15 @@ def add_article(site: str, article: dict, status: str = NEW) -> int | None:
         return cur.lastrowid if cur.rowcount else None
 
 
+def get_article(site: str, wp_id: int):
+    """The stored row for one (site, wp_id), or None. What --force-latest uses
+    to re-post an article the normal flow has already marked as handled."""
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM articles WHERE site=? AND wp_id=?", (site, wp_id)
+        ).fetchone()
+
+
 def pending(site: str) -> list:
     """Articles waiting to be posted for `site`, OLDEST FIRST — the channel
     should read in the order the site published, not newest-first as the API

@@ -22,6 +22,12 @@ def orders(tmp_path, monkeypatch):
     Exposes `.placed`, the list of (link, quantity, service) that would have
     gone to BulkFollows, and `.result`, what the fake panel answers."""
     monkeypatch.setattr(config, "NR_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "NR_EMOJI_SERVICES", [
+        {"name": "heart", "emoji": "❤️", "service": "5108"},
+        {"name": "like", "emoji": "👍", "service": "5110"},
+        {"name": "grinning", "emoji": "😃", "service": "5699"},
+        {"name": "positive", "emoji": "positive", "service": "9271"},
+    ])
     from modules.newsroom import store as store_mod
     importlib.reload(store_mod)
     store_mod.init()

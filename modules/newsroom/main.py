@@ -11,6 +11,8 @@ Run it:
     py modules/newsroom/main.py --once               # one tick per site, then exit
     py modules/newsroom/main.py --once --site acme   # one tick for one site
     py modules/newsroom/main.py --once --dry-run     # ...publishing nothing
+    py modules/newsroom/main.py --force-latest --site acme   # re-post the newest
+                                                     # article end to end (test path)
 
 This bot only SENDS — it registers no command handlers and reads no updates.
 It still needs a token nobody else is polling with, because python-telegram-bot
@@ -145,6 +147,45 @@ async def tick(bot, site: dict, job_queue=None) -> str:
     return f"[{name}] {posted}/{len(pending)} posted"
 
 
+async def force_latest(bot, site: dict) -> str:
+    """Take the site's newest article through the whole pipeline, seen or not.
+
+    The test path: a site whose recent articles were all recorded (or that has
+    published nothing new) still yields one real end-to-end run — rewrite,
+    publish, orders, reactions. Runs without a scheduler, so the reactions are
+    ordered inline like any --once tick.
+
+    A first contact still honours the backfill guard for everything BUT the
+    forced article: the others are recorded as seen, otherwise this run would
+    make has_articles() true and the next normal tick would post the whole
+    backlog as fresh."""
+    name = site["name"]
+    try:
+        articles = await asyncio.to_thread(wp.fetch_recent, site)
+    except RuntimeError as exc:
+        log.error("%s", exc)
+        return f"[{name}] fetch failed"
+    if not articles:
+        return f"[{name}] site returned no articles"
+
+    latest = articles[0]  # the API returns newest first
+    for article in articles[1:]:
+        if not store.get_article(name, article["wp_id"]):
+            store.add_article(name, article, status=store.SKIPPED)
+
+    store.add_article(name, latest)  # no-op when already recorded
+    row = store.get_article(name, latest["wp_id"])
+    log.info("[%s] FORCED re-post of latest article: %s", name, latest.get("url"))
+    shipped = await _handle(bot, site, row, job_queue=None)
+    return f"[{name}] forced latest: {'posted' if shipped else 'not posted'}"
+
+
+async def _run_force_latest(site: dict) -> None:
+    app = Application.builder().token(config.NR_BOT_TOKEN).build()
+    async with app:
+        log.info("%s", await force_latest(app.bot, site))
+
+
 def _job(site: dict):
     """A JobQueue callback bound to one site."""
     async def run(context):
@@ -170,7 +211,16 @@ def main() -> int:
     ap.add_argument("--site", help="limit to one site by name")
     ap.add_argument("--dry-run", action="store_true",
                     help="publish nothing and place no orders (forces NR_DRY_RUN)")
+    ap.add_argument("--force-latest", action="store_true",
+                    help="run the site's newest article through the full pipeline "
+                         "even if already seen (test path; requires --site)")
     args = ap.parse_args()
+
+    if args.force_latest and not args.site:
+        # Forcing a re-post on every configured channel at once is never the
+        # intent — make the target explicit.
+        print("--force-latest requires --site <name>")
+        return 1
 
     if args.dry_run:
         config.NR_DRY_RUN = True
@@ -194,6 +244,10 @@ def main() -> int:
     log.info("newsroom: %d site(s) — %s%s", len(sites),
              ", ".join(s["name"] for s in sites),
              "  [DRY RUN]" if config.NR_DRY_RUN else "")
+
+    if args.force_latest:
+        asyncio.run(_run_force_latest(sites[0]))
+        return 0
 
     if args.once:
         asyncio.run(_run_once(sites))
