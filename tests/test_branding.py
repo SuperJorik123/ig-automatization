@@ -55,9 +55,13 @@ def test_ff_path_escapes_windows_drive_colon_and_backslashes():
 
 def test_filter_graph_contains_fixed_design_constants():
     graph = branding._filter_graph("/f/font.ttf", "/t/text.txt")
-    assert "scale=1080:1920:force_original_aspect_ratio=increase" in graph
-    assert "gblur=sigma=30" in graph                       # blur-fill canvas
-    assert "scale=205:-1[logo]" in graph                   # logo width
+    # The blur is computed on a 1/8 copy and upscaled — visually identical to
+    # the old full-res gblur sigma=30, ~12 % cheaper (measured on the VPS).
+    assert "scale=135:240:force_original_aspect_ratio=increase" in graph
+    assert "gblur=sigma=4" in graph                        # blur-fill canvas
+    assert "scale=1080:1920[bg]" in graph                  # upscaled back
+    assert "scale=1080:1920:force_original_aspect_ratio=decrease[fg]" in graph
+    assert "scale=205:-1[logo0]" in graph                  # logo width
     # Top-right margins, matched to the reference render — not equal.
     assert "overlay=W-w-82:102" in graph
     assert "fontsize=49" in graph
@@ -68,7 +72,7 @@ def test_filter_graph_contains_fixed_design_constants():
     assert "x=110" not in graph                            # x is the TEXT, not the box
     assert "x=117" in graph
     assert "boxw=842" in graph                             # 856 box - 2x7 border
-    assert "fade=t=out:st=10:d=1.5:alpha=1" in graph       # banner fade-out
+    assert "fade=t=out:st=5:d=1.5:alpha=1" in graph        # banner fade-out
     assert "y=h*0.775" in graph
     assert "textfile='/t/text.txt'" in graph               # never inline text
     assert "fontfile='/f/font.ttf'" in graph
@@ -81,6 +85,29 @@ def test_filter_graph_applies_style_colors_font_size():
     assert "boxcolor=0xC90A0A@1.0" in graph
     assert "fontcolor=0x122E44" in graph
     assert "fontsize=60" in graph
+
+
+def test_filter_graph_multi_builds_the_canvas_once():
+    jobs = [
+        {"font": "/f/a.ttf", "text_path": "/t/a.txt", "style": None},
+        {"font": "/f/b.ttf", "text_path": "/t/b.txt",
+         "style": dict(branding.DEFAULT_STYLE, font_size=60)},
+    ]
+    graph = branding._filter_graph_multi(jobs)
+    assert graph.count("gblur") == 1                       # shared canvas
+    assert "split=2[c0][c1]" in graph
+    # Each branch: its own logo input, textfile, style, labeled output.
+    assert "[1:v]scale=205:-1[logo0]" in graph
+    assert "[2:v]scale=205:-1[logo1]" in graph
+    assert "textfile='/t/a.txt'" in graph
+    assert "textfile='/t/b.txt'" in graph
+    assert "fontsize=60" in graph
+    assert "[v0]" in graph and "[v1]" in graph
+
+
+def test_encode_args_use_the_speed_preset():
+    i = branding.ENCODE_ARGS.index("-preset")
+    assert branding.ENCODE_ARGS[i + 1] == branding.PRESET == "superfast"
 
 
 # --- load_style ------------------------------------------------------------
@@ -230,6 +257,48 @@ def test_render_end_to_end_geometry(tmp_path):
     assert 0.5 < dur < 2.0
     # the textfile temp must not be left behind
     assert not os.path.exists(out + ".txt")
+
+
+@pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg not on PATH")
+def test_render_multi_end_to_end(tmp_path):
+    src = str(tmp_path / "src.mp4")
+    logo_a = str(tmp_path / "a" / "logo.png")
+    logo_b = str(tmp_path / "b" / "logo.png")
+    os.makedirs(os.path.dirname(logo_a))
+    os.makedirs(os.path.dirname(logo_b))
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc=size=640x360:rate=24:duration=1", src],
+        check=True, capture_output=True)
+    for logo in (logo_a, logo_b):
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+             "-i", "color=red:size=100x100", "-frames:v", "1", logo],
+            check=True, capture_output=True)
+
+    outs = branding.render_branded_multi(src, [
+        {"headline": "first brand", "logo_path": logo_a,
+         "out_path": str(tmp_path / "out_a.mp4")},
+        {"headline": "second brand", "logo_path": logo_b,
+         "out_path": str(tmp_path / "out_b.mp4")},
+    ])
+
+    from modules.youtube import shorts_format
+    assert len(outs) == 2
+    for out in outs:
+        assert os.path.isfile(out)
+        w, h, dur = shorts_format.probe(out)
+        assert (w, h) == (1080, 1920)
+        assert 0.5 < dur < 2.0
+        assert not os.path.exists(out + ".txt")   # textfiles cleaned up
+
+
+def test_render_multi_missing_logo_raises_before_ffmpeg(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        branding.render_branded_multi(str(tmp_path / "in.mp4"), [
+            {"headline": "x", "logo_path": str(tmp_path / "nope.png"),
+             "out_path": str(tmp_path / "out.mp4")},
+        ])
 
 
 @pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg not on PATH")

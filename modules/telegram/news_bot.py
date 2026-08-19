@@ -588,8 +588,10 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
 async def _do_render(q, context, state: dict) -> None:
     """Render one variant per selected brand (headline translated per brand
     language, translation cached), send each back into the group, then open
-    the publish picker on a fresh message. One failed brand is reported and
-    skipped — never fatal for the others."""
+    the publish picker on a fresh message. All brands render in ONE ffmpeg
+    pass (the blur-fill canvas is built once and split per brand); if that
+    combined pass fails it falls back to one render per brand, so a single
+    failed brand is still reported and skipped — never fatal for the others."""
     brands = [state["brands"][i] for i in sorted(state["sel_brands"])]
     await q.edit_message_text(
         "⏳ rendering " + ", ".join(b["name"] for b in brands) + " …")
@@ -607,6 +609,10 @@ async def _do_render(q, context, state: dict) -> None:
     media_dir = os.path.join(config.TG_DATA_DIR, "media")
     renders, failures, warnings = [], [], []
     cache: dict[str, str] = {}
+
+    # Translate first: a brand whose headline can't be produced is reported
+    # and dropped here, before it can sink the combined render below.
+    jobs = []
     for b in brands:
         try:
             lang = b["lang"]
@@ -616,19 +622,48 @@ async def _do_render(q, context, state: dict) -> None:
                     config.SOURCE_LANG) if lang else state["text"])
             out = os.path.join(
                 media_dir, f"brand_{q.message.message_id}_{b['name']}.mp4")
-            path = await asyncio.to_thread(
-                branding.render_branded, src, cache[lang], b["logo"], out)
-        except Exception as exc:  # translator, ffmpeg — the render itself failed
+            jobs.append({"brand": b, "headline": cache[lang],
+                         "logo_path": b["logo"], "out_path": out})
+        except Exception as exc:
             log.error("brand render failed for %s: %s", b["name"], exc)
             failures.append((b["name"], str(exc)[:200]))
-            continue
 
-        # The render succeeded, so it's publishable regardless of whether the
-        # preview send below works — a failed send must not knock it out of
-        # `renders` (that would make the summary and the publish picker
-        # disagree about what's available).
-        state["files"].append(path)
-        renders.append({"brand": b, "path": path, "headline": cache[lang]})
+    # One ffmpeg pass for every brand. All-or-nothing by design, so a failure
+    # (one bad logo, one broken style.json) retries brand-by-brand — the slow
+    # path, but the one where the healthy brands still come out.
+    if jobs:
+        try:
+            paths = await asyncio.to_thread(
+                branding.render_branded_multi, src,
+                [{k: j[k] for k in ("headline", "logo_path", "out_path")}
+                 for j in jobs])
+            for j, path in zip(jobs, paths):
+                state["files"].append(path)
+                renders.append({"brand": j["brand"], "path": path,
+                                "headline": j["headline"]})
+        except Exception as exc:
+            log.warning("combined brand render failed (%s) — retrying "
+                        "brand-by-brand", str(exc)[:200])
+            for j in jobs:
+                try:
+                    path = await asyncio.to_thread(
+                        branding.render_branded, src, j["headline"],
+                        j["logo_path"], j["out_path"])
+                except Exception as exc2:  # translator, ffmpeg — render failed
+                    log.error("brand render failed for %s: %s",
+                              j["brand"]["name"], exc2)
+                    failures.append((j["brand"]["name"], str(exc2)[:200]))
+                    continue
+                state["files"].append(path)
+                renders.append({"brand": j["brand"], "path": path,
+                                "headline": j["headline"]})
+
+    # A render that succeeded is publishable regardless of whether the
+    # preview send below works — a failed send must not knock it out of
+    # `renders` (that would make the summary and the publish picker
+    # disagree about what's available).
+    for r in renders:
+        b, path = r["brand"], r["path"]
         try:
             size = os.path.getsize(path)
             if size > _BOT_UPLOAD_LIMIT and await mtproto.ensure_ready():

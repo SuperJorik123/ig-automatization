@@ -27,6 +27,16 @@ RU = {"chat_id": "@news_ru", "lang": "ru", "regions": {"ru"}}
 US = {"chat_id": "@news_us", "lang": "en", "regions": {"us"}}
 
 
+@pytest.fixture(autouse=True)
+def _no_first_tick(monkeypatch):
+    """The developer's .env may pin TG_FIRST_TICK (prod does), which overrides
+    every other startup_delay rule — these tests assume it unset unless they
+    set it themselves (their own monkeypatch runs after this one and wins)."""
+    from shared import config
+
+    monkeypatch.setattr(config, "TG_FIRST_TICK", "")
+
+
 @pytest.fixture
 def rig(store, monkeypatch):
     """Autopilot wired to a temp DB, two channels, and stubbed side effects."""

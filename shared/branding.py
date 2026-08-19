@@ -1,6 +1,9 @@
 """
 shared/branding.py — burn a brand onto a clip: logo top-right, headline in a
-lower-third banner. One ffmpeg pass per call; pure — no Telegram, no network.
+lower-third banner. Pure — no Telegram, no network. `render_branded` is one
+brand per ffmpeg pass; `render_branded_multi` does every brand in a single
+pass, building the shared blur-fill canvas once and splitting it per brand
+(the per-brand encodes still dominate — see the speed-knob comments below).
 
 The geometry is FIXED (same size and position every time): 1080x1920 canvas
 (blur-fill, the same treatment shorts_format gives horizontal videos — for an
@@ -9,7 +12,7 @@ wide sitting 82 px from the right edge and 102 px from the top, headline at
 77.5 % frame height — semi-bold, in a banner box of fixed width (matched to
 the reference renders at the repo root, `example.MP4` foremost),
 tightly-spaced rows (as many as the text needs, never truncated), left-aligned
-inside it, fading out smoothly after 10 s. The box does NOT resize to the
+inside it, fading out smoothly after 5 s. The box does NOT resize to the
 headline — every post's banner starts and ends at the same x — so rows wrap to
 the pixel width that fits inside it (`wrap_to_px`), not to a character count.
 
@@ -32,6 +35,8 @@ import re
 import subprocess
 import textwrap
 import unicodedata
+
+from shared import renderlock
 
 # shared/branding.py -> shared/ -> <repo root>
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -101,8 +106,21 @@ MAX_LINES = None            # no cap: a long headline gets more rows, never "…
 # looser than the reference's 57 px row pitch, and headline rows are meant to
 # sit tight.
 LINE_SPACING = -8
-FADE_START = 10             # s the banner stays fully visible
+FADE_START = 5              # s the banner stays fully visible
 FADE_DUR = 1.5              # s of smooth fade-out after that
+
+# ---- speed knobs, measured on the 1-vCPU VPS (2026-08-17) ------------------
+# The x264 encode is ~85 % of a render's cost, which makes the preset the
+# single biggest lever: superfast is ~2x veryfast at the same CRF, paying in
+# file size (~1.5x) rather than visible quality. ultrafast would be another
+# ~35 % faster but disables enough coding tools to soften the picture.
+PRESET = "superfast"
+# The blur-fill background is computed on a 1/8-scale copy and upscaled back:
+# blurring 135x240 and stretching to 1080x1920 is visually identical to
+# gblur sigma=30 at full resolution (the upscale is itself a low-pass) and
+# skips the full-res Gaussian — ~12 % of the render.
+BLUR_W, BLUR_H = 135, 240
+BLUR_SIGMA = 4
 
 STYLE_FILE = "style.json"   # optional, next to the brand's logo.png
 
@@ -334,20 +352,38 @@ def _ff_path(path: str) -> str:
     return path.replace("\\", "/").replace(":", "\\:")
 
 
-def _filter_graph(font_path: str, text_path: str, style: dict | None = None) -> str:
-    style = style or DEFAULT_STYLE
-    font_size = style["font_size"]
-    box = f"{style['background']}@{style['background_alpha']}"
+def blurfill_chain(out_label: str = "[canvas]") -> str:
+    """The blur-fill canvas every render shares: the source scaled small,
+    cropped, blurred, upscaled as the background; the source fit on top.
+    Built ONCE per ffmpeg run whatever comes after it. Ends in `out_label`
+    (empty string = the graph's unlabeled final output, for callers that
+    want the bare canvas, e.g. shorts_format)."""
+    sar = ",setsar=1" if out_label else ""
     return (
-        f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
-        f"crop={OUT_W}:{OUT_H},gblur=sigma=30[bg];"
+        f"[0:v]scale={BLUR_W}:{BLUR_H}:force_original_aspect_ratio=increase,"
+        f"crop={BLUR_W}:{BLUR_H},gblur=sigma={BLUR_SIGMA},"
+        f"scale={OUT_W}:{OUT_H}[bg];"
         f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease[fg];"
         # setsar=1: the fit scales leave a fractional compensating SAR (e.g.
         # 4321:4320) in the header, and players that honor it show the frame
         # very slightly off-square. The canvas is the display shape; pin it.
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[canvas];"
-        f"[1:v]scale={LOGO_W}:-1[logo];"
-        f"[canvas][logo]overlay=W-w-{LOGO_MARGIN_X}:{LOGO_MARGIN_Y}[branded];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2{sar}{out_label}"
+    )
+
+
+def _brand_chain(i: int, font_path: str, text_path: str,
+                 style: dict | None, canvas_label: str, logo_input: int,
+                 out_label: str) -> str:
+    """One brand's layers over a canvas copy: logo top-right, headline banner,
+    fade. `logo_input` is the ffmpeg input index carrying the brand's logo;
+    `out_label` names the branch's output stream ("" = unlabeled final)."""
+    style = style or DEFAULT_STYLE
+    font_size = style["font_size"]
+    box = f"{style['background']}@{style['background_alpha']}"
+    return (
+        f"[{logo_input}:v]scale={LOGO_W}:-1[logo{i}];"
+        f"[{canvas_label}][logo{i}]overlay="
+        f"W-w-{LOGO_MARGIN_X}:{LOGO_MARGIN_Y}[branded{i}];"
         # The banner lives on its own transparent layer: drawtext's alpha=
         # fades the glyphs but not the box, so the layer is faded as a whole
         # and text + box vanish together. The color source is unbounded —
@@ -366,20 +402,45 @@ def _filter_graph(font_path: str, text_path: str, style: dict | None = None) -> 
         f":boxborderw={BOX_PAD_Y}|{BOX_PAD_X}|{BOX_PAD_Y}|{BOX_PAD_X}"
         f":boxw={BOX_W - 2 * BOX_PAD_X}"
         f":x={TEXT_X}:y=h*{TEXT_Y},"
-        f"fade=t=out:st={FADE_START}:d={FADE_DUR}:alpha=1[banner];"
-        f"[branded][banner]overlay=0:0:shortest=1"
+        f"fade=t=out:st={FADE_START}:d={FADE_DUR}:alpha=1[banner{i}];"
+        f"[branded{i}][banner{i}]overlay=0:0:shortest=1{out_label}"
     )
 
 
-def render_branded(video_path: str, headline: str, logo_path: str, out_path: str,
-                   style: dict | None = None) -> str:
-    """One branded variant: `video_path` + `logo_path` + `headline` ->
-    `out_path` (1080x1920 mp4, same encode profile as shorts_format). `style`
-    defaults to the `style.json` sitting next to the logo (see `load_style`),
-    so callers get per-brand colors without passing anything. Blocking
-    — async callers run it in a thread. Raises FileNotFoundError for a missing
-    logo/font, ValueError for a broken style.json, RuntimeError (with ffmpeg's
-    stderr tail) on a failed encode; a partial output file is removed."""
+def _filter_graph(font_path: str, text_path: str, style: dict | None = None) -> str:
+    return (blurfill_chain() + ";"
+            + _brand_chain(0, font_path, text_path, style, "canvas", 1, ""))
+
+
+def _filter_graph_multi(jobs: list[dict]) -> str:
+    """One canvas, N brand branches. Each job dict carries `font`, `text_path`
+    and `style` (see `render_branded_multi`, which prepares them); job i reads
+    its logo from ffmpeg input i+1 and writes its frames to [v<i>]."""
+    n = len(jobs)
+    split = f"[canvas]split={n}" + "".join(f"[c{i}]" for i in range(n))
+    chains = ";".join(
+        _brand_chain(i, j["font"], j["text_path"], j["style"],
+                     f"c{i}", i + 1, f"[v{i}]")
+        for i, j in enumerate(jobs))
+    return blurfill_chain() + ";" + split + ";" + chains
+
+
+# The per-output half of the encode command, identical for every render here
+# and in shorts_format: x264 at the speed preset above, faststart for
+# streaming players.
+ENCODE_ARGS = [
+    "-c:v", "libx264", "-preset", PRESET, "-crf", "21",
+    "-pix_fmt", "yuv420p",
+    "-c:a", "aac", "-b:a", "128k",
+    "-movflags", "+faststart",
+]
+
+
+def _prepare_job(headline: str, logo_path: str, out_path: str,
+                 style: dict | None) -> dict:
+    """Validate one brand's inputs and write its drawtext textfile. Returns
+    the dict `_filter_graph_multi` consumes. Raises before any ffmpeg runs —
+    a bad brand must fail on the tap, not a minute into a render."""
     if not os.path.isfile(logo_path):
         raise FileNotFoundError(f"logo not found: {logo_path}")
     if style is None:
@@ -398,20 +459,33 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
                       font_path, style["font_size"])
     with open(text_path, "w", encoding="utf-8", newline="") as fh:
         fh.write(rows.replace("\n", "\r"))
+    return {"logo_path": logo_path, "out_path": out_path, "style": style,
+            "font": font_path, "text_path": text_path}
+
+
+def render_branded(video_path: str, headline: str, logo_path: str, out_path: str,
+                   style: dict | None = None) -> str:
+    """One branded variant: `video_path` + `logo_path` + `headline` ->
+    `out_path` (1080x1920 mp4, same encode profile as shorts_format). `style`
+    defaults to the `style.json` sitting next to the logo (see `load_style`),
+    so callers get per-brand colors without passing anything. Blocking
+    — async callers run it in a thread. Raises FileNotFoundError for a missing
+    logo/font, ValueError for a broken style.json, RuntimeError (with ffmpeg's
+    stderr tail) on a failed encode; a partial output file is removed."""
+    job = _prepare_job(headline, logo_path, out_path, style)
     try:
-        proc = subprocess.run(
-            [
-                "ffmpeg", "-y", "-v", "error",
-                "-i", video_path, "-i", logo_path,
-                "-filter_complex", _filter_graph(font_path, text_path, style),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "128k",
-                "-movflags", "+faststart",
-                out_path,
-            ],
-            capture_output=True, text=True,
-        )
+        with renderlock.render_slot():
+            proc = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-i", video_path, "-i", logo_path,
+                    "-filter_complex",
+                    _filter_graph(job["font"], job["text_path"], job["style"]),
+                    *ENCODE_ARGS,
+                    out_path,
+                ],
+                capture_output=True, text=True,
+            )
         if proc.returncode != 0:
             try:
                 os.remove(out_path)
@@ -420,7 +494,52 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
             raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-300:]}")
     finally:
         try:
-            os.remove(text_path)
+            os.remove(job["text_path"])
         except OSError:
             pass
     return out_path
+
+
+def render_branded_multi(video_path: str, jobs: list[dict]) -> list[str]:
+    """Every brand in ONE ffmpeg pass: the source is decoded and the blur-fill
+    canvas built once, split N ways, each branch adding its own logo + banner
+    and encoding its own output — same per-file result as N `render_branded`
+    calls, minus the repeated decode/blur/composite work (the encodes dominate
+    and still happen N times). Each job dict: `headline`, `logo_path`,
+    `out_path`, optional `style`.
+
+    All-or-nothing: any failure removes every output and raises. A caller
+    that needs per-brand isolation (news_bot does) catches this and falls
+    back to one `render_branded` per job. Returns out paths in job order."""
+    if not jobs:
+        return []
+    prepared = []
+    try:
+        for job in jobs:
+            prepared.append(_prepare_job(job["headline"], job["logo_path"],
+                                         job["out_path"], job.get("style")))
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path]
+        for p in prepared:
+            cmd += ["-i", p["logo_path"]]
+        cmd += ["-filter_complex", _filter_graph_multi(prepared)]
+        for i, p in enumerate(prepared):
+            # "0:a?" — map the source audio when there is one, silently skip
+            # when there isn't (screen recordings often ship without).
+            cmd += ["-map", f"[v{i}]", "-map", "0:a?",
+                    *ENCODE_ARGS, p["out_path"]]
+        with renderlock.render_slot():
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            for p in prepared:
+                try:
+                    os.remove(p["out_path"])
+                except OSError:
+                    pass
+            raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-300:]}")
+        return [p["out_path"] for p in prepared]
+    finally:
+        for p in prepared:
+            try:
+                os.remove(p["text_path"])
+            except OSError:
+                pass

@@ -17,6 +17,14 @@ import json
 import logging
 import os
 import subprocess
+import sys
+
+# Repo root on sys.path so `from shared import …` resolves when run directly.
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from shared import branding, renderlock  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -66,25 +74,20 @@ def ensure_short(path: str) -> tuple[str, bool]:
         return path, False
 
     out = os.path.splitext(path)[0] + "_short.mp4"
-    filters = (
-        f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
-        f"crop={OUT_W}:{OUT_H},gblur=sigma=30[bg];"
-        f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
-    )
+    # The same blur-fill canvas and encode profile branding uses (cheap-blur
+    # background, speed preset) — one place tunes both renderers.
+    filters = branding.blurfill_chain(out_label="")
     log.info("re-rendering %s (%dx%d horizontal) to %dx%d vertical", path, w, h, OUT_W, OUT_H)
-    proc = subprocess.run(
-        [
-            "ffmpeg", "-y", "-v", "error", "-i", path,
-            "-filter_complex", filters,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            out,
-        ],
-        capture_output=True, text=True,
-    )
+    with renderlock.render_slot():
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error", "-i", path,
+                "-filter_complex", filters,
+                *branding.ENCODE_ARGS,
+                out,
+            ],
+            capture_output=True, text=True,
+        )
     if proc.returncode != 0:
         try:
             os.remove(out)

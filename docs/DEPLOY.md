@@ -27,6 +27,7 @@ systemctl restart news-bot
 | `news-collector` | `modules/telegram/collector.py` | Needs a one-off interactive login (below) before it can be enabled. |
 | `news-dispatcher` | `modules/telegram/dispatcher.py` | The only process that scores. |
 | `news-bot` | `modules/telegram/news_bot.py` | Manual broadcaster + autopilot drip + weekly cleanup. |
+| `newsroom-bot` | `modules/newsroom/main.py` | The client's WordPress→Telegram bot (`client/wp-newsbot` branch). Runs from its **own checkout** `/opt/wp-newsbot` with its own venv and `.env` (the `NR_*` vars + `OPENROUTER_API_KEY`), so pushing master code never restarts it. Deploy it by tarring the `client/wp-newsbot` tree (exclude `posts/`, `ui/`, media) over `/opt/wp-newsbot`. |
 
 All three are `Restart=always` and `WantedBy=multi-user.target`, so they come
 back after a crash and after a reboot.
