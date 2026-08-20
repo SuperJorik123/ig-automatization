@@ -162,11 +162,22 @@ def _parse_destinations(raw: str):
 # every one of these.
 TG_DESTINATIONS = _parse_destinations(os.environ.get("TG_DESTINATIONS", ""))
 
+# Master kill switch for ALL YouTube uploading (dispatcher auto-upload, the
+# news bot's manual picker, brand-it). OFF unless YT_UPLOADS_ENABLED=1 — three
+# accounts were terminated for community-guideline strikes on auto-uploaded
+# clips, so uploading is opt-in until a pre-upload policy check exists (see
+# the TODO in CLAUDE.md). publisher.publish_shorts also enforces this itself,
+# so a caller passing explicit destinations cannot bypass it.
+YT_UPLOADS_ENABLED = os.environ.get("YT_UPLOADS_ENABLED", "0") == "1"
+
 # YouTube destination channels (news bot picker + dispatcher auto-upload):
 # comma-separated "account:lang" pairs, e.g. "mirnews:en,rusnews:ru". Same
 # parser as TG_DESTINATIONS — here "chat_id" holds the ACCOUNT NAME, which
-# must match a folder under credentials/youtube/.
-YT_DESTINATIONS = _parse_destinations(os.environ.get("YT_DESTINATIONS", ""))
+# must match a folder under credentials/youtube/. Emptied when uploads are
+# disabled so the picker shows no YouTube rows and the dispatcher logs its
+# "nothing auto-uploads" warning at startup.
+YT_DESTINATIONS = (_parse_destinations(os.environ.get("YT_DESTINATIONS", ""))
+                   if YT_UPLOADS_ENABLED else [])
 
 
 # --------------------------------------------------------------------------- #

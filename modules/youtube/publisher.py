@@ -51,6 +51,15 @@ def publish_shorts(video_path: str, caption: str, dests: list | None = None):
 
     Returns (posted, errors): posted is the list of account names that
     succeeded, errors is a list of (account, message)."""
+    # Kill switch, enforced HERE and not only in config so that explicit
+    # `dests` can't sidestep it: three accounts were terminated over
+    # auto-uploaded clips, and uploads stay off until YT_UPLOADS_ENABLED=1.
+    if not config.YT_UPLOADS_ENABLED:
+        log.warning("YouTube uploads are DISABLED (YT_UPLOADS_ENABLED != 1) — "
+                    "not uploading %s", video_path)
+        return [], [(d["chat_id"], "YouTube uploads disabled (YT_UPLOADS_ENABLED)")
+                    for d in (dests if dests is not None else [])]
+
     if dests is None:
         dests = config.YT_DESTINATIONS
 

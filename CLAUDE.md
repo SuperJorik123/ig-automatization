@@ -137,6 +137,19 @@ On modern Samsung / OneUI, `d.set_clipboard(text)` raises `java.lang.SecurityExc
 
 ### Side notes / TODOs
 
+- **YouTube policy pre-check (BLOCKER for re-enabling uploads).** Three YouTube
+  accounts were terminated (2026-08) over community-guideline strikes on
+  auto-uploaded news clips. ALL YouTube uploading is now behind
+  `YT_UPLOADS_ENABLED=1` (default off; enforced both in `shared/config.py` and
+  inside `modules/youtube/publisher.publish_shorts`, so explicit destinations
+  can't bypass it). Do NOT flip it back on until a pre-upload compliance gate
+  exists: before any upload, run the clip's caption/title + sampled frames
+  through a moderation check against YouTube's Community Guidelines (graphic
+  violence, misinformation, reused/unoriginal content, spam) — an LLM
+  moderation pass on the text plus frame sampling is the likely shape — and
+  auto-reject anything borderline. Also consider per-account upload throttling
+  and staggering, since identical clips fanned out across channels look like
+  spam/reused content to YouTube regardless of subject matter.
 - **Audio for posts/reels.** The new IG flow may surface an audio/music picker on some post types (reels, possibly some post variants). When we add **reel** or **carousel** support, remember to handle — or explicitly skip — the audio step on the way through. The current photo-post flow does not seem to include it, but verify with `modules/instagram/dump_ui.py` after step 5 if a music screen appears.
 - **Carousel.** Will also start by tapping **Post** in the creation sheet, then multi-select on the gallery screen. Not implemented yet.
 - **Selector hunting.** Content-description (`description=`, `descriptionContains=`) and visible text (`text=`) are far more stable across IG versions than resource IDs. When a selector breaks, start there before reaching for `resourceId=`.
