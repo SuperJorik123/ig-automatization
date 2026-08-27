@@ -57,6 +57,7 @@ if _ROOT not in sys.path:
 
 from shared import config  # noqa: E402  (needs the sys.path bootstrap above)
 from shared import reel_downloader  # noqa: E402
+from shared.monitoring import errmail  # noqa: E402
 from modules.instagram import upload_post as ig  # noqa: E402
 
 # Single shared queue at the repo root (posts/ + posts/posted/).
@@ -333,6 +334,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # --------------------------------------------------------------------------- #
 
 def main() -> None:
+    errmail.install("ig_trigger_bot")  # every logged ERROR -> one email to the operator
     app = Application.builder().token(TOKEN).build()
     # Chat filter limits the handler to the configured group; ~COMMAND
     # skips slash-commands so we don't accidentally treat /start as a URL.

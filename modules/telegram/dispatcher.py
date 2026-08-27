@@ -38,6 +38,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from shared import config  # noqa: E402
+from shared.monitoring import errmail, heartbeat  # noqa: E402
 from modules.telegram import queue_store, smart_filter  # noqa: E402
 from modules.youtube import publisher as yt_publisher  # noqa: E402
 
@@ -108,12 +109,14 @@ def main() -> None:
         raise SystemExit("OPENROUTER_API_KEY missing in .env — the scorer can't run")
     if not config.YT_DESTINATIONS:
         log.warning("YT_DESTINATIONS empty — items will be scored + queued but nothing auto-uploads")
+    errmail.install("dispatcher")  # every logged ERROR -> one email to the operator
     queue_store.init()
     log.info(
         "dispatcher running: auto-upload at score >= %d to %d YouTube channel(s). Ctrl+C to stop.",
         config.YT_AUTO_MIN_SCORE, len(config.YT_DESTINATIONS),
     )
     while True:
+        heartbeat.maybe_ping(config.HEALTHCHECK_URL_DISPATCHER)
         try:
             if not process_one():
                 time.sleep(POLL_S)

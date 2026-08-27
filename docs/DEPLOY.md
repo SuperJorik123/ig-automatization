@@ -53,6 +53,63 @@ has to cross a non-interactive channel, render it to a PNG and inline it into
 the page as a `data:` URI — serving it as a separate `<img src>` gets cached by
 the browser and every scan then hits an already-dead token ("invalid QR code").
 
+## Monitoring (shared/monitoring)
+
+Four layers, all inert until `ALERT_SMTP_HOST` + `ALERT_EMAIL_TO` are set in
+`.env` (see `.env.example`, "Monitoring / alert email"):
+
+1. **Error emails** — each service mails every logged ERROR/traceback as it
+   happens (`errmail.install()` in each entrypoint; subject tag = process).
+2. **Heartbeats** — news_bot / collector / dispatcher each ping their own
+   healthchecks.io check URL every 5 min from inside their own loop. Create
+   three checks at healthchecks.io (grace ~15 min), paste the URLs into
+   `HEALTHCHECK_URL_NEWSBOT/_COLLECTOR/_DISPATCHER`. Missing pings → email:
+   this is the "server down" alarm, and it also fires on a crashed or hung
+   process and a dead network. No pings are sent while the URL is blank.
+3. **Machine + balance checks** — `shared/monitoring/checks.py` on a 5-minute
+   systemd timer: CPU over `ALERT_CPU_PCT` (80) each run; hourly, BulkFollows
+   balance under `ALERT_BULKFOLLOWS_MIN` ($2) and OpenRouter credits under
+   `ALERT_OPENROUTER_MIN` ($0.50). One email on crossing, a daily reminder
+   while bad, an all-clear on recovery. A failing check (panel unreachable,
+   bad key) alerts with the same shape.
+4. **Restart resilience** — already there: every unit is `Restart=always`; a
+   crash-loop shows up as error emails + eventually silent heartbeats.
+
+Timer units (master checkout — mirror with `/opt/wp-newsbot` paths and the
+name `newsroom-monitor` for the client checkout):
+
+```
+# /etc/systemd/system/news-monitor.service
+[Unit]
+Description=ig-automatization machine + balance checks
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ig-automatization2
+ExecStart=/opt/ig-automatization2/.venv/bin/python shared/monitoring/checks.py
+
+# /etc/systemd/system/news-monitor.timer
+[Unit]
+Description=run news-monitor every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+```
+
+```
+systemctl daemon-reload && systemctl enable --now news-monitor.timer
+```
+
+**Both checkouts share this VPS**, so per-machine and per-account legs run in
+only one of them: the newsroom checkout's `.env` sets `ALERT_CPU_PCT=0` and
+`ALERT_OPENROUTER_MIN=0` — its timer then only watches the client's
+`NR_BULKFOLLOWS_API_KEY` balance, keeping the client's panel key out of the
+master checkout's `.env`.
+
 ## Pushing new code
 
 Secrets and runtime state are git-ignored, so a plain `git pull` never touches

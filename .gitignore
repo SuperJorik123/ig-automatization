@@ -10,6 +10,9 @@ credentials/
 # CREDENTIAL; media + the SQLite queue are local runtime artefacts.
 modules/telegram/data/
 
+# Monitoring state (shared/monitoring/checks.py) — repo-root data/ only.
+/data/
+
 # Python
 __pycache__/
 *.py[cod]

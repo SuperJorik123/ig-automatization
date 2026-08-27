@@ -94,6 +94,7 @@ from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.telegram import branded, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from shared import branding  # noqa: E402
+from shared.monitoring import errmail, heartbeat  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 # python-telegram-bot's httpx client logs every 10 s getUpdates poll at INFO,
@@ -1054,11 +1055,21 @@ async def _weekly_cleanup_job(context) -> None:
         log.exception("weekly cleanup crashed — next Monday retries")
 
 
+async def _heartbeat_job(context) -> None:
+    """Dead-man's switch: prove the event loop is alive to healthchecks.io.
+    Running as a JobQueue job is the point — a wedged loop stops the pings."""
+    await asyncio.to_thread(heartbeat.ping, config.HEALTHCHECK_URL_NEWSBOT)
+
+
 async def _on_start(app) -> None:
     """Queue the autopilot's first tick once the event loop is running, register
     the weekly cleanup, and connect the big-file client so its state is known
     (and logged) before the first post rather than discovered mid-upload."""
     autopilot.schedule(app)
+    if app.job_queue is not None and config.HEALTHCHECK_URL_NEWSBOT:
+        app.job_queue.run_repeating(_heartbeat_job, interval=heartbeat.INTERVAL_S,
+                                    first=10, name="heartbeat")
+        log.info("heartbeat: pinging healthchecks every %ds", heartbeat.INTERVAL_S)
     if app.job_queue is not None:
         # A tz-aware time is required for "local" — a naive one is read as UTC.
         # See cleanup.MONDAY for the day-index trap.
@@ -1083,6 +1094,7 @@ async def _on_shutdown(app) -> None:
 
 
 def main() -> None:
+    errmail.install("news_bot")  # every logged ERROR -> one email to the operator
     _sweep_orphans()
     queue_store.init()  # the autopilot reads/writes the same DB as the collector
     app = (Application.builder().token(config.NEWS_BOT_TOKEN)

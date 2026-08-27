@@ -274,3 +274,48 @@ TG_AUTOPILOT = os.environ.get("TG_AUTOPILOT", "1").strip().lower() not in ("0", 
 # from the last post. Useful for testing, and for lining the first post of a
 # fresh deployment up with a sensible hour.
 TG_FIRST_TICK = os.environ.get("TG_FIRST_TICK", "").strip()
+
+
+# --------------------------------------------------------------------------- #
+# Monitoring / alert email (shared/monitoring — mailer, errmail, checks)      #
+# --------------------------------------------------------------------------- #
+
+
+def _float_env(name: str, default: float) -> float:
+    """Float from .env, same fall-back contract as _int_env."""
+    try:
+        return float(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+# The mailbox alerts are sent FROM and the address they go TO. Both
+# ALERT_SMTP_HOST and ALERT_EMAIL_TO must be set for ANY alert email to leave
+# the system — with either blank every monitoring hook is a silent no-op, so
+# dev runs and un-monitored machines behave exactly as before. A Gmail /
+# Workspace sender needs an app password, not the account password.
+ALERT_SMTP_HOST = os.environ.get("ALERT_SMTP_HOST", "").strip()
+ALERT_SMTP_PORT = _int_env("ALERT_SMTP_PORT", 587)  # 465 = SSL-on-connect, else STARTTLS
+ALERT_SMTP_USER = os.environ.get("ALERT_SMTP_USER", "").strip()
+ALERT_SMTP_PASS = os.environ.get("ALERT_SMTP_PASS", "").strip()
+ALERT_EMAIL_TO = os.environ.get("ALERT_EMAIL_TO", "").strip()
+ALERT_EMAIL_FROM = os.environ.get("ALERT_EMAIL_FROM", "").strip() or ALERT_SMTP_USER
+
+# Flood valve for the per-occurrence error emails (errmail.py). 0 = unlimited
+# — one email per logged ERROR, the operator's explicit choice. Set a number
+# only if a broken source ever floods the inbox.
+ALERT_MAX_PER_HOUR = _int_env("ALERT_MAX_PER_HOUR", 0)
+
+# Floors for shared/monitoring/checks.py. 0 disables that leg — used to keep
+# the two checkouts sharing the VPS from double-alerting: CPU and the
+# OpenRouter account are per-machine/per-account, so only master's timer
+# checks them and the newsroom checkout sets both to 0.
+ALERT_CPU_PCT = _float_env("ALERT_CPU_PCT", 80)
+ALERT_BULKFOLLOWS_MIN = _float_env("ALERT_BULKFOLLOWS_MIN", 2.0)
+ALERT_OPENROUTER_MIN = _float_env("ALERT_OPENROUTER_MIN", 0.5)
+
+# healthchecks.io ping URLs (dead-man's switch), one per long-running
+# process. Blank = that process sends no heartbeat.
+HEALTHCHECK_URL_NEWSBOT = os.environ.get("HEALTHCHECK_URL_NEWSBOT", "").strip()
+HEALTHCHECK_URL_COLLECTOR = os.environ.get("HEALTHCHECK_URL_COLLECTOR", "").strip()
+HEALTHCHECK_URL_DISPATCHER = os.environ.get("HEALTHCHECK_URL_DISPATCHER", "").strip()

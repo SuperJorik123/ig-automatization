@@ -41,6 +41,9 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from modules.instagram import upload_post as ig
 from shared import reel_downloader
+from shared.monitoring import errmail
+
+errmail.install("server")  # every logged ERROR -> one email to the operator
 
 app = FastAPI(title="ig-automatization UI backend")
 

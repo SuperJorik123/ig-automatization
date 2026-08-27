@@ -24,6 +24,7 @@ if _ROOT not in sys.path:
 from telethon import TelegramClient, events  # noqa: E402
 
 from shared import config  # noqa: E402
+from shared.monitoring import errmail, heartbeat  # noqa: E402
 from modules.telegram import queue_store  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -62,6 +63,7 @@ def main() -> None:
         raise SystemExit("TELEGRAM_API_ID / TELEGRAM_API_HASH missing in .env (get them at my.telegram.org)")
     if not config.TG_SOURCES:
         raise SystemExit("TG_SOURCES empty in .env — list the source channels to collect from")
+    errmail.install("collector")  # every logged ERROR -> one email to the operator
     os.makedirs(config.TG_DATA_DIR, exist_ok=True)
     queue_store.init()
 
@@ -79,6 +81,10 @@ def main() -> None:
 
     log.info("collector connecting; watching %d source(s)", len(config.TG_SOURCES))
     client.start()  # interactive phone-code login on first run, then reuses the session
+    if config.HEALTHCHECK_URL_COLLECTOR:
+        # Heartbeat rides Telethon's own loop so a wedged loop stops the pings.
+        client.loop.create_task(heartbeat.run(config.HEALTHCHECK_URL_COLLECTOR))
+        log.info("heartbeat: pinging healthchecks every %ds", heartbeat.INTERVAL_S)
     log.info("collector running — new posts from sources will be queued. Ctrl+C to stop.")
     client.run_until_disconnected()
 

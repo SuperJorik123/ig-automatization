@@ -34,6 +34,9 @@ tweepy>=4.14.0
 # and keycaps the font can't draw are dropped instead of rendering as boxes.
 fonttools>=4.40
 
+# Monitoring (shared/monitoring): CPU sampling for the 5-minute checks timer.
+psutil>=5.9
+
 # Tests (py -m pytest) — offline unit tests for the smart filter, the queue
 # store and the reaction ask.
 pytest>=8.0
