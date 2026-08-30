@@ -179,6 +179,13 @@ YT_UPLOADS_ENABLED = os.environ.get("YT_UPLOADS_ENABLED", "0") == "1"
 YT_DESTINATIONS = (_parse_destinations(os.environ.get("YT_DESTINATIONS", ""))
                    if YT_UPLOADS_ENABLED else [])
 
+# Twitter/X accounts for the news-bot picker, "account:lang" pairs — same
+# parser again, "chat_id" holds the ACCOUNT NAME keying that account's
+# TWITTER_<ACCOUNT>_* credential vars. Offered for single-photo/single-video
+# posts. Unset = no Twitter rows. Every tweet costs pay-per-use API credit
+# (a tweet whose TEXT contains a link bills ~13x a plain one).
+TW_DESTINATIONS = _parse_destinations(os.environ.get("TW_DESTINATIONS", ""))
+
 
 # --------------------------------------------------------------------------- #
 # Branded clips (shared/branding.py, news bot "Brand it" flow)                #

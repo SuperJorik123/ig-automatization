@@ -5,13 +5,18 @@ Tweepy in two flavours per post: the v1.1 API for media upload (chunked for
 video, simple for images — v2 has no media upload endpoint) and the v2 Client
 to create the tweet itself. Credentials live in the repo-root .env, five vars
 per account, keyed by the account name uppercased with non-alphanumerics
-mapped to "_":
+mapped to "_". The names match what console.x.com shows (2026 console):
 
-    TWITTER_<ACCOUNT>_CONSUMER_KEY
-    TWITTER_<ACCOUNT>_CONSUMER_SECRET
-    TWITTER_<ACCOUNT>_ACCESS_TOKEN
-    TWITTER_<ACCOUNT>_ACCESS_TOKEN_SECRET
-    TWITTER_<ACCOUNT>_BEARER_TOKEN
+    TWITTER_<ACCOUNT>_CONSUMER_KEY     "Consumer Key" in the console
+    TWITTER_<ACCOUNT>_SECRET_KEY       "Secret Key" (the consumer secret)
+    TWITTER_<ACCOUNT>_BEARER_TOKEN     "Bearer Token"
+    TWITTER_<ACCOUNT>_ACCESS_TOKEN     NOT shown by the console — generate
+    TWITTER_<ACCOUNT>_ACCESS_SECRET    both with modules/twitter/authorize.py
+
+(The console's "Client ID"/"Client Secret" are OAuth 2.0 and unused here —
+keep them somewhere safe, the bot doesn't read them.) The older var names
+CONSUMER_SECRET / ACCESS_TOKEN_SECRET keep working as fallbacks so accounts
+configured before the rename don't break.
 
 The Twitter app must have READ AND WRITE OAuth permissions — regenerate the
 access token + secret after changing that (the bearer token stays the same).
@@ -49,20 +54,22 @@ def _env_prefix(account_name: str) -> str:
     return f"TWITTER_{slug}_"
 
 
-def _get_account_env(account_name: str, field: str) -> str:
-    env_key = _env_prefix(account_name) + field
-    value = os.getenv(env_key, "").strip()
-    if not value:
-        raise EnvironmentError(f"Missing Twitter credential in environment: {env_key}")
-    return value
+def _get_account_env(account_name: str, field: str, *fallbacks: str) -> str:
+    """Read one credential, trying `field` then any older fallback names."""
+    prefix = _env_prefix(account_name)
+    for name in (field, *fallbacks):
+        value = os.getenv(prefix + name, "").strip()
+        if value:
+            return value
+    raise EnvironmentError(f"Missing Twitter credential in environment: {prefix + field}")
 
 
 def _get_clients(account_name: str) -> tuple:
     """Build the v1.1 API (media upload) + v2 Client (tweet creation) pair."""
     api_key = _get_account_env(account_name, "CONSUMER_KEY")
-    api_secret = _get_account_env(account_name, "CONSUMER_SECRET")
+    api_secret = _get_account_env(account_name, "SECRET_KEY", "CONSUMER_SECRET")
     access_token = _get_account_env(account_name, "ACCESS_TOKEN")
-    access_secret = _get_account_env(account_name, "ACCESS_TOKEN_SECRET")
+    access_secret = _get_account_env(account_name, "ACCESS_SECRET", "ACCESS_TOKEN_SECRET")
     bearer_token = _get_account_env(account_name, "BEARER_TOKEN")
 
     auth = tweepy.OAuth1UserHandler(
