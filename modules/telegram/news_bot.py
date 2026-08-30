@@ -91,9 +91,10 @@ from modules.telegram import (  # noqa: E402
     reactions,
 )
 from modules.youtube import publisher as yt_publisher  # noqa: E402
+from modules.twitter import publisher as tw_publisher  # noqa: E402
 from modules.telegram import branded, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
-from shared import branding  # noqa: E402
+from shared import branding, photo_card  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -112,10 +113,10 @@ except ValueError as exc:
     raise SystemExit(
         f"TELEGRAM_CHAT_ID must be an integer, got {config.TELEGRAM_CHAT_ID!r}"
     ) from exc
-if not config.TG_DESTINATIONS and not config.YT_DESTINATIONS:
+if not (config.TG_DESTINATIONS or config.YT_DESTINATIONS or config.TW_DESTINATIONS):
     raise SystemExit(
-        "No destinations in .env — set TG_DESTINATIONS (chat_id:lang) and/or "
-        "YT_DESTINATIONS (yt_account:lang)"
+        "No destinations in .env — set TG_DESTINATIONS (chat_id:lang), "
+        "YT_DESTINATIONS (yt_account:lang) and/or TW_DESTINATIONS (x_account:lang)"
     )
 
 # Bot API refuses get_file above this size. Past it we go through the MTProto
@@ -136,9 +137,11 @@ _BOT_UPLOAD_LIMIT = 50 * 1024 * 1024
 # Maps the message_id of a picker prompt the bot sent → the post waiting on it:
 # {"text": str, "cap_src": str|None, "media": [{"file_id"|"path","type",...}...],
 #  "files": [downloaded paths to delete when the picker closes],
-#  "sel_tg": set[int], "sel_yt": set[int], "sel_em": set[int]}.
+#  "sel_tg": set[int], "sel_yt": set[int], "sel_tw": set[int], "sel_em": set[int]}.
 # sel_tg indexes TG_DESTINATIONS, sel_yt indexes YT_DESTINATIONS (YouTube rows
-# are only offered when the post contains a video), sel_em indexes EMOJI_SERVICES.
+# are only offered when the post contains a video), sel_tw indexes
+# TW_DESTINATIONS (Twitter rows only for single-photo / single-video posts —
+# albums need X's multi-image path, not built), sel_em indexes EMOJI_SERVICES.
 # cap_src says where the caption came from for URL posts ("your text" /
 # "from link" / "edited").
 # In-memory only; a bot restart expires open pickers (tapping one then says
@@ -188,6 +191,32 @@ def _has_video(media: list) -> bool:
     return any(m["type"] == "video" for m in media)
 
 
+def _tweetable(media: list) -> bool:
+    """Twitter rows are offered for exactly one photo or one video. Albums are
+    excluded — X takes up to 4 images but through a different upload path the
+    poster doesn't implement."""
+    return len(media) == 1 and media[0]["type"] in ("photo", "video")
+
+
+def _all_photos(media: list) -> bool:
+    return bool(media) and all(m["type"] == "photo" for m in media)
+
+
+def _gate_text(state: dict) -> str:
+    """Body of the as-is / brand gate, for both the video and the photo kind."""
+    if state.get("gate_kind") == "photo":
+        head = "Create a news card from these photos, or post them as-is?"
+    else:
+        head = "Brand this clip, or post it as-is?"
+    return head + (f"\n\n📝 {state['text']}" if state["text"] else "")
+
+
+def _gate_markup(state: dict) -> InlineKeyboardMarkup:
+    if state.get("gate_kind") == "photo":
+        return branded.card_gate_keyboard()
+    return branded.gate_keyboard()
+
+
 # The emoji catalogue and the BulkFollows ordering rules live in
 # modules/telegram/reactions.py — shared with the autopilot's reaction ask so
 # the two flows can't drift apart.
@@ -213,6 +242,13 @@ def _keyboard(state: dict) -> InlineKeyboardMarkup:
             if dest["lang"]:
                 label += f" · {dest['lang']}"
             rows.append([InlineKeyboardButton(label, callback_data=f"y:{i}")])
+    if _tweetable(state["media"]):
+        for i, dest in enumerate(config.TW_DESTINATIONS):
+            mark = "☑" if i in state["sel_tw"] else "☐"
+            label = f"{mark} 𝕏 {dest['chat_id']}"
+            if dest["lang"]:
+                label += f" · {dest['lang']}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"x:{i}")])
     # Reactions ("e:<i>" indexes EMOJI_SERVICES), two per row so the labels stay
     # readable. Optional: submitting with none selected just skips them.
     for i in range(0, len(EMOJI_SERVICES), 2):
@@ -253,20 +289,22 @@ def _prompt_text(state: dict) -> str:
 async def _prompt(msg, text: str, media: list) -> None:
     """Reply to the news message with the channel picker."""
     state = {"text": text, "media": media, "files": [],
-             "sel_tg": set(), "sel_yt": set(), "sel_em": set()}
+             "sel_tg": set(), "sel_yt": set(), "sel_tw": set(), "sel_em": set()}
     prompt = _track(await msg.reply_text(_prompt_text(state),
                                          reply_markup=_keyboard(state)))
     _pending[prompt.message_id] = state
 
 
-async def _gate(msg, text: str, media: list, files: list | None = None) -> None:
-    """Single-video post with brands configured: ask as-is vs brand-it before
-    opening any picker. State is the same _pending dict, mode-tagged."""
+async def _gate(msg, text: str, media: list, files: list | None = None,
+                kind: str = "video") -> None:
+    """Post with brands configured: ask as-is vs brand-it (single video) or
+    as-is vs create-post (photos → news card) before opening any picker.
+    State is the same _pending dict, mode-tagged."""
     state = {"text": text, "media": media, "files": list(files or ()),
-             "sel_tg": set(), "sel_yt": set(), "sel_em": set(), "mode": "gate"}
-    prompt = _track(await msg.reply_text(
-        "Brand this clip, or post it as-is?" + (f"\n\n📝 {text}" if text else ""),
-        reply_markup=branded.gate_keyboard()))
+             "sel_tg": set(), "sel_yt": set(), "sel_tw": set(), "sel_em": set(),
+             "mode": "gate", "gate_kind": kind}
+    prompt = _track(await msg.reply_text(_gate_text(state),
+                                         reply_markup=_gate_markup(state)))
     _pending[prompt.message_id] = state
 
 
@@ -320,14 +358,13 @@ async def _handle_url(msg, text: str) -> None:
         "origin": "twitter" if reel_downloader.is_twitter_url(url) else "instagram",
         "sel_tg": set(),
         "sel_yt": set(),
+        "sel_tw": set(),
         "sel_em": set(),
     }
-    if is_video and config.BRANDS:
+    if config.BRANDS and (is_video or _all_photos(state["media"])):
         state["mode"] = "gate"
-        cap = state["text"]
-        await note.edit_text(
-            "Brand this clip, or post it as-is?" + (f"\n\n📝 {cap}" if cap else ""),
-            reply_markup=branded.gate_keyboard())
+        state["gate_kind"] = "video" if is_video else "photo"
+        await note.edit_text(_gate_text(state), reply_markup=_gate_markup(state))
     else:
         await note.edit_text(_prompt_text(state), reply_markup=_keyboard(state))
     _pending[note.message_id] = state
@@ -340,7 +377,9 @@ async def _flush_album(gid) -> None:
     except asyncio.CancelledError:
         return  # another part arrived; its timer took over
     entry = _albums.pop(gid, None)
-    if entry:
+    if entry and config.BRANDS and _all_photos(entry["media"]):
+        await _gate(entry["msg"], entry["text"], entry["media"], kind="photo")
+    elif entry:
         await _prompt(entry["msg"], entry["text"], entry["media"])
 
 
@@ -360,8 +399,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         state["cap_src"] = "edited"
         mode = state.get("mode")
         if mode == "gate":
-            body = f"Brand this clip, or post it as-is?\n\n📝 {state['text']}"
-            markup = branded.gate_keyboard()
+            body = _gate_text(state)
+            markup = _gate_markup(state)
         elif mode == "brand":
             body = _brand_prompt_text(state)
             markup = branded.brand_keyboard(state["brands"], state["sel_brands"])
@@ -390,6 +429,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if gid is None:
         if media_item and media_item["type"] == "video" and config.BRANDS:
             await _gate(msg, text, [media_item])
+        elif media_item and media_item["type"] == "photo" and config.BRANDS:
+            await _gate(msg, text, [media_item], kind="photo")
         else:
             await _prompt(msg, text, [media_item] if media_item else [])
         return
@@ -476,6 +517,44 @@ async def _post_to_youtube(bot, text: str, media: list, dests: list):
                 pass
 
 
+async def _post_to_twitter(bot, text: str, media: list, dests: list):
+    """Tweet the post's single media item from each selected Twitter account
+    (translated + 280-trimmed per account by the publisher). URL posts already
+    have the file on disk; a Telegram-uploaded video goes through _fetch_video
+    (MTProto past 20 MB); a Telegram photo is always within the Bot API limit.
+    Returns the same (posted, errors) shape as the other publishers."""
+    if not _tweetable(media):
+        return [], [(d["chat_id"], "not a single photo/video post") for d in dests]
+    item = media[0]
+
+    dl_dir = os.path.join(config.TG_DATA_DIR, "media")
+    os.makedirs(dl_dir, exist_ok=True)
+    path = None
+    try:
+        if item.get("path"):
+            path = item["path"]
+        elif item["type"] == "video":
+            stem = os.path.join(dl_dir, f"manual_{item['file_id'][-24:]}")
+            path = await _fetch_video(bot, item, stem)
+        else:  # photo — Telegram caps these way under the 20 MB get_file limit
+            path = os.path.join(dl_dir, f"manual_{item['file_id'][-24:]}.jpg")
+            tg_file = await bot.get_file(item["file_id"])
+            await tg_file.download_to_drive(path)
+        # Posting is blocking network I/O — keep the bot's event loop free.
+        return await asyncio.to_thread(tw_publisher.publish_tweets, path, text, dests)
+    except Exception as exc:  # download refusal, network, ...
+        log.error("manual Twitter post failed: %s", exc)
+        return [], [(d["chat_id"], str(exc)) for d in dests]
+    finally:
+        # Only a file WE downloaded gets removed — a URL post's file belongs to
+        # the picker state and is cleaned up with it.
+        if path and path != item.get("path"):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 # --------------------------------------------------------------------------- #
 # Brand-it flow (gate → brand picker → render → publish picker)               #
 # --------------------------------------------------------------------------- #
@@ -521,6 +600,19 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
                                   reply_markup=_keyboard(state))
         return
 
+    if verb == "card":
+        await q.answer()
+        state["mode"] = "brand"
+        state["card"] = True
+        state["brands"] = branded.available_brands(config.BRANDS)
+        state["sel_brands"] = {i for i, b in enumerate(state["brands"])
+                               if b["has_logo"]}
+        await q.edit_message_text(
+            _brand_prompt_text(state),
+            reply_markup=branded.brand_keyboard(state["brands"],
+                                                state["sel_brands"]))
+        return
+
     if verb == "brand":
         # Fail here, on the tap, rather than after a minute of rendering setup.
         video = next((m for m in state["media"] if m["type"] == "video"), None)
@@ -558,7 +650,10 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
                            "it first.", show_alert=True)
             return
         await q.answer()
-        await _do_render(q, context, state)
+        if state.get("card"):
+            await _do_render_card(q, context, state)
+        else:
+            await _do_render(q, context, state)
         return
 
     if verb.startswith("p:") and state.get("mode") == "publish":
@@ -749,6 +844,126 @@ async def _do_render(q, context, state: dict) -> None:
     _pending[prompt.message_id] = state
 
 
+async def _ensure_local_photos(bot, state: dict) -> list[str]:
+    """Local paths of every photo in the post, in message order. Telegram
+    photos are always far under the 20 MB get_file cap. Memoised on the
+    media dicts like _ensure_local_video."""
+    dl_dir = os.path.join(config.TG_DATA_DIR, "media")
+    os.makedirs(dl_dir, exist_ok=True)
+    paths = []
+    for i, m in enumerate(state["media"]):
+        if m["type"] != "photo":
+            continue
+        if not m.get("path"):
+            path = os.path.join(dl_dir, f"card_src_{m['file_id'][-24:]}_{i}.jpg")
+            tg_file = await bot.get_file(m["file_id"])
+            await tg_file.download_to_drive(path)
+            m["path"] = path
+            state["files"].append(path)
+        paths.append(m["path"])
+    return paths
+
+
+async def _do_render_card(q, context, state: dict) -> None:
+    """Photo twin of _do_render: first photo = hero, next two = circular
+    insets, headline translated per brand, one card per selected brand via
+    shared/photo_card.py. Each card is sent back as a photo, then the publish
+    picker opens (TG + X pairs only — YouTube can't take a photo)."""
+    brands = [state["brands"][i] for i in sorted(state["sel_brands"])]
+    await q.edit_message_text(
+        "⏳ composing " + ", ".join(b["name"] for b in brands) + " …")
+
+    try:
+        photos = await _ensure_local_photos(context.bot, state)
+        if not photos:
+            raise ValueError("no photos in this post")
+    except Exception as exc:
+        log.error("card render setup failed: %s", exc)
+        _pending.pop(q.message.message_id, None)
+        _cleanup(state)
+        await q.edit_message_text(f"❌ can't fetch the photos: {str(exc)[:300]}")
+        return
+    hero, insets = photos[0], photos[1:3]
+
+    media_dir = os.path.join(config.TG_DATA_DIR, "media")
+    renders, failures, warnings = [], [], []
+    cache: dict[str, str] = {}
+    for b in brands:
+        try:
+            lang = b["lang"]
+            if lang not in cache:
+                cache[lang] = (await asyncio.to_thread(
+                    translator.translate, state["text"], lang,
+                    config.SOURCE_LANG) if lang else state["text"])
+            out = os.path.join(
+                media_dir, f"card_{q.message.message_id}_{b['name']}.jpg")
+            await asyncio.to_thread(photo_card.render_card, hero, cache[lang],
+                                    b["logo"], out, insets)
+        except Exception as exc:
+            log.error("card render failed for %s: %s", b["name"], exc)
+            failures.append((b["name"], str(exc)[:200]))
+            continue
+        state["files"].append(out)
+        renders.append({"brand": b, "path": out, "headline": cache[lang],
+                        "kind": "photo"})
+
+    for r in renders:
+        try:
+            with open(r["path"], "rb") as fh:
+                _track(await q.message.chat.send_photo(
+                    photo=fh, caption=f"🖼 {r['brand']['name']}"))
+        except Exception as exc:  # Telegram send only — the render succeeded
+            log.error("card preview send failed for %s: %s", r["brand"]["name"], exc)
+            warnings.append((r["brand"]["name"], str(exc)[:200]))
+
+    if not renders:
+        _pending.pop(q.message.message_id, None)
+        _cleanup(state)
+        await q.edit_message_text(
+            "❌ all cards failed:\n"
+            + "\n".join(f"{n}: {e}" for n, e in failures))
+        return
+
+    state["mode"] = "publish"
+    state["renders"] = renders
+    state["pairs"] = branded.pairs_for(renders, 0)
+    state["sel_pairs"] = set()
+
+    summary = "🖼 composed: " + ", ".join(r["brand"]["name"] for r in renders)
+    if warnings:
+        summary += "\n" + "\n".join(
+            f"⚠️ {n}: composed, preview send failed: {e}" for n, e in warnings)
+    if failures:
+        summary += "\n" + "\n".join(f"❌ {n}: {e}" for n, e in failures)
+
+    try:
+        await q.edit_message_text(summary)
+        if not state["pairs"]:
+            _track(await q.message.chat.send_message(
+                "no destinations configured for the composed brands "
+                "(BRAND_<NAME>_TG/TW) — cards above are yours, nothing to publish"))
+            _pending.pop(q.message.message_id, None)
+            _cleanup(state)
+            return
+        prompt = _track(await q.message.chat.send_message(
+            "Publish which?", reply_markup=branded.publish_keyboard(
+                state["pairs"], set())))
+    except Exception as exc:
+        log.error("card publish-picker handoff failed: %s", exc)
+        _pending.pop(q.message.message_id, None)
+        _cleanup(state)
+        try:
+            _track(await q.message.chat.send_message(
+                f"❌ composed but couldn't open the publish picker "
+                f"({str(exc)[:200]}) — temp files removed"))
+        except Exception:
+            pass
+        return
+
+    _pending.pop(q.message.message_id, None)
+    _pending[prompt.message_id] = state
+
+
 async def _do_publish(q, context, state: dict) -> None:
     """Push each selected pair through its platform publisher. The headline is
     already translated per brand — Telegram destinations get lang "" so
@@ -765,7 +980,7 @@ async def _do_publish(q, context, state: dict) -> None:
             if p["platform"] == "tg":
                 posted, errors, links = await publisher.publish(
                     context.bot, r["headline"],
-                    [{"path": r["path"], "type": "video"}],
+                    [{"path": r["path"], "type": r.get("kind", "video")}],
                     [{"chat_id": b["tg"], "lang": ""}])
                 if posted:
                     # Same post-publish path as the manual picker (BulkFollows
@@ -949,7 +1164,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _on_brand_callback(q, context, state, data[2:])
         return
 
-    if data == "submit" and not (state["sel_tg"] or state["sel_yt"]):
+    if data == "submit" and not (state["sel_tg"] or state["sel_yt"] or state["sel_tw"]):
         await q.answer("Pick at least one channel.", show_alert=True)
         return
 
@@ -965,6 +1180,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await q.edit_message_reply_markup(_keyboard(state))
         return
 
+    if data.startswith("x:"):
+        state["sel_tw"] ^= {int(data.split(":", 1)[1])}  # toggle
+        await q.edit_message_reply_markup(_keyboard(state))
+        return
+
     if data.startswith("e:"):
         state["sel_em"] ^= {int(data.split(":", 1)[1])}  # toggle
         await q.edit_message_reply_markup(_keyboard(state))
@@ -974,6 +1194,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         state["sel_tg"] = set(range(len(config.TG_DESTINATIONS)))
         if _has_video(state["media"]):
             state["sel_yt"] = set(range(len(config.YT_DESTINATIONS)))
+        if _tweetable(state["media"]):
+            state["sel_tw"] = set(range(len(config.TW_DESTINATIONS)))
         await q.edit_message_reply_markup(_keyboard(state))
         return
 
@@ -982,6 +1204,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "none":
         state["sel_tg"] = set()
         state["sel_yt"] = set()
+        state["sel_tw"] = set()
         state["sel_em"] = set()
         await q.edit_message_reply_markup(_keyboard(state))
         return
@@ -995,9 +1218,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "submit":
         dests_tg = [config.TG_DESTINATIONS[i] for i in sorted(state["sel_tg"])]
         dests_yt = [config.YT_DESTINATIONS[i] for i in sorted(state["sel_yt"])]
+        dests_tw = [config.TW_DESTINATIONS[i] for i in sorted(state["sel_tw"])]
         emojis = [EMOJI_SERVICES[i] for i in sorted(state["sel_em"])]
         _pending.pop(q.message.message_id, None)
-        names = [d["chat_id"] for d in dests_tg] + [f"YT {d['chat_id']}" for d in dests_yt]
+        names = ([d["chat_id"] for d in dests_tg]
+                 + [f"YT {d['chat_id']}" for d in dests_yt]
+                 + [f"𝕏 {d['chat_id']}" for d in dests_tw])
         note = "⏳ posting to " + ", ".join(names)
         if emojis:
             note += "  |  " + " ".join(e.get("label") or e["emoji"] for e in emojis)
@@ -1025,6 +1251,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 lines.append("✅ YouTube: " + ", ".join(posted))
             for account, err in errors:
                 lines.append(f"❌ YT {account}: {err}")
+
+        if dests_tw:
+            posted, errors = await _post_to_twitter(
+                context.bot, state["text"], state["media"], dests_tw
+            )
+            if posted:
+                lines.append("✅ 𝕏: " + ", ".join(posted))
+            for account, err in errors:
+                lines.append(f"❌ 𝕏 {account}: {err}")
 
         _cleanup(state)
         await q.edit_message_text("\n".join(lines))
@@ -1117,6 +1352,11 @@ def main() -> None:
         ) or "—",
         len(config.YT_DESTINATIONS),
         ", ".join(f"{d['chat_id']}({d['lang'] or 'raw'})" for d in config.YT_DESTINATIONS) or "—",
+    )
+    log.info(
+        "twitter: %d account(s): %s",
+        len(config.TW_DESTINATIONS),
+        ", ".join(f"{d['chat_id']}({d['lang'] or 'raw'})" for d in config.TW_DESTINATIONS) or "—",
     )
     log.info(
         "autopilot %s: score >= %d, every %.1f-%.1f h, top %d compared at post time, asks in chat %s",

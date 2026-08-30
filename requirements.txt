@@ -40,3 +40,5 @@ psutil>=5.9
 # Tests (py -m pytest) — offline unit tests for the smart filter, the queue
 # store and the reaction ask.
 pytest>=8.0
+rembg>=2.0          # photo-card subject cut-out (model auto-downloads to ~/.rembg)
+onnxruntime>=1.17

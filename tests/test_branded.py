@@ -69,3 +69,15 @@ def test_publish_keyboard_rows_and_defaults():
     assert [b.callback_data for b in btns[:-2]] == ["b:p:0", "b:p:1"]
     assert all(b.text.startswith("☐") for b in btns[:-2])   # all OFF by default
     assert [b.callback_data for b in btns[-2:]] == ["b:publish", "b:cancel"]
+
+
+# --- photo cards (Create post) ---------------------------------------------
+
+def test_pairs_hide_youtube_for_photo_cards():
+    r = dict(_render(_brand(tg="@mir", yt="mir", tw="mir")), kind="photo")
+    assert [p["platform"] for p in branded.pairs_for([r], 0)] == ["tg", "tw"]
+
+
+def test_card_gate_keyboard_has_both_choices():
+    data = [b.callback_data for b in _buttons(branded.card_gate_keyboard())]
+    assert data == ["b:asis", "b:card"]

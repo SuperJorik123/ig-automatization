@@ -6,7 +6,8 @@ same way reactions.py was: news_bot exits at import without env, so anything
 that wants an offline test has to live here. No I/O beyond one os.path check.
 
 Callback namespace "b:" (the manual picker owns t:/y:/e:, asks own r:):
-    b:asis  b:brand              the as-is / brand-it gate
+    b:asis  b:brand              the as-is / brand-it gate (video)
+    b:asis  b:card               the as-is / create-post gate (photos)
     b:t:<i> b:render b:cancel    brand picker (i indexes the brands list)
     b:p:<i> b:publish            publish picker (i indexes the pairs list)
     b:noop                       disabled row (brand without a logo.png)
@@ -31,14 +32,16 @@ def available_brands(brands: list) -> list:
 def pairs_for(renders: list, duration_s: float) -> list:
     """Publishable (render, platform) pairs: one per configured platform of
     each rendered brand. YouTube pairs disappear past the Shorts cap — an
-    upload that can't be a Short shouldn't be offered."""
+    upload that can't be a Short shouldn't be offered — and for photo cards
+    (render["kind"] == "photo"), which YouTube can't take at all."""
     pairs = []
     for r in renders:
         b = r["brand"]
         for key, label in PLATFORMS:
             if not b.get(key):
                 continue
-            if key == "yt" and duration_s > MAX_SHORT_S:
+            if key == "yt" and (duration_s > MAX_SHORT_S
+                                or r.get("kind") == "photo"):
                 continue
             pairs.append({"render": r, "platform": key,
                           "label": f"{b['name']} → {label}"})
@@ -49,6 +52,15 @@ def gate_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📤 Post as-is", callback_data="b:asis"),
         InlineKeyboardButton("🎨 Brand it", callback_data="b:brand"),
+    ]])
+
+
+def card_gate_keyboard() -> InlineKeyboardMarkup:
+    """Photo post gate: post the photos as they are, or compose a news card
+    (hero + circular insets + logo + headline, shared/photo_card.py)."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("📤 Post as-is", callback_data="b:asis"),
+        InlineKeyboardButton("🖼 Create post", callback_data="b:card"),
     ]])
 
 
