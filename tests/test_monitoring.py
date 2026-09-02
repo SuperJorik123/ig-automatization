@@ -190,3 +190,98 @@ def test_cpu_leg_disabled_by_zero_threshold(monkeypatch):
     monkeypatch.setattr(checks.psutil, "cpu_percent",
                         lambda **k: pytest.fail("CPU must not be sampled when disabled"))
     checks.check_cpu({})
+
+
+# --------------------------------------------------------------------------- #
+# checks — disk / memory legs and the "only stamp when the mail left" rule    #
+# --------------------------------------------------------------------------- #
+
+
+class _Usage:
+    def __init__(self, percent, free=0):
+        self.percent = percent
+        self.free = free
+        self.total = 100
+
+
+def test_disk_leg_alerts_above_floor(monkeypatch):
+    sent = []
+    monkeypatch.setattr(mailer, "send_alert", lambda s, b: (sent.append(s), True)[-1])
+    monkeypatch.setattr(config, "ALERT_DISK_PCT", 85.0)
+    monkeypatch.setattr(checks.psutil, "disk_usage", lambda p: _Usage(91.0, free=3 * 2**30))
+    state = {}
+    checks.check_disk(state)
+    assert state["disk"]["bad"] is True
+    assert sent and "91%" in sent[0] and "disk" in sent[0].lower()
+
+
+def test_disk_leg_disabled_by_zero_threshold(monkeypatch):
+    monkeypatch.setattr(config, "ALERT_DISK_PCT", 0.0)
+    monkeypatch.setattr(checks.psutil, "disk_usage",
+                        lambda p: pytest.fail("disk must not be sampled when disabled"))
+    checks.check_disk({})
+
+
+def test_mem_leg_alerts_above_floor(monkeypatch):
+    sent = []
+    monkeypatch.setattr(mailer, "send_alert", lambda s, b: (sent.append(s), True)[-1])
+    monkeypatch.setattr(config, "ALERT_MEM_PCT", 90.0)
+    monkeypatch.setattr(checks.psutil, "virtual_memory", lambda: _Usage(95.0))
+    state = {}
+    checks.check_mem(state)
+    assert state["mem"]["bad"] is True and sent and "95%" in sent[0]
+
+
+def test_mem_leg_disabled_by_zero_threshold(monkeypatch):
+    monkeypatch.setattr(config, "ALERT_MEM_PCT", 0.0)
+    monkeypatch.setattr(checks.psutil, "virtual_memory",
+                        lambda: pytest.fail("memory must not be sampled when disabled"))
+    checks.check_mem({})
+
+
+def test_failed_send_does_not_stamp_the_alert(monkeypatch):
+    """SMTP down (or unconfigured) on the crossing tick: the next tick must try
+    again, not wait a day for the reminder."""
+    calls = []
+    monkeypatch.setattr(mailer, "send_alert", lambda s, b: (calls.append(s), False)[-1])
+    state = {}
+    checks._alert(state, "cpu", True, "bad", "body", "ok")
+    checks._alert(state, "cpu", True, "bad", "body", "ok")
+    assert len(calls) == 2, "second tick must retry the unsent crossing alert"
+
+
+def test_successful_send_stamps_and_silences(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mailer, "send_alert", lambda s, b: (calls.append(s), True)[-1])
+    state = {}
+    checks._alert(state, "cpu", True, "bad", "body", "ok")
+    checks._alert(state, "cpu", True, "bad", "body", "ok")
+    assert calls == ["bad"]
+
+
+def test_failed_recovery_send_is_retried(monkeypatch):
+    results = iter([True, False, True])
+    calls = []
+    monkeypatch.setattr(mailer, "send_alert",
+                        lambda s, b: (calls.append(s), next(results))[-1])
+    state = {}
+    checks._alert(state, "cpu", True, "bad", "body", "ok")    # crossing, sent
+    checks._alert(state, "cpu", False, "bad", "body", "ok")   # recovery, send FAILS
+    checks._alert(state, "cpu", False, "bad", "body", "ok")   # recovery retried, sent
+    checks._alert(state, "cpu", False, "bad", "body", "ok")   # then quiet
+    assert calls == ["bad", "ok", "ok"]
+
+
+def test_send_test_email_reports_result(monkeypatch):
+    monkeypatch.setattr(config, "ALERT_SMTP_HOST", "smtp.example")
+    monkeypatch.setattr(config, "ALERT_EMAIL_TO", "op@example")
+    monkeypatch.setattr(mailer, "send_alert", lambda s, b: True)
+    assert checks.send_test_email() == 0
+    monkeypatch.setattr(mailer, "send_alert", lambda s, b: False)
+    assert checks.send_test_email() == 1
+
+
+def test_send_test_email_refuses_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(config, "ALERT_EMAIL_TO", "")
+    monkeypatch.setattr(mailer, "send_alert", lambda s, b: pytest.fail("must not send"))
+    assert checks.send_test_email() == 1

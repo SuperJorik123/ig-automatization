@@ -5,9 +5,10 @@ Run by a systemd timer (or any cron) every 5 minutes:
 
     py shared/monitoring/checks.py
 
-Every run samples CPU against ALERT_CPU_PCT; once an hour it also checks the
-BulkFollows balance(s) and OpenRouter credits against their ALERT_*_MIN
-floors. Whichever BulkFollows keys the .env holds are checked — the
+Every run samples CPU, disk and memory against ALERT_CPU_PCT /
+ALERT_DISK_PCT / ALERT_MEM_PCT; once an hour it also checks the BulkFollows
+balance(s) and OpenRouter credits against their ALERT_*_MIN floors.
+Whichever BulkFollows keys the .env holds are checked — the
 operator's BULKFOLLOWS_API_KEY on master's checkout, the client's
 NR_BULKFOLLOWS_API_KEY on the newsroom branch — so this file is identical on
 both branches and each checkout monitors its own money.
@@ -22,9 +23,19 @@ balance or a pegged CPU stays true for hours, so each condition emails once
 when it turns bad, one reminder a day while it stays bad, and a short
 all-clear when it recovers. A *failing check* (panel unreachable, bad key) is
 its own condition with the same shape — silent blindness is how a balance
-quietly hits zero. State lives in data/monitor_state.json.
+quietly hits zero. State lives in data/monitor_state.json — and a condition
+is stamped as "alerted" only when the email actually left, so a crossing that
+hit a dead (or not-yet-configured) mail server is retried next tick instead
+of waiting a day for the reminder.
+
+    py shared/monitoring/checks.py --test    # one test email, exit 0 on success
+
+The script's own crashes go through errmail like every other process (tag
+"monitor"), so a broken timer is not silent.
 """
 
+import argparse
+import copy
 import json
 import logging
 import os
@@ -40,7 +51,7 @@ import psutil  # noqa: E402
 import requests  # noqa: E402
 
 from shared import config  # noqa: E402
-from shared.monitoring import mailer  # noqa: E402
+from shared.monitoring import errmail, mailer  # noqa: E402
 
 log = logging.getLogger("monitor")
 
@@ -89,11 +100,25 @@ def transition(state: dict, key: str, bad: bool, now: float | None = None):
 
 def _alert(state: dict, key: str, bad: bool, subject: str, body: str,
            subject_ok: str) -> None:
+    """Advance the condition and mail if the state machine says so. A send
+    that fails rolls the condition back to its previous entry, so the next
+    tick sees the same crossing / recovery again and retries — otherwise a
+    mail server that was down for one tick would swallow the alert for a day
+    (or, for recoveries, forever)."""
+    before = copy.deepcopy(state.get(key))
     fire, recovered = transition(state, key, bad)
     if fire:
-        mailer.send_alert(subject, body)
+        sent = mailer.send_alert(subject, body)
     elif recovered:
-        mailer.send_alert(subject_ok, "The condition cleared on its own — no action needed.")
+        sent = mailer.send_alert(subject_ok,
+                                 "The condition cleared on its own — no action needed.")
+    else:
+        return
+    if not sent:
+        if before is None:
+            state.pop(key, None)
+        else:
+            state[key] = before
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +136,40 @@ def check_cpu(state: dict) -> None:
            f"CPU usage is {pct:.0f}%, sampled over {CPU_SAMPLE_S}s on the VPS.\n"
            f"Reminder comes daily while it stays above the limit.",
            "[monitor] CPU back under the limit")
+
+
+def check_disk(state: dict) -> None:
+    """Used % of the filesystem the repo lives on — that is where posts/,
+    tg_data/ and the SQLite queue grow, and on the VPS it is the root disk."""
+    if config.ALERT_DISK_PCT <= 0:
+        return
+    usage = psutil.disk_usage(config.ROOT_DIR)
+    pct = float(usage.percent)
+    free_gb = usage.free / 2**30
+    log.info("disk: %.0f%% used, %.1f GB free (limit %.0f%%)", pct, free_gb,
+             config.ALERT_DISK_PCT)
+    _alert(state, "disk", pct > config.ALERT_DISK_PCT,
+           f"[monitor] Disk at {pct:.0f}% (limit {config.ALERT_DISK_PCT:.0f}%)",
+           f"The filesystem holding {config.ROOT_DIR} is {pct:.0f}% full "
+           f"({free_gb:.1f} GB free). Downloads and renders start failing when "
+           f"it fills. Usual suspects: tg_data/media, posts/posted, journald, "
+           f"~/.rembg, old venvs.\n"
+           f"Reminder comes daily while it stays above the limit.",
+           "[monitor] Disk back under the limit")
+
+
+def check_mem(state: dict) -> None:
+    if config.ALERT_MEM_PCT <= 0:
+        return
+    pct = float(psutil.virtual_memory().percent)
+    log.info("memory: %.0f%% used (limit %.0f%%)", pct, config.ALERT_MEM_PCT)
+    _alert(state, "mem", pct > config.ALERT_MEM_PCT,
+           f"[monitor] Memory at {pct:.0f}% (limit {config.ALERT_MEM_PCT:.0f}%)",
+           f"RAM usage is {pct:.0f}%. The OOM killer takes a bot next, and a "
+           f"killed service only shows up as a missed heartbeat. rembg (photo "
+           f"cards) and ffmpeg renders are the usual cause.\n"
+           f"Reminder comes daily while it stays above the limit.",
+           "[monitor] Memory back under the limit")
 
 
 def bulkfollows_balance(url: str, key: str):
@@ -197,11 +256,23 @@ def check_balances(state: dict) -> None:
                    "[monitor] OpenRouter credits OK again")
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+def send_test_email() -> int:
+    """`--test`: prove the mailbox works before trusting the timer. Exit code
+    0 = the mail left, 1 = it didn't (reason in the log line above)."""
+    if not mailer.enabled():
+        log.warning("alert email is OFF — set ALERT_SMTP_HOST and ALERT_EMAIL_TO in .env")
+        return 1
+    ok = mailer.send_alert("[monitor] test email",
+                           "If you can read this, alert email from this checkout works.")
+    log.info("test email %s -> %s", "SENT" if ok else "FAILED", config.ALERT_EMAIL_TO)
+    return 0 if ok else 1
+
+
+def run_checks() -> None:
     state = _load_state()
     check_cpu(state)
+    check_disk(state)
+    check_mem(state)
     now = time.time()
     if now - float(state.get("last_balance_check", 0) or 0) >= BALANCE_EVERY_S:
         state["last_balance_check"] = now
@@ -209,5 +280,25 @@ def main() -> None:
     _save_state(state)
 
 
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Machine + balance checks; run every 5 min from a timer.")
+    parser.add_argument("--test", action="store_true",
+                        help="send one test email and exit (0 = sent)")
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    if args.test:
+        return send_test_email()
+    errmail.install("monitor")  # a crash of the check itself must not be silent
+    try:
+        run_checks()
+    except Exception:
+        log.exception("monitor run failed")
+        time.sleep(3)  # let the errmail worker thread flush before exit
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

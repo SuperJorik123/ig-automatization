@@ -314,10 +314,12 @@ ALERT_EMAIL_FROM = os.environ.get("ALERT_EMAIL_FROM", "").strip() or ALERT_SMTP_
 ALERT_MAX_PER_HOUR = _int_env("ALERT_MAX_PER_HOUR", 0)
 
 # Floors for shared/monitoring/checks.py. 0 disables that leg — used to keep
-# the two checkouts sharing the VPS from double-alerting: CPU and the
-# OpenRouter account are per-machine/per-account, so only master's timer
-# checks them and the newsroom checkout sets both to 0.
+# the two checkouts sharing the VPS from double-alerting: CPU, disk, memory
+# and the OpenRouter account are per-machine/per-account, so only master's
+# timer checks them and the newsroom checkout sets all four to 0.
 ALERT_CPU_PCT = _float_env("ALERT_CPU_PCT", 80)
+ALERT_DISK_PCT = _float_env("ALERT_DISK_PCT", 85)   # used % of the filesystem holding the repo
+ALERT_MEM_PCT = _float_env("ALERT_MEM_PCT", 90)     # used % of RAM (psutil "percent")
 ALERT_BULKFOLLOWS_MIN = _float_env("ALERT_BULKFOLLOWS_MIN", 2.0)
 ALERT_OPENROUTER_MIN = _float_env("ALERT_OPENROUTER_MIN", 0.5)
 

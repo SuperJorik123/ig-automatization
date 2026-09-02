@@ -67,11 +67,15 @@ Four layers, all inert until `ALERT_SMTP_HOST` + `ALERT_EMAIL_TO` are set in
    this is the "server down" alarm, and it also fires on a crashed or hung
    process and a dead network. No pings are sent while the URL is blank.
 3. **Machine + balance checks** — `shared/monitoring/checks.py` on a 5-minute
-   systemd timer: CPU over `ALERT_CPU_PCT` (80) each run; hourly, BulkFollows
-   balance under `ALERT_BULKFOLLOWS_MIN` ($2) and OpenRouter credits under
-   `ALERT_OPENROUTER_MIN` ($0.50). One email on crossing, a daily reminder
-   while bad, an all-clear on recovery. A failing check (panel unreachable,
-   bad key) alerts with the same shape.
+   systemd timer: CPU over `ALERT_CPU_PCT` (80), disk over `ALERT_DISK_PCT`
+   (85, the filesystem holding the checkout) and memory over `ALERT_MEM_PCT`
+   (90) each run; hourly, BulkFollows balance under `ALERT_BULKFOLLOWS_MIN`
+   ($2) and OpenRouter credits under `ALERT_OPENROUTER_MIN` ($0.50). One
+   email on crossing, a daily reminder while bad, an all-clear on recovery.
+   A failing check (panel unreachable, bad key) alerts with the same shape.
+   A condition counts as "alerted" only once the email actually left, so a
+   crossing that met a dead mail server is retried next tick. The script's
+   own crashes are mailed too (errmail tag `monitor`).
 4. **Restart resilience** — already there: every unit is `Restart=always`; a
    crash-loop shows up as error emails + eventually silent heartbeats.
 
@@ -105,10 +109,46 @@ systemctl daemon-reload && systemctl enable --now news-monitor.timer
 ```
 
 **Both checkouts share this VPS**, so per-machine and per-account legs run in
-only one of them: the newsroom checkout's `.env` sets `ALERT_CPU_PCT=0` and
-`ALERT_OPENROUTER_MIN=0` — its timer then only watches the client's
-`NR_BULKFOLLOWS_API_KEY` balance, keeping the client's panel key out of the
-master checkout's `.env`.
+only one of them: the newsroom checkout's `.env` sets `ALERT_CPU_PCT=0`,
+`ALERT_DISK_PCT=0`, `ALERT_MEM_PCT=0` and `ALERT_OPENROUTER_MIN=0` — its timer
+then only watches the client's `NR_BULKFOLLOWS_API_KEY` balance, keeping the
+client's panel key out of the master checkout's `.env`.
+
+### Verifying monitoring after a deploy
+
+Do these in order; each one proves the layer below it.
+
+1. **Mailbox** — must print `test email SENT` and exit 0. Anything else is an
+   SMTP problem (Gmail: app password, not the account password):
+
+       .venv/bin/python shared/monitoring/checks.py --test
+
+2. **Checks** — run once by hand, read the log lines, then look at the state
+   file. Every leg logs its current value and floor. To force an alert
+   without waiting for a real one, run with a floor you are already over,
+   then again with the normal floor to get the all-clear:
+
+       .venv/bin/python shared/monitoring/checks.py
+       cat data/monitor_state.json
+       ALERT_CPU_PCT=1 .venv/bin/python shared/monitoring/checks.py   # -> "CPU at N%" email
+       .venv/bin/python shared/monitoring/checks.py                   # -> "CPU back under the limit"
+
+3. **Timer** — the next run should be within 5 minutes and the last run's
+   log lines should be in the journal:
+
+       systemctl list-timers --all | grep monitor
+       journalctl -u news-monitor.service -n 20
+
+4. **Heartbeats** — after restarting the three services each logs
+   `heartbeat: pinging healthchecks every 300s`, and the healthchecks.io
+   dashboard turns green within 5 minutes. Stop one service
+   (`systemctl stop news-dispatcher`) and the "down" email must arrive once
+   the check's grace period passes; start it again for the "up" email.
+
+5. **Error emails** — each service logs `error emails on -> <address>` at
+   startup. Trigger one on purpose, e.g. paste a broken Instagram URL into
+   the trigger bot, and the traceback should land in the inbox with the
+   process name in the subject.
 
 ## Pushing new code
 
