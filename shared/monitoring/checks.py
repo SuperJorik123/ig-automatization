@@ -8,15 +8,10 @@ Run by a systemd timer (or any cron) every 5 minutes:
 Every run samples CPU, disk and memory against ALERT_CPU_PCT /
 ALERT_DISK_PCT / ALERT_MEM_PCT; once an hour it also checks the BulkFollows
 balance(s) and OpenRouter credits against their ALERT_*_MIN floors.
-Whichever BulkFollows keys the .env holds are checked — the
-operator's BULKFOLLOWS_API_KEY on master's checkout, the client's
-NR_BULKFOLLOWS_API_KEY on the newsroom branch — so this file is identical on
-both branches and each checkout monitors its own money.
-
-Both checkouts live on the SAME VPS, so per-machine / per-account legs must
-run in only ONE of them: a threshold of 0 disables that leg. The newsroom
-checkout's .env sets ALERT_CPU_PCT=0 and ALERT_OPENROUTER_MIN=0 (master's
-timer already covers the machine and the shared OpenRouter account).
+Whichever BulkFollows keys the .env holds are checked — the operator's
+BULKFOLLOWS_API_KEY and the client's NR_BULKFOLLOWS_API_KEY (modules/newsroom)
+— so one timer per machine watches all the money. A threshold of 0 disables
+a leg.
 
 Alert shape — deliberately NOT per occurrence like the error emails: a low
 balance or a pegged CPU stays true for hours, so each condition emails once

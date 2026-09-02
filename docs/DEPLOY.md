@@ -27,9 +27,9 @@ systemctl restart news-bot
 | `news-collector` | `modules/telegram/collector.py` | Needs a one-off interactive login (below) before it can be enabled. |
 | `news-dispatcher` | `modules/telegram/dispatcher.py` | The only process that scores. |
 | `news-bot` | `modules/telegram/news_bot.py` | Manual broadcaster + autopilot drip + weekly cleanup. |
-| `newsroom-bot` | `modules/newsroom/main.py` | The client's WordPress→Telegram bot (`client/wp-newsbot` branch). Runs from its **own checkout** `/opt/wp-newsbot` with its own venv and `.env` (the `NR_*` vars + `OPENROUTER_API_KEY`), so pushing master code never restarts it. Deploy it by tarring the `client/wp-newsbot` tree (exclude `posts/`, `ui/`, media) over `/opt/wp-newsbot`. |
+| `newsroom-bot` | `modules/newsroom/main.py` | The client's WordPress→Telegram bot. Same checkout and venv as the three above since 2026-09-03 (it was the `client/wp-newsbot` branch and `/opt/wp-newsbot` before); its own token (`NR_BOT_TOKEN`), its own SQLite store under `modules/newsroom/data/`, its own BulkFollows key. A code push restarts it together with the others — the store makes restarts safe (seen articles are never reposted). |
 
-All three are `Restart=always` and `WantedBy=multi-user.target`, so they come
+All four are `Restart=always` and `WantedBy=multi-user.target`, so they come
 back after a crash and after a reboot.
 
 **One bot token allows exactly one poller.** Never run `news_bot.py` locally
@@ -79,8 +79,8 @@ Four layers, all inert until `ALERT_SMTP_HOST` + `ALERT_EMAIL_TO` are set in
 4. **Restart resilience** — already there: every unit is `Restart=always`; a
    crash-loop shows up as error emails + eventually silent heartbeats.
 
-Timer units (master checkout — mirror with `/opt/wp-newsbot` paths and the
-name `newsroom-monitor` for the client checkout):
+Timer units (one timer covers everything, the newsroom bot included — it
+reads both BulkFollows keys from the same `.env`):
 
 ```
 # /etc/systemd/system/news-monitor.service
@@ -108,11 +108,8 @@ WantedBy=timers.target
 systemctl daemon-reload && systemctl enable --now news-monitor.timer
 ```
 
-**Both checkouts share this VPS**, so per-machine and per-account legs run in
-only one of them: the newsroom checkout's `.env` sets `ALERT_CPU_PCT=0`,
-`ALERT_DISK_PCT=0`, `ALERT_MEM_PCT=0` and `ALERT_OPENROUTER_MIN=0` — its timer
-then only watches the client's `NR_BULKFOLLOWS_API_KEY` balance, keeping the
-client's panel key out of the master checkout's `.env`.
+The newsroom bot has its own heartbeat check (`HEALTHCHECK_URL_NEWSROOM`) and
+its errors are mailed with tag `newsroom`; nothing else is per-product.
 
 ### Verifying monitoring after a deploy
 
@@ -139,7 +136,7 @@ Do these in order; each one proves the layer below it.
        systemctl list-timers --all | grep monitor
        journalctl -u news-monitor.service -n 20
 
-4. **Heartbeats** — after restarting the three services each logs
+4. **Heartbeats** — after restarting the services each logs
    `heartbeat: pinging healthchecks every 300s`, and the healthchecks.io
    dashboard turns green within 5 minutes. Stop one service
    (`systemctl stop news-dispatcher`) and the "down" email must arrive once

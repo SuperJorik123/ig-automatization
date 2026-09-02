@@ -9,6 +9,9 @@ file now lives in. Before the restructure each script did its own
 that path pointed at a non-existent .env, so the lookup is centralised here.
 """
 
+import copy
+import json
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -313,10 +316,8 @@ ALERT_EMAIL_FROM = os.environ.get("ALERT_EMAIL_FROM", "").strip() or ALERT_SMTP_
 # only if a broken source ever floods the inbox.
 ALERT_MAX_PER_HOUR = _int_env("ALERT_MAX_PER_HOUR", 0)
 
-# Floors for shared/monitoring/checks.py. 0 disables that leg — used to keep
-# the two checkouts sharing the VPS from double-alerting: CPU, disk, memory
-# and the OpenRouter account are per-machine/per-account, so only master's
-# timer checks them and the newsroom checkout sets all four to 0.
+# Floors for shared/monitoring/checks.py. 0 disables that leg (one timer per
+# machine — it also reads the newsroom bot's NR_BULKFOLLOWS_API_KEY).
 ALERT_CPU_PCT = _float_env("ALERT_CPU_PCT", 80)
 ALERT_DISK_PCT = _float_env("ALERT_DISK_PCT", 85)   # used % of the filesystem holding the repo
 ALERT_MEM_PCT = _float_env("ALERT_MEM_PCT", 90)     # used % of RAM (psutil "percent")
@@ -328,3 +329,159 @@ ALERT_OPENROUTER_MIN = _float_env("ALERT_OPENROUTER_MIN", 0.5)
 HEALTHCHECK_URL_NEWSBOT = os.environ.get("HEALTHCHECK_URL_NEWSBOT", "").strip()
 HEALTHCHECK_URL_COLLECTOR = os.environ.get("HEALTHCHECK_URL_COLLECTOR", "").strip()
 HEALTHCHECK_URL_DISPATCHER = os.environ.get("HEALTHCHECK_URL_DISPATCHER", "").strip()
+HEALTHCHECK_URL_NEWSROOM = os.environ.get("HEALTHCHECK_URL_NEWSROOM", "").strip()  # modules/newsroom
+# Client newsroom bot: WordPress -> Telegram (modules/newsroom)               #
+# --------------------------------------------------------------------------- #
+#
+# A separate product in the same checkout (its own newsroom-bot service; it
+# lived on the client/wp-newsbot branch until the 2026-09 merge): it watches N
+# WordPress sites and posts each new article to that site's Telegram channel.
+# Everything it owns is prefixed NR_ and nothing above this line is involved —
+# separate bot token, separate database, separate BulkFollows balance.
+
+# Its own working dir: SQLite store only (media is passed to Telegram by URL,
+# so this bot never downloads a file).
+NR_DATA_DIR = os.path.join(ROOT_DIR, "modules", "newsroom", "data")
+
+# Bot token for the newsroom bot. MUST be a different bot from the two above:
+# Telegram allows one getUpdates poller per token, and a shared token means
+# whichever process starts second silently breaks the first.
+NR_BOT_TOKEN = os.environ.get("NR_BOT_TOKEN", "").strip()
+
+# Publish for real, or only log what would go out? Defaults to DRY — an
+# unconfigured or half-deployed instance must not be able to post to seven
+# live client channels. Turning this off is a deliberate act.
+NR_DRY_RUN = os.environ.get("NR_DRY_RUN", "1").strip().lower() not in (
+    "0", "false", "no", "off"
+)
+
+# Seconds between polls of each WordPress site.
+NR_POLL_S = _int_env("NR_POLL_S", 300)
+
+# Delay between publishing a post and ordering its reactions. Reactions
+# appearing in the same second as the post is the most legible bot tell there
+# is; 20 minutes reads as organic.
+NR_REACTION_DELAY_S = _int_env("NR_REACTION_DELAY_S", 1200)
+
+# On a site's FIRST tick the bot normally records the articles it finds as
+# already-seen and posts none of them: without that guard, enabling a new site
+# dumps twenty back-articles into a live channel in one burst, in front of the
+# client's subscribers, with no way to undo it. Set to 1 only when you
+# genuinely want that first batch published.
+NR_BACKFILL = os.environ.get("NR_BACKFILL", "0").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+
+# BulkFollows credentials for the CLIENT's panel account — a different key and
+# a different balance from BULKFOLLOWS_API_KEY above. Service ids are per site
+# (see modules/newsroom/sites/*.json), not global: a channel with different geo
+# targeting may need a different views service.
+NR_BULKFOLLOWS_API_KEY = os.environ.get("NR_BULKFOLLOWS_API_KEY", "").strip()
+NR_BULKFOLLOWS_API_URL = os.environ.get(
+    "NR_BULKFOLLOWS_API_URL", "https://bulkfollows.com/api/v2"
+).strip()
+
+
+def _parse_emoji_services(raw: str) -> list:
+    """NR_EMOJI_SERVICES ("name:id" pairs, comma-separated) into the catalogue
+    orders.py draws reactions from: [{"name", "emoji", "service"}, ...].
+
+    The name is what a site's emoji_pool refers to — the emoji glyph itself
+    for a single reaction, a plain word ("positive") for the panel's mixed
+    sets. A malformed pair is logged and dropped, never fatal: one typo must
+    cost one reaction, not every channel's orders."""
+    out = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, service = part.rpartition(":")
+        name, service = name.strip(), service.strip()
+        if not sep or not name or not service.isdigit():
+            logging.getLogger(__name__).warning(
+                "NR_EMOJI_SERVICES: bad entry %r (want name:id) — skipped", part)
+            continue
+        out.append({"name": name, "emoji": name, "service": service})
+    return out
+
+
+# Reaction service catalogue for the CLIENT's panel account. Service ids are
+# panel-account data, not code — they changed once already and will again,
+# which is why they live here and not in orders.py. Sites still opt in to a
+# subset by name via their emoji_pool; an empty catalogue means no reactions.
+NR_EMOJI_SERVICES = _parse_emoji_services(os.environ.get("NR_EMOJI_SERVICES", ""))
+
+# Model that rewrites an article into a Telegram post. Falls back to the
+# translator's model, which is already tuned for faithful news prose.
+NR_REWRITE_MODEL = os.environ.get("NR_REWRITE_MODEL", "").strip() or TRANSLATE_MODEL
+
+# Where the per-site JSON configs live. sites/example.json is the documented
+# template and is never loaded as a real site.
+NR_SITES_DIR = os.path.join(ROOT_DIR, "modules", "newsroom", "sites")
+
+# Defaults for every key a site file may omit. `name`, `wp_base` and `chat_id`
+# have no default — a file missing any of them is not a usable site.
+_SITE_DEFAULTS = {
+    "enabled": True,
+    "views_phase1": [500, 5000],
+    "service_views": "",
+    "service_bonus": "",
+    "emoji_pool": [],
+    "emoji_count": [2, 4],
+    "emoji_quantity": [10, 40],
+    "rewrite_hint": "",
+    # Max characters of the generated post ("and shorter when the story is
+    # small"). Telegram's media-caption ceiling is 1024 and publish.py appends
+    # the article link after this, so keep well under.
+    "post_chars": 500,
+}
+
+
+def _load_sites(directory: str) -> list:
+    """Every enabled site under `directory`, ordered by filename so the
+    startup log reads the same way every time.
+
+    Never raises. A malformed or incomplete file is logged and skipped, the
+    same way _int_env swallows an unparseable tuning knob: one typo in site #4
+    must not stop the other six from posting. Callers get whatever parsed.
+    """
+    log = logging.getLogger(__name__)
+    out = []
+    try:
+        names = sorted(n for n in os.listdir(directory) if n.endswith(".json"))
+    except OSError:  # directory absent on a fresh checkout — not an error
+        return out
+
+    for name in names:
+        if name == "example.json":  # the documented template, not a site
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError) as exc:
+            log.error("newsroom site %s skipped — unreadable: %s", name, exc)
+            continue
+        if not isinstance(raw, dict):
+            log.error("newsroom site %s skipped — not a JSON object", name)
+            continue
+
+        missing = [k for k in ("name", "wp_base", "chat_id") if not str(raw.get(k, "")).strip()]
+        if missing:
+            log.error("newsroom site %s skipped — missing %s", name, ", ".join(missing))
+            continue
+
+        # deepcopy, not {**_SITE_DEFAULTS, **raw}: the defaults hold lists, and
+        # a plain merge would hand every site the SAME list object — one site
+        # mutating its emoji pool would silently change another channel's.
+        site = {**copy.deepcopy(_SITE_DEFAULTS), **raw}
+        if not site["enabled"]:
+            log.info("newsroom site %s disabled", site["name"])
+            continue
+        # wp_base is joined with "/posts" — a trailing slash would double it.
+        site["wp_base"] = str(site["wp_base"]).rstrip("/")
+        out.append(site)
+    return out
+
+
+NR_SITES = _load_sites(NR_SITES_DIR)

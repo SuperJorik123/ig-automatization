@@ -1,0 +1,19 @@
+{
+  "_comment": "Template. Copy to <name>.json and edit. This file is never loaded as a site. name/wp_base/chat_id are required; everything else falls back to the defaults in shared/config.py. BulkFollows service ids are per site so a channel with different geo targeting can use a different service. emoji_pool picks by name from the NR_EMOJI_SERVICES catalogue in .env (the emoji glyph itself, or positive/negative for the mixed sets) and is opt-in by design: the full catalogue includes poop/middle-finger/vomit, which must never land on a client's news post by accident.",
+
+  "name": "example",
+  "wp_base": "https://example.com/wp-json/wp/v2",
+  "chat_id": "@example_channel",
+  "enabled": true,
+
+  "views_phase1": [500, 5000],
+  "service_views": "",
+  "service_bonus": "",
+
+  "emoji_pool": ["❤️", "👍", "🤣", "positive"],
+  "emoji_count": [2, 4],
+  "emoji_quantity": [10, 40],
+
+  "rewrite_hint": "",
+  "post_chars": 500
+}

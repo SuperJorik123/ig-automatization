@@ -1,0 +1,19 @@
+{
+  "_comment": "mirnews.com -> t.me/mirnewsmedia. Pool mixes positive and tame negative reactions on purpose; the panel's mixed 'negative' set (14431) is excluded because it contains poop/middle-finger/vomit.",
+
+  "name": "mirnews",
+  "wp_base": "https://mirnews.com/wp-json/wp/v2",
+  "chat_id": "@mirnewsmedia",
+  "enabled": true,
+
+  "views_phase1": [500, 5000],
+  "service_views": "5111",
+  "service_bonus": "180",
+
+  "emoji_pool": ["❤️", "👍", "🔥", "🤣", "positive", "👎", "💔", "😡", "😭"],
+  "emoji_count": [2, 4],
+  "emoji_quantity": [10, 40],
+
+  "rewrite_hint": "",
+  "post_chars": 500
+}
