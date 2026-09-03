@@ -147,6 +147,55 @@ Do these in order; each one proves the layer below it.
    the trigger bot, and the traceback should land in the inbox with the
    process name in the subject.
 
+## Instagram media hosting
+
+Instagram's Graph API (`modules/instagram/graph.py`) has no upload: it fetches
+`image_url` / `video_url` from a public https URL. The VPS therefore also runs
+nginx, serving one directory read-only under a free DuckDNS hostname with a
+Let's Encrypt certificate. `shared/public_media.py` copies each render into
+that directory under an unguessable name for the seconds a publish takes, then
+deletes it; leftovers older than an hour are swept when the news bot starts.
+
+| | |
+| --- | --- |
+| Hostname | `<sub>.duckdns.org` — registered at duckdns.org (free, GitHub/Google login); the token shown there is what the updater sends. |
+| Directory | `/var/www/igmedia` (`PUBLIC_MEDIA_DIR`) — root-owned, 755; files are written 644 so nginx (`www-data`) can read them. |
+| URL | `https://<sub>.duckdns.org/m/<name>` (`PUBLIC_MEDIA_BASE_URL=https://<sub>.duckdns.org/m/`). Everything outside `/m/` is a 404; `/m/` itself has `autoindex off`, so the random file name is the whole access control. |
+| Cert | certbot, nginx plugin, auto-renewed by the packaged `certbot.timer` (twice daily). |
+| IP updater | `/opt/duckdns/duck.sh` from cron every 5 minutes (also `@reboot`), log in `/opt/duckdns/duck.log`. |
+
+One-shot setup, run **on the VPS** (nginx + certbot + DuckDNS cron + vhost;
+idempotent, safe to re-run):
+
+```
+scp deploy/ig_media_hosting.sh root@193.36.38.133:/tmp/
+ssh root@193.36.38.133 'bash /tmp/ig_media_hosting.sh <sub> <duckdns-token> you@example.com'
+```
+
+Then add to the VPS `.env` (the script prints these two lines at the end):
+
+```
+PUBLIC_MEDIA_DIR=/var/www/igmedia
+PUBLIC_MEDIA_BASE_URL=https://<sub>.duckdns.org/m/
+```
+
+and `systemctl restart news-bot`. The bot's startup log line
+`instagram (graph api): … | media hosting: …` confirms both settings were
+read. Verify the vhost end to end:
+
+```
+echo hi > /var/www/igmedia/probe.txt
+curl -sI https://<sub>.duckdns.org/m/probe.txt | head -1     # HTTP/1.1 200
+curl -sI https://<sub>.duckdns.org/m/                        # 403 / 404, never a listing
+rm /var/www/igmedia/probe.txt
+```
+
+The IG tokens themselves live in `.env` as `IG_GRAPH_<ACCOUNT>_ACCESS_TOKEN`
+(see `.env.example`); the news bot refreshes any token older than 7 days once
+a day and rewrites the line in place, so the VPS `.env` is the live copy —
+when pasting a fresh token by hand also set
+`IG_GRAPH_<ACCOUNT>_TOKEN_REFRESHED=YYYY-MM-DD`.
+
 ## Pushing new code
 
 Secrets and runtime state are git-ignored, so a plain `git pull` never touches

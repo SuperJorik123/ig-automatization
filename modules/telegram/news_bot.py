@@ -20,7 +20,10 @@ Brand-it: a single-video post (uploaded or URL) with BRANDS configured first
 asks "Post as-is / Brand it". Brand-it renders one variant per selected brand
 — brands/<name>/logo.png top-right, the caption as a translated lower-third
 headline (shared/branding.py) — sends each back here, then offers a publish
-picker of brand→TG/YT/X pairs (all off; YouTube hidden over 3 minutes).
+picker of brand→TG/YT/X/IG pairs (all off; YouTube hidden over 3 minutes).
+IG is the Graph API (modules/instagram/graph.py): the render is exposed at a
+public URL (shared/public_media.py, nginx on the VPS) just long enough for
+Instagram to fetch it — a video render becomes a Reel, a photo card a post.
 Nothing publishes without a selection.
 
 Caption edit: reply to any open picker message with new text to replace the
@@ -94,7 +97,8 @@ from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.twitter import publisher as tw_publisher  # noqa: E402
 from modules.telegram import branded, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
-from shared import branding, photo_card  # noqa: E402
+from modules.instagram import graph as ig_graph  # noqa: E402
+from shared import branding, photo_card, public_media  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -817,7 +821,7 @@ async def _do_render(q, context, state: dict) -> None:
         if not state["pairs"]:
             _track(await q.message.chat.send_message(
                 "no destinations configured for the rendered brands "
-                "(BRAND_<NAME>_TG/YT/TW) — files above are yours, nothing to publish"))
+                "(BRAND_<NAME>_TG/YT/TW/IG) — files above are yours, nothing to publish"))
             _pending.pop(q.message.message_id, None)
             _cleanup(state)
             return
@@ -941,7 +945,7 @@ async def _do_render_card(q, context, state: dict) -> None:
         if not state["pairs"]:
             _track(await q.message.chat.send_message(
                 "no destinations configured for the composed brands "
-                "(BRAND_<NAME>_TG/TW) — cards above are yours, nothing to publish"))
+                "(BRAND_<NAME>_TG/TW/IG) — cards above are yours, nothing to publish"))
             _pending.pop(q.message.message_id, None)
             _cleanup(state)
             return
@@ -999,6 +1003,22 @@ async def _do_publish(q, context, state: dict) -> None:
                 result = await asyncio.to_thread(
                     yt_uploader.upload_short, r["path"], title, description,
                     b["yt"])
+                if result.get("status") == "success":
+                    lines.append(f"✅ {p['label']}")
+                else:
+                    lines.append(f"❌ {p['label']}: "
+                                 f"{result.get('error', 'unknown error')}")
+            elif p["platform"] == "ig":
+                # The Graph API fetches from a URL — expose the render for
+                # exactly as long as the publish takes, then take it down.
+                url, drop = await asyncio.to_thread(public_media.expose, r["path"])
+                try:
+                    publish = (ig_graph.publish_photo if r.get("kind") == "photo"
+                               else ig_graph.publish_reel)
+                    result = await asyncio.to_thread(
+                        publish, url, r["headline"], b["ig"])
+                finally:
+                    drop()
                 if result.get("status") == "success":
                     lines.append(f"✅ {p['label']}")
                 else:
@@ -1267,7 +1287,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 def _sweep_orphans() -> None:
     """Picker state is memory-only, so URL downloads left behind by a restart
-    have no owner — remove them."""
+    have no owner — remove them. Same for public-media copies older than an
+    hour: a crash between expose() and cleanup() must not leave a file
+    public forever."""
+    try:
+        swept = public_media.sweep()
+        if swept:
+            log.info("public media: swept %d leftover file(s)", swept)
+    except Exception as exc:
+        log.warning("public media sweep failed: %s", exc)
     dl_dir = os.path.join(config.TG_DATA_DIR, "media")
     if not os.path.isdir(dl_dir):
         return
@@ -1288,6 +1316,29 @@ async def _weekly_cleanup_job(context) -> None:
         log.info("weekly cleanup: %d deleted, %d failed", deleted, failed)
     except Exception:
         log.exception("weekly cleanup crashed — next Monday retries")
+
+
+IG_TOKEN_MAX_AGE_DAYS = 7
+
+
+async def _ig_token_refresh_job(context) -> None:
+    """Daily: refresh every IG_GRAPH token older than IG_TOKEN_MAX_AGE_DAYS
+    (long-lived tokens last 60 days; refreshing weekly keeps a wide margin).
+    A failed refresh is logged at ERROR so errmail mails the operator — a
+    token that silently expires means IG publishing dies in ~2 months."""
+    try:
+        results = await asyncio.to_thread(
+            ig_graph.refresh_stale, config.IG_GRAPH_ACCOUNTS, IG_TOKEN_MAX_AGE_DAYS)
+    except Exception:
+        log.exception("IG token refresh job crashed — tomorrow retries")
+        return
+    for account, result in results:
+        if result.get("status") == "success":
+            log.info("IG token refreshed for %s", account)
+        else:
+            log.error("IG token refresh FAILED for %s: %s — re-mint it via the "
+                      "Meta app if this persists (60-day expiry)",
+                      account, result.get("error"))
 
 
 async def _heartbeat_job(context) -> None:
@@ -1313,6 +1364,13 @@ async def _on_start(app) -> None:
                                 time=dt.time(4, 0, tzinfo=local_tz),
                                 days=(cleanup.MONDAY,), name="weekly-cleanup")
         log.info("weekly control-group cleanup scheduled: Mondays 04:00 %s", local_tz)
+        if config.IG_GRAPH_ACCOUNTS:
+            # first=120 s: a fresh deploy checks the tokens right away, so a
+            # broken refresh shows up in the log today, not in a week.
+            app.job_queue.run_repeating(_ig_token_refresh_job, interval=24 * 3600,
+                                        first=120, name="ig-token-refresh")
+            log.info("IG token refresh scheduled daily for %s (tokens older than %d d)",
+                     ", ".join(config.IG_GRAPH_ACCOUNTS), IG_TOKEN_MAX_AGE_DAYS)
     else:
         log.warning("no job queue — weekly cleanup NOT scheduled "
                     "(install python-telegram-bot[job-queue])")
@@ -1357,6 +1415,11 @@ def main() -> None:
         "twitter: %d account(s): %s",
         len(config.TW_DESTINATIONS),
         ", ".join(f"{d['chat_id']}({d['lang'] or 'raw'})" for d in config.TW_DESTINATIONS) or "—",
+    )
+    log.info(
+        "instagram (graph api): %d account(s): %s | media hosting: %s",
+        len(config.IG_GRAPH_ACCOUNTS), ", ".join(config.IG_GRAPH_ACCOUNTS) or "—",
+        config.PUBLIC_MEDIA_BASE_URL or "NOT CONFIGURED (IG publishing will fail)",
     )
     log.info(
         "autopilot %s: score >= %d, every %.1f-%.1f h, top %d compared at post time, asks in chat %s",

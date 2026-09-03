@@ -74,3 +74,17 @@ def test_parse_brands_logo_path_and_empty_input():
 def test_parse_brands_lang_optional():
     brands = config._parse_brands("solo", {})
     assert brands[0]["name"] == "solo" and brands[0]["lang"] == ""
+
+
+def test_parse_brands_ig_slot():
+    env = {"BRAND_WSWIRE_IG": "wswiremedia"}
+    (b,) = config._parse_brands("wswire:en", env)
+    assert b["ig"] == "wswiremedia"
+    (b,) = config._parse_brands("other:en", env)
+    assert b["ig"] == ""
+
+
+def test_ig_graph_accounts_and_public_media_vars_exist():
+    assert isinstance(config.IG_GRAPH_ACCOUNTS, list)
+    assert isinstance(config.PUBLIC_MEDIA_DIR, str)
+    assert isinstance(config.PUBLIC_MEDIA_BASE_URL, str)

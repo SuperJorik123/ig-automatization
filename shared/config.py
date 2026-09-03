@@ -191,6 +191,30 @@ TW_DESTINATIONS = _parse_destinations(os.environ.get("TW_DESTINATIONS", ""))
 
 
 # --------------------------------------------------------------------------- #
+# Instagram Graph API (modules/instagram/graph.py) + public media hosting     #
+# --------------------------------------------------------------------------- #
+
+# Instagram accounts published through the Graph API ("Instagram API with
+# Instagram Login"), comma-separated. NOT the same thing as IG_ACCOUNTS above
+# (those are logged in on the phone and driven over ADB). Each name keys its
+# IG_GRAPH_<ACCOUNT>_ACCESS_TOKEN / _USER_ID vars (name uppercased,
+# non-alphanumerics -> "_"); the news bot refreshes every token older than
+# 7 days once a day (IG_GRAPH_<ACCOUNT>_TOKEN_REFRESHED is its bookkeeping).
+IG_GRAPH_ACCOUNTS = [
+    a.strip().lstrip("@")
+    for a in os.environ.get("IG_GRAPH_ACCOUNTS", "").split(",")
+    if a.strip()
+]
+
+# Where shared/public_media.py drops files the Graph API must fetch (it has
+# no upload — image_url / video_url only), and the public https URL nginx
+# serves that directory at (docs/DEPLOY.md, "Instagram media hosting").
+# Both blank = IG publishing fails with a clear "not configured" error.
+PUBLIC_MEDIA_DIR = os.environ.get("PUBLIC_MEDIA_DIR", "").strip()
+PUBLIC_MEDIA_BASE_URL = os.environ.get("PUBLIC_MEDIA_BASE_URL", "").strip()
+
+
+# --------------------------------------------------------------------------- #
 # Branded clips (shared/branding.py, news bot "Brand it" flow)                #
 # --------------------------------------------------------------------------- #
 
@@ -198,7 +222,7 @@ TW_DESTINATIONS = _parse_destinations(os.environ.get("TW_DESTINATIONS", ""))
 def _parse_brands(raw: str, env):
     """Parse BRANDS: comma-separated "name:lang" entries, e.g.
     "mirnews:en,rusnews:ru" (lang optional). Each brand's platform accounts
-    come from BRAND_<NAME>_TG / _YT / _TW (name uppercased, non-alphanumerics
+    come from BRAND_<NAME>_TG / _YT / _TW / _IG (name uppercased, non-alphanumerics
     -> "_", same rule as TWITTER_<ACCOUNT>_*); an unset platform means the
     brand has no pair for it in the publish picker. The logo is always
     brands/<name>/logo.png — a missing file disables the brand in the picker
@@ -217,6 +241,7 @@ def _parse_brands(raw: str, env):
             "tg": (env.get(f"BRAND_{key}_TG") or "").strip(),
             "yt": (env.get(f"BRAND_{key}_YT") or "").strip(),
             "tw": (env.get(f"BRAND_{key}_TW") or "").strip(),
+            "ig": (env.get(f"BRAND_{key}_IG") or "").strip(),
             "logo": os.path.join(ROOT_DIR, "brands", name, "logo.png"),
         })
     return out

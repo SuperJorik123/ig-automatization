@@ -20,7 +20,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from modules.youtube.shorts_format import MAX_SHORT_S
 
 # (brand-dict key, picker label) — the order pairs appear in the picker.
-PLATFORMS = (("tg", "TG"), ("yt", "YT"), ("tw", "X"))
+PLATFORMS = (("tg", "TG"), ("yt", "YT"), ("tw", "X"), ("ig", "IG"))
 
 
 def available_brands(brands: list) -> list:
@@ -33,7 +33,9 @@ def pairs_for(renders: list, duration_s: float) -> list:
     """Publishable (render, platform) pairs: one per configured platform of
     each rendered brand. YouTube pairs disappear past the Shorts cap — an
     upload that can't be a Short shouldn't be offered — and for photo cards
-    (render["kind"] == "photo"), which YouTube can't take at all."""
+    (render["kind"] == "photo"), which YouTube can't take at all. Instagram
+    (Graph API) takes both: a video render goes out as a Reel, a photo card
+    as a feed post."""
     pairs = []
     for r in renders:
         b = r["brand"]

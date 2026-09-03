@@ -81,3 +81,18 @@ def test_pairs_hide_youtube_for_photo_cards():
 def test_card_gate_keyboard_has_both_choices():
     data = [b.callback_data for b in _buttons(branded.card_gate_keyboard())]
     assert data == ["b:asis", "b:card"]
+
+
+# --- Instagram (Graph API) pairs -------------------------------------------
+
+def test_pairs_include_ig_for_video_and_photo_renders():
+    brand = dict(_brand(tg="@mir", yt="mir", tw=""), ig="mirgram")
+    video = _render(brand)
+    photo = dict(_render(brand), kind="photo")
+    assert [p["platform"] for p in branded.pairs_for([video], 60)] == ["tg", "yt", "ig"]
+    assert [p["platform"] for p in branded.pairs_for([photo], 0)] == ["tg", "ig"]
+    assert branded.pairs_for([video], 60)[-1]["label"] == "mir \u2192 IG"
+
+
+def test_brand_without_ig_slot_has_no_ig_pair():
+    assert "ig" not in [p["platform"] for p in branded.pairs_for([_render(_brand())], 60)]
