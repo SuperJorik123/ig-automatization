@@ -102,6 +102,32 @@ def _schedule_reactions(job_queue, site: dict, post_id: int, link: str | None) -
                        name=f"reactions:{site['name']}:{post_id}")
 
 
+# Consecutive fetch failures per site, reset by the next successful fetch.
+# Shared hosts time out now and then; one timeout is not an outage and must
+# not become an email (errmail mails every ERROR). Only the Nth failure IN A
+# ROW is logged at ERROR — once per outage, not once per tick — and the
+# recovery is logged so the thread has an end.
+_fetch_failures: dict[str, int] = {}
+
+
+def _note_fetch_failure(name: str, exc: Exception) -> None:
+    streak = _fetch_failures.get(name, 0) + 1
+    _fetch_failures[name] = streak
+    threshold = config.NR_FETCH_ALERT_AFTER
+    if streak == threshold:
+        log.error("%s: fetch failed %d times in a row (%s between polls) — "
+                  "last error: %s", name, streak,
+                  f"{config.NR_POLL_S}s", exc)
+    else:
+        log.warning("%s (failure %d in a row; alert at %d)", exc, streak, threshold)
+
+
+def _note_fetch_success(name: str) -> None:
+    streak = _fetch_failures.pop(name, 0)
+    if streak >= config.NR_FETCH_ALERT_AFTER:
+        log.info("%s: reachable again after %d failed poll(s)", name, streak)
+
+
 async def tick(bot, site: dict, job_queue=None) -> str:
     """One poll of one site. Returns a one-line summary for the log.
 
@@ -111,8 +137,9 @@ async def tick(bot, site: dict, job_queue=None) -> str:
     try:
         articles = await asyncio.to_thread(wp.fetch_recent, site)
     except RuntimeError as exc:
-        log.error("%s", exc)
+        _note_fetch_failure(name, exc)
         return f"[{name}] fetch failed"
+    _note_fetch_success(name)
 
     first_run = not store.has_articles(name)
     seen = store.seen_ids(name)

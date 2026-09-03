@@ -8,6 +8,7 @@ client's subscribers and cannot be undone.
 
 import asyncio
 import importlib
+import logging
 
 import pytest
 
@@ -397,3 +398,50 @@ def test_an_empty_rewrite_is_skipped_not_posted(main, monkeypatch):
     run(main.tick(bot, _site()))
 
     assert bot.sent == []
+
+
+def test_fetch_failures_alert_only_on_the_third_in_a_row(main, monkeypatch, caplog):
+    """Transient timeouts must not mail the operator: the first two failures
+    are WARNINGs (errmail ignores them), the third in a row is the ERROR that
+    becomes an email, and a success resets the streak."""
+    calls = {"fail": True}
+
+    def flaky(site, limit=20):
+        if calls["fail"]:
+            raise RuntimeError("acme: request failed: Read timed out.")
+        return []
+
+    monkeypatch.setattr(main.wp, "fetch_recent", flaky)
+    monkeypatch.setattr(main.config, "NR_FETCH_ALERT_AFTER", 3)
+    main._fetch_failures.clear()
+
+    with caplog.at_level(logging.INFO, logger="newsroom"):
+        for _ in range(2):
+            assert "fetch failed" in run(main.tick(FakeBot(), _site()))
+        assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == [
+            logging.WARNING, logging.WARNING]
+
+        caplog.clear()
+        run(main.tick(FakeBot(), _site()))
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "3 times in a row" in errors[0].getMessage()
+        assert "Read timed out" in errors[0].getMessage()
+
+        # A fourth failure stays quiet — one email per outage, not one per tick.
+        caplog.clear()
+        run(main.tick(FakeBot(), _site()))
+        assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+        # Recovery resets the streak: the next outage alerts on ITS third tick.
+        caplog.clear()
+        calls["fail"] = False
+        run(main.tick(FakeBot(), _site()))
+        assert any("reachable again" in r.getMessage() for r in caplog.records)
+        assert main._fetch_failures.get("acme", 0) == 0
+
+        calls["fail"] = True
+        caplog.clear()
+        for _ in range(2):
+            run(main.tick(FakeBot(), _site()))
+        assert not [r for r in caplog.records if r.levelno == logging.ERROR]

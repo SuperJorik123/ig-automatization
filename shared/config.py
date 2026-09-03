@@ -358,6 +358,11 @@ NR_DRY_RUN = os.environ.get("NR_DRY_RUN", "1").strip().lower() not in (
 # Seconds between polls of each WordPress site.
 NR_POLL_S = _int_env("NR_POLL_S", 300)
 
+# A site's fetch must fail this many polls IN A ROW before the failure is
+# logged at ERROR (= one alert email). Shared WordPress hosts time out now and
+# then; a single timeout is noise, three consecutive ones is an outage.
+NR_FETCH_ALERT_AFTER = max(1, _int_env("NR_FETCH_ALERT_AFTER", 3))
+
 # Delay between publishing a post and ordering its reactions. Reactions
 # appearing in the same second as the post is the most legible bot tell there
 # is; 20 minutes reads as organic.
