@@ -31,7 +31,9 @@ cat > /opt/duckdns/duck.sh <<EOF
 echo "\$(date -Is) \$(curl -s -k "https://www.duckdns.org/update?domains=${SUB}&token=${TOKEN}&ip=")" >> /opt/duckdns/duck.log
 EOF
 chmod 700 /opt/duckdns/duck.sh
-( crontab -l 2>/dev/null | grep -v '/opt/duckdns/duck.sh' ; \
+# `crontab -l` exits 1 when there is no crontab yet and `grep -v` exits 1 on
+# empty input — neither may abort the script under set -e / pipefail.
+( { crontab -l 2>/dev/null || true; } | { grep -v '/opt/duckdns/duck.sh' || true; } ; \
   echo '*/5 * * * * /opt/duckdns/duck.sh >/dev/null 2>&1' ; \
   echo '@reboot /opt/duckdns/duck.sh >/dev/null 2>&1' ) | crontab -
 /opt/duckdns/duck.sh
@@ -46,7 +48,7 @@ done
 
 echo "== 2/6 nginx + certbot"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+apt-get update -qq || true   # focal is EOL; a stale mirror must not stop the install
 apt-get install -y -qq nginx >/dev/null
 if ! command -v certbot >/dev/null; then
     if apt-get install -y -qq certbot python3-certbot-nginx >/dev/null 2>&1; then
@@ -100,8 +102,12 @@ fi
 echo "== 5/6 Lets Encrypt for ${HOST}"
 certbot --nginx -d "${HOST}" --non-interactive --agree-tos -m "${EMAIL}" --redirect
 # Renewal: the apt package ships certbot.timer, the snap ships its own timer.
-systemctl list-timers --all 2>/dev/null | grep -qi certbot && echo "   renewal timer present" \
-    || echo "   WARNING: no certbot timer found — add 'certbot renew' to cron"
+if systemctl is-active --quiet certbot.timer || systemctl is-active --quiet snap.certbot.renew.timer \
+   || [ -f /etc/cron.d/certbot ]; then
+    echo "   renewal timer present"
+else
+    echo "   WARNING: no certbot timer found — add 'certbot renew' to cron"
+fi
 nginx -t && systemctl reload nginx
 
 echo "== 6/6 probe"
