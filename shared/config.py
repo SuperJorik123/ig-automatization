@@ -16,11 +16,22 @@ import os
 
 from dotenv import load_dotenv
 
+from shared import credentials
+
 # shared/config.py -> shared/ -> <repo root>
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # .env lives at the repo root and is git-ignored (holds the bot token etc.).
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
+
+# credentials/accounts.json holds the PER-BRAND accounts (Telegram channel,
+# Twitter keys, Instagram Graph token, YouTube channel) as one JSON block per
+# brand, and is expanded into os.environ right here — after .env, before
+# anything below reads a variable. Everything downstream (BRANDS, the
+# posters' os.getenv lookups) is unchanged and cannot tell the difference.
+# Shared services (OpenRouter, BulkFollows, SMTP, bot tokens) stay in .env.
+# No file = nothing changes; a malformed one raises here, at startup.
+BRAND_ACCOUNTS = credentials.apply()
 
 # Single shared media queue. posts/ stays at the repo root; posts/posted/
 # holds archives. Both server.py and the platform posters read/write here.
@@ -222,7 +233,8 @@ PUBLIC_MEDIA_BASE_URL = os.environ.get("PUBLIC_MEDIA_BASE_URL", "").strip()
 def _parse_brands(raw: str, env):
     """Parse BRANDS: comma-separated "name:lang" entries, e.g.
     "mirnews:en,rusnews:ru" (lang optional). Each brand's platform accounts
-    come from BRAND_<NAME>_TG / _YT / _TW / _IG (name uppercased, non-alphanumerics
+    come from BRAND_<NAME>_TG / _YT / _TW / _IG, and its picker group from
+    BRAND_<NAME>_GROUP (name uppercased, non-alphanumerics
     -> "_", same rule as TWITTER_<ACCOUNT>_*); an unset platform means the
     brand has no pair for it in the publish picker. The logo is always
     brands/<name>/logo.png — a missing file disables the brand in the picker
@@ -238,6 +250,9 @@ def _parse_brands(raw: str, env):
         out.append({
             "name": name,
             "lang": parts[1] if len(parts) > 1 else "",
+            # Account family (GMN / JNN) both news-bot pickers group by; blank
+            # means the brand is only reachable through their "Custom" list.
+            "group": (env.get(f"BRAND_{key}_GROUP") or "").strip(),
             "tg": (env.get(f"BRAND_{key}_TG") or "").strip(),
             "yt": (env.get(f"BRAND_{key}_YT") or "").strip(),
             "tw": (env.get(f"BRAND_{key}_TW") or "").strip(),

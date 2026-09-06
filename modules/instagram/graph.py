@@ -54,6 +54,7 @@ if _ROOT not in sys.path:
 import requests  # noqa: E402
 
 from shared import config  # noqa: E402  (loads the repo-root .env)
+from shared import credentials  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -282,8 +283,11 @@ def refresh_token(account: str, env_path: str | None = None) -> dict:
         if not new:
             raise GraphError(f"refresh returned no access_token: {body!r}")
         today = dt.date.today().isoformat()
-        _rewrite_env(env_path, prefix + "ACCESS_TOKEN", new,
-                     prefix + "TOKEN_REFRESHED", today)
+        # credentials/accounts.json is the source of truth for the accounts
+        # it lists; only a .env-configured account gets its line rewritten.
+        if not credentials.update_instagram_token(account, new, today):
+            _rewrite_env(env_path, prefix + "ACCESS_TOKEN", new,
+                         prefix + "TOKEN_REFRESHED", today)
         os.environ[prefix + "ACCESS_TOKEN"] = new
         os.environ[prefix + "TOKEN_REFRESHED"] = today
         expires = int(body.get("expires_in") or 0)

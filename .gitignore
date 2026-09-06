@@ -3,8 +3,14 @@
 .env.*
 !.env.example
 
-# YouTube OAuth credential folders (client_secrets.json + token.pickle)
-credentials/
+# Per-brand account files + YouTube OAuth folders (client_secrets.json,
+# token.pickle, brands/<name>.json). Only the template is tracked — a negation
+# cannot re-include anything under an excluded DIRECTORY, so each level
+# excludes its CONTENTS and re-admits the directory below it.
+credentials/*
+!credentials/brands/
+credentials/brands/*
+!credentials/brands/_example.json
 
 # Telegram news aggregator runtime state — the .session file is a LOGIN
 # CREDENTIAL; media + the SQLite queue are local runtime artefacts.

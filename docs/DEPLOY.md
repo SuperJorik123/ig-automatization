@@ -190,11 +190,36 @@ curl -sI https://<sub>.duckdns.org/m/                        # 403 / 404, never 
 rm /var/www/igmedia/probe.txt
 ```
 
-The IG tokens themselves live in `.env` as `IG_GRAPH_<ACCOUNT>_ACCESS_TOKEN`
-(see `.env.example`); the news bot refreshes any token older than 7 days once
-a day and rewrites the line in place, so the VPS `.env` is the live copy —
-when pasting a fresh token by hand also set
-`IG_GRAPH_<ACCOUNT>_TOKEN_REFRESHED=YYYY-MM-DD`.
+The IG tokens themselves live in `credentials/brands/<name>.json`, under the
+brand's `instagram` block (`access_token`, `user_id`, `token_refreshed`); the
+news bot refreshes any token older than 7 days once a day and writes the new
+one straight back into that file, so the VPS copy is the live one — when
+pasting a fresh token by hand also set `"token_refreshed": "YYYY-MM-DD"`.
+Accounts still configured the old way in `.env`
+(`IG_GRAPH_<ACCOUNT>_ACCESS_TOKEN` + `_TOKEN_REFRESHED`) keep working and get
+their `.env` line rewritten instead.
+
+### credentials/brands/ holds SECRETS the deploy does not carry
+
+Per-brand accounts (Telegram channel, Twitter keys, Instagram token, YouTube
+channel) live in `credentials/brands/<name>.json`, one file per brand, all
+git-ignored and — like `.env` — excluded from the deploy tarball below,
+because the VPS copies are the LIVE ones: the bot writes refreshed IG tokens
+into them. Adding or re-keying a brand on this PC therefore does NOT reach the
+VPS on the next push. Send the files deliberately, and restart the services
+(one brand, or the whole directory):
+
+```
+scp credentials/brands/wswire.json     root@193.36.38.133:/opt/ig-automatization2/credentials/brands/
+ssh root@193.36.38.133 'chmod 600 /opt/ig-automatization2/credentials/brands/*.json     && systemctl restart news-collector news-dispatcher news-bot'
+```
+
+Careful in the other direction too: the VPS copy is the live one for IG
+tokens, so copying a stale local file over it costs that account's token
+(paste a fresh one, or run `py modules/instagram/graph.py --account <n>
+--refresh` on the VPS afterwards). Only the brand you actually changed needs
+sending, which is the point of one file per brand. Check either side with
+`py shared/credentials.py --check` — it masks the secrets.
 
 ## Pushing new code
 
@@ -203,6 +228,7 @@ them. From this PC, tar the tree without them and drop it over the old one:
 
 ```
 tar czf app.tar.gz --exclude=.git --exclude=__pycache__ --exclude=node_modules \
+    --exclude=.env --exclude='credentials/*' \
     --exclude='posts/*' --exclude='modules/telegram/data/*' .
 scp app.tar.gz root@193.36.38.133:/tmp/
 ssh root@193.36.38.133 'cd /opt/ig-automatization2 && tar xzf /tmp/app.tar.gz \
@@ -211,7 +237,11 @@ ssh root@193.36.38.133 'cd /opt/ig-automatization2 && tar xzf /tmp/app.tar.gz \
 ```
 
 Excluding `modules/telegram/data/` is the important part — it holds the live
-SQLite queue and the Telethon session.
+SQLite queue and the Telethon session. `.env` and `credentials/` are excluded
+for the same reason: the VPS copies are the live ones (the news bot rewrites
+Instagram tokens into them daily), so shipping this PC's copies over them
+costs you whatever the bot refreshed since you last pulled them down. Push
+either one by hand, deliberately, when you actually changed it.
 
 Gotcha when running these from Git Bash on Windows: it rewrites anything that
 looks like a Unix path into a Windows one, so `scp app.tar.gz root@host:/tmp/`
