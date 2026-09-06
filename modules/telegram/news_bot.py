@@ -20,7 +20,8 @@ Brand-it: a single-video post (uploaded or URL) with BRANDS configured first
 asks "Post as-is / Brand it". Brand-it renders one variant per selected brand
 — brands/<name>/logo.png top-right, the caption as a translated lower-third
 headline (shared/branding.py) — sends each back here, then offers a publish
-picker of brand→TG/YT/X/IG pairs (all off; YouTube hidden over 3 minutes).
+picker of PLATFORMS (TG/YT/X/IG, all off; YouTube hidden over 3 minutes),
+each fanning out to every rendered brand configured for it.
 IG is the Graph API (modules/instagram/graph.py): the render is exposed at a
 public URL (shared/public_media.py, nginx on the VPS) just long enough for
 Instagram to fetch it — a video render becomes a Reel, a photo card a post.
@@ -95,7 +96,7 @@ from modules.telegram import (  # noqa: E402
 )
 from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.twitter import publisher as tw_publisher  # noqa: E402
-from modules.telegram import branded, translator  # noqa: E402
+from modules.telegram import branded, groups, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import graph as ig_graph  # noqa: E402
 from shared import branding, photo_card, public_media  # noqa: E402
@@ -227,32 +228,66 @@ def _gate_markup(state: dict) -> InlineKeyboardMarkup:
 EMOJI_SERVICES = reactions.EMOJI_SERVICES
 
 
+def _dest_lists(state: dict) -> tuple:
+    """The three destination lists AS OFFERED for this post: YouTube rows only
+    for a post with a video, X rows only for a single photo/video. One place
+    decides it, so the keyboard, the group rows and "All" can't disagree."""
+    return (config.TG_DESTINATIONS,
+            config.YT_DESTINATIONS if _has_video(state["media"]) else [],
+            config.TW_DESTINATIONS if _tweetable(state["media"]) else [])
+
+
+def _sel_map(state: dict) -> dict:
+    """The picker's three selections keyed the way groups.py wants them."""
+    return {"tg": state["sel_tg"], "yt": state["sel_yt"], "tw": state["sel_tw"]}
+
+
+def _dest_groups(state: dict) -> list:
+    return groups.dest_groups(config.BRANDS, *_dest_lists(state))
+
+
 def _keyboard(state: dict) -> InlineKeyboardMarkup:
-    """Channel picker: one row per Telegram destination ("t:<i>" indexes
-    TG_DESTINATIONS) plus, for posts that contain a video, one row per YouTube
-    channel ("y:<i>" indexes YT_DESTINATIONS). Indices keep callback_data tiny
-    — Telegram caps it at 64 bytes."""
+    """Channel picker. It OPENS COLLAPSED: one row per account group ("g:<i>"
+    indexes _dest_groups) with the per-channel list behind "⚙ Custom…", since
+    a post normally goes to a whole family of accounts. Expanded it is the
+    keyboard it always was — one row per Telegram destination ("t:<i>" indexes
+    TG_DESTINATIONS), plus one per YouTube channel for a post with a video
+    ("y:<i>") and one per X account for a single photo/video ("x:<i>"). A
+    destination no brand claims is grouped by nothing and only appears there
+    (and under "All"), and with no group at all the picker never collapses.
+    Indices keep callback_data tiny — Telegram caps it at 64 bytes."""
     rows = []
-    for i, dest in enumerate(config.TG_DESTINATIONS):
-        mark = "☑" if i in state["sel_tg"] else "☐"
-        label = f"{mark} {dest['chat_id']}"
-        if dest["lang"]:
-            label += f" · {dest['lang']}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"t:{i}")])
-    if _has_video(state["media"]):
-        for i, dest in enumerate(config.YT_DESTINATIONS):
+    tg_dests, yt_dests, tw_dests = _dest_lists(state)
+    gs = _dest_groups(state)
+    if gs and not state.get("custom"):
+        for i, g in enumerate(gs):
+            n = groups.dest_count(g)
+            rows.append([InlineKeyboardButton(
+                f"{groups.dest_mark(g, _sel_map(state))} {g['name']} · "
+                f"{n} channel{'' if n == 1 else 's'}",
+                callback_data=f"g:{i}")])
+        rows.append([InlineKeyboardButton("⚙ Custom…", callback_data="custom")])
+    else:
+        for i, dest in enumerate(tg_dests):
+            mark = "☑" if i in state["sel_tg"] else "☐"
+            label = f"{mark} {dest['chat_id']}"
+            if dest["lang"]:
+                label += f" · {dest['lang']}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"t:{i}")])
+        for i, dest in enumerate(yt_dests):
             mark = "☑" if i in state["sel_yt"] else "☐"
             label = f"{mark} ▶️ YT {dest['chat_id']}"
             if dest["lang"]:
                 label += f" · {dest['lang']}"
             rows.append([InlineKeyboardButton(label, callback_data=f"y:{i}")])
-    if _tweetable(state["media"]):
-        for i, dest in enumerate(config.TW_DESTINATIONS):
+        for i, dest in enumerate(tw_dests):
             mark = "☑" if i in state["sel_tw"] else "☐"
             label = f"{mark} 𝕏 {dest['chat_id']}"
             if dest["lang"]:
                 label += f" · {dest['lang']}"
             rows.append([InlineKeyboardButton(label, callback_data=f"x:{i}")])
+        if gs:
+            rows.append([InlineKeyboardButton("⬅ Groups", callback_data="groups")])
     # Reactions ("e:<i>" indexes EMOJI_SERVICES), two per row so the labels stay
     # readable. Optional: submitting with none selected just skips them.
     for i in range(0, len(EMOJI_SERVICES), 2):
@@ -590,6 +625,13 @@ async def _ensure_local_video(bot, state: dict) -> str:
     return path
 
 
+def _brand_markup(state: dict) -> InlineKeyboardMarkup:
+    """Brand picker keyboard for the current state — collapsed to group rows
+    unless the operator opened Custom."""
+    return branded.brand_keyboard(state["brands"], state["sel_brands"],
+                                  state.get("custom_brands", False))
+
+
 async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
     """Taps on the gate / brand picker / publish picker ("b:<verb>")."""
     if verb == "noop":
@@ -611,10 +653,9 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         state["brands"] = branded.available_brands(config.BRANDS)
         state["sel_brands"] = {i for i, b in enumerate(state["brands"])
                                if b["has_logo"]}
-        await q.edit_message_text(
-            _brand_prompt_text(state),
-            reply_markup=branded.brand_keyboard(state["brands"],
-                                                state["sel_brands"]))
+        state["custom_brands"] = False
+        await q.edit_message_text(_brand_prompt_text(state),
+                                  reply_markup=_brand_markup(state))
         return
 
     if verb == "brand":
@@ -632,17 +673,30 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         state["brands"] = branded.available_brands(config.BRANDS)
         state["sel_brands"] = {i for i, b in enumerate(state["brands"])
                                if b["has_logo"]}
-        await q.edit_message_text(
-            _brand_prompt_text(state),
-            reply_markup=branded.brand_keyboard(state["brands"],
-                                                state["sel_brands"]))
+        state["custom_brands"] = False
+        await q.edit_message_text(_brand_prompt_text(state),
+                                  reply_markup=_brand_markup(state))
         return
 
     if verb.startswith("t:") and state.get("mode") == "brand":
         await q.answer()
         state["sel_brands"] ^= {int(verb.split(":", 1)[1])}
-        await q.edit_message_reply_markup(
-            branded.brand_keyboard(state["brands"], state["sel_brands"]))
+        await q.edit_message_reply_markup(_brand_markup(state))
+        return
+
+    if verb.startswith("g:") and state.get("mode") == "brand":
+        await q.answer()
+        i = int(verb.split(":", 1)[1])
+        if i < len(groups.brand_groups(state["brands"])):
+            state["sel_brands"] = branded.toggle_brand_group(
+                state["brands"], state["sel_brands"], i)
+        await q.edit_message_reply_markup(_brand_markup(state))
+        return
+
+    if verb in ("custom", "groups") and state.get("mode") == "brand":
+        await q.answer()
+        state["custom_brands"] = verb == "custom"
+        await q.edit_message_reply_markup(_brand_markup(state))
         return
 
     if verb == "render" and state.get("mode") == "brand":
@@ -662,14 +716,15 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
 
     if verb.startswith("p:") and state.get("mode") == "publish":
         await q.answer()
-        state["sel_pairs"] ^= {int(verb.split(":", 1)[1])}
+        state["sel_platforms"] ^= {int(verb.split(":", 1)[1])}
         await q.edit_message_reply_markup(
-            branded.publish_keyboard(state["pairs"], state["sel_pairs"]))
+            branded.platform_keyboard(state["platforms"],
+                                      state["sel_platforms"]))
         return
 
     if verb == "publish" and state.get("mode") == "publish":
-        if not state["sel_pairs"]:
-            await q.answer("Pick at least one destination.", show_alert=True)
+        if not state["sel_platforms"]:
+            await q.answer("Pick at least one platform.", show_alert=True)
             return
         await q.answer()
         await _do_publish(q, context, state)
@@ -802,8 +857,8 @@ async def _do_render(q, context, state: dict) -> None:
 
     state["mode"] = "publish"
     state["renders"] = renders
-    state["pairs"] = branded.pairs_for(renders, duration)
-    state["sel_pairs"] = set()
+    state["platforms"] = branded.platforms_for(renders, duration)
+    state["sel_platforms"] = set()
 
     summary = "🎨 rendered: " + ", ".join(r["brand"]["name"] for r in renders)
     if warnings:
@@ -818,7 +873,7 @@ async def _do_render(q, context, state: dict) -> None:
     # for the next restart's sweep to eventually find.
     try:
         await q.edit_message_text(summary)
-        if not state["pairs"]:
+        if not state["platforms"]:
             _track(await q.message.chat.send_message(
                 "no destinations configured for the rendered brands "
                 "(BRAND_<NAME>_TG/YT/TW/IG) — files above are yours, nothing to publish"))
@@ -830,8 +885,8 @@ async def _do_render(q, context, state: dict) -> None:
         # send here is caught below with the state (and its files) still
         # intact to clean up, instead of orphaning everything silently.
         prompt = _track(await q.message.chat.send_message(
-            "Publish which?", reply_markup=branded.publish_keyboard(
-                state["pairs"], set())))
+            "Publish to which platforms?",
+            reply_markup=branded.platform_keyboard(state["platforms"], set())))
     except Exception as exc:
         log.error("brand publish-picker handoff failed: %s", exc)
         _pending.pop(q.message.message_id, None)
@@ -930,8 +985,8 @@ async def _do_render_card(q, context, state: dict) -> None:
 
     state["mode"] = "publish"
     state["renders"] = renders
-    state["pairs"] = branded.pairs_for(renders, 0)
-    state["sel_pairs"] = set()
+    state["platforms"] = branded.platforms_for(renders, 0)
+    state["sel_platforms"] = set()
 
     summary = "🖼 composed: " + ", ".join(r["brand"]["name"] for r in renders)
     if warnings:
@@ -942,7 +997,7 @@ async def _do_render_card(q, context, state: dict) -> None:
 
     try:
         await q.edit_message_text(summary)
-        if not state["pairs"]:
+        if not state["platforms"]:
             _track(await q.message.chat.send_message(
                 "no destinations configured for the composed brands "
                 "(BRAND_<NAME>_TG/TW/IG) — cards above are yours, nothing to publish"))
@@ -950,8 +1005,8 @@ async def _do_render_card(q, context, state: dict) -> None:
             _cleanup(state)
             return
         prompt = _track(await q.message.chat.send_message(
-            "Publish which?", reply_markup=branded.publish_keyboard(
-                state["pairs"], set())))
+            "Publish to which platforms?",
+            reply_markup=branded.platform_keyboard(state["platforms"], set())))
     except Exception as exc:
         log.error("card publish-picker handoff failed: %s", exc)
         _pending.pop(q.message.message_id, None)
@@ -972,7 +1027,7 @@ async def _do_publish(q, context, state: dict) -> None:
     """Push each selected pair through its platform publisher. The headline is
     already translated per brand — Telegram destinations get lang "" so
     publisher.publish doesn't translate again."""
-    pairs = [state["pairs"][i] for i in sorted(state["sel_pairs"])]
+    pairs = branded.expand(state["platforms"], state["sel_platforms"])
     _pending.pop(q.message.message_id, None)
     await q.edit_message_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
@@ -1210,12 +1265,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await q.edit_message_reply_markup(_keyboard(state))
         return
 
+    if data.startswith("g:"):
+        gs = _dest_groups(state)
+        i = int(data.split(":", 1)[1])
+        if i < len(gs):   # a keyboard from before the config changed
+            sel = groups.toggle_dest_group(gs[i], _sel_map(state))
+            state["sel_tg"], state["sel_yt"], state["sel_tw"] = (
+                sel["tg"], sel["yt"], sel["tw"])
+        await q.edit_message_reply_markup(_keyboard(state))
+        return
+
+    if data in ("custom", "groups"):
+        state["custom"] = data == "custom"
+        await q.edit_message_reply_markup(_keyboard(state))
+        return
+
+    # "All" covers every destination offered for this post — including the
+    # ones no brand claims, which no group row can reach.
     if data == "all":
-        state["sel_tg"] = set(range(len(config.TG_DESTINATIONS)))
-        if _has_video(state["media"]):
-            state["sel_yt"] = set(range(len(config.YT_DESTINATIONS)))
-        if _tweetable(state["media"]):
-            state["sel_tw"] = set(range(len(config.TW_DESTINATIONS)))
+        tg_dests, yt_dests, tw_dests = _dest_lists(state)
+        state["sel_tg"] = set(range(len(tg_dests)))
+        state["sel_yt"] = set(range(len(yt_dests)))
+        state["sel_tw"] = set(range(len(tw_dests)))
         await q.edit_message_reply_markup(_keyboard(state))
         return
 
