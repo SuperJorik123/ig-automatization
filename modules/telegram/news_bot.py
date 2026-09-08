@@ -25,7 +25,10 @@ each fanning out to every rendered brand configured for it.
 IG is the Graph API (modules/instagram/graph.py): the render is exposed at a
 public URL (shared/public_media.py, nginx on the VPS) just long enough for
 Instagram to fetch it — a video render becomes a Reel, a photo card a post.
-Nothing publishes without a selection.
+IG is also the one platform that does not post the headline: the caption is
+expanded from it by a web-searching model (modules/instagram/caption.py) into
+the account's usual paragraphs plus hashtags, once per publish, then
+translated per brand. Nothing publishes without a selection.
 
 Caption edit: reply to any open picker message with new text to replace the
 caption before hitting "Post to selected".
@@ -98,7 +101,7 @@ from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.twitter import publisher as tw_publisher  # noqa: E402
 from modules.telegram import branded, groups, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
-from modules.instagram import graph as ig_graph  # noqa: E402
+from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from shared import branding, photo_card, public_media  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
 
@@ -1023,6 +1026,37 @@ async def _do_render_card(q, context, state: dict) -> None:
     _pending[prompt.message_id] = state
 
 
+async def _ig_captions(source_text: str, pairs: list) -> dict[str, str]:
+    """The expanded Instagram caption, keyed by brand language.
+
+    Instagram is the only platform here that posts more than the headline (see
+    modules/instagram/caption.py), so this runs only when an IG pair is
+    actually in the set — the web search is billed per publish, not per render,
+    and a post that never goes to IG never pays for it.
+
+    One expansion, then the same per-language cache _render_branded uses for
+    the headline: N brands cost one search plus one translate per DISTINCT
+    language, and a brand with no lang gets the source text as written. Never
+    raises: an empty dict means every IG pair falls back to its headline, which
+    is what shipped before this existed.
+    """
+    langs = {p["render"]["brand"]["lang"]
+             for p in pairs if p["platform"] == "ig"}
+    if not langs or not (source_text or "").strip():
+        return {}
+    try:
+        full = await asyncio.to_thread(ig_caption.expand, source_text)
+        out = {}
+        for lang in langs:
+            out[lang] = (await asyncio.to_thread(
+                translator.translate, full, lang, config.SOURCE_LANG)
+                if lang else full)
+        return out
+    except Exception:
+        log.exception("instagram caption expansion failed — posting headlines")
+        return {}
+
+
 async def _do_publish(q, context, state: dict) -> None:
     """Push each selected pair through its platform publisher. The headline is
     already translated per brand — Telegram destinations get lang "" so
@@ -1031,6 +1065,9 @@ async def _do_publish(q, context, state: dict) -> None:
     _pending.pop(q.message.message_id, None)
     await q.edit_message_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
+
+    # Before the loop: one search-backed expansion shared by every IG pair.
+    ig_caps = await _ig_captions(state.get("text", ""), pairs)
 
     lines = []
     for p in pairs:
@@ -1070,8 +1107,11 @@ async def _do_publish(q, context, state: dict) -> None:
                 try:
                     publish = (ig_graph.publish_photo if r.get("kind") == "photo"
                                else ig_graph.publish_reel)
+                    # The expanded caption, in this brand's language; the bare
+                    # headline whenever expansion was off or didn't come back.
                     result = await asyncio.to_thread(
-                        publish, url, r["headline"], b["ig"])
+                        publish, url, ig_caps.get(b["lang"]) or r["headline"],
+                        b["ig"])
                 finally:
                     drop()
                 if result.get("status") == "success":

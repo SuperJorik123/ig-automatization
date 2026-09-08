@@ -126,6 +126,25 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "google/gemini-2.5-flash").strip()
 SCORER_MODEL = os.environ.get("SCORER_MODEL", "").strip() or TRANSLATE_MODEL
 
+# Instagram caption expansion (modules/instagram/caption.py): the headline goes
+# out on Telegram, YouTube and X as it is, but IG gets it expanded into the
+# account's usual three-or-four-paragraph caption plus hashtags.
+#
+# The model must be able to SEARCH — the whole point is a caption written from
+# the story as it stands today, not from a training set. On OpenRouter that is
+# the ":online" suffix, which works on any model id; a plain id will still
+# answer, just without looking anything up.
+#
+# IG_CAPTION_ENABLED=0 is the kill switch. Search is billed per result on top
+# of tokens (~$0.02 a caption), so it is the one leg here worth being able to
+# turn off without touching a model id. Off, the bare headline is posted, which
+# is exactly what shipped before this existed.
+IG_CAPTION_MODEL = (os.environ.get("IG_CAPTION_MODEL", "").strip()
+                    or "openai/gpt-5.5:online")
+IG_CAPTION_ENABLED = os.environ.get("IG_CAPTION_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no", "off"
+)
+
 # Collector's working dir: SQLite queue + downloaded media + login session.
 TG_DATA_DIR = os.path.join(ROOT_DIR, "modules", "telegram", "data")
 
