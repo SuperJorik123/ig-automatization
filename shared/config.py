@@ -305,6 +305,17 @@ TG_DRIP_MAX_S = _int_env("TG_DRIP_MAX_S", 24 * 3600)
 # the time the next one fires, and the drip starves.
 TG_MAX_AGE_H = _int_env("TG_MAX_AGE_H", 48)
 
+# How long a file in TG_DATA_DIR/media survives before the news bot's nightly
+# sweep removes it (cleanup.sweep_media). Nothing here is precious: the
+# collector's downloads are re-fetchable, and brand_/card_ renders are rebuilt
+# from the source post in seconds. 24 h is ~144x the ~10 min a brand-it flow
+# actually needs, and the directory grew to 17 GB when nothing swept it at all.
+# WITH THE COLLECTOR RUNNING, keep this above TG_MAX_AGE_H: an item stays
+# postable for TG_MAX_AGE_H, and deleting its media first makes the autopilot
+# publish text-only (autopilot._present_media drops missing files silently
+# rather than failing, so the loss would never show up as an error).
+TG_MEDIA_KEEP_H = _int_env("TG_MEDIA_KEEP_H", 24)
+
 # How many of the best-scoring eligible stories are compared head-to-head at
 # post time to choose the one that actually goes out (smart_filter.best_of).
 # 1 or 0 disables the comparison and posts the top-scoring story outright.

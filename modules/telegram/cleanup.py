@@ -16,6 +16,8 @@ Destination channels are never touched: only the chat id passed in is wiped.
 """
 
 import logging
+import os
+import time
 
 from modules.telegram import queue_store
 
@@ -59,3 +61,45 @@ async def wipe_chat(bot, chat_id) -> tuple[int, int]:
 
     log.info("cleanup: %d message(s) deleted, %d failed", deleted, failed)
     return deleted, failed
+
+
+def sweep_media(media_dir: str, max_age_h: int) -> tuple[int, int, int]:
+    """Delete every file in `media_dir` older than `max_age_h`. Returns
+    (deleted, bytes_freed, failed).
+
+    Age off the filesystem, deliberately — NOT off the queue. The DB-driven
+    alternative (expired items -> their media paths) needs a `purged` column
+    to stop rescanning the same rows nightly and still misses files no item
+    ever claimed. One mtime rule collects everything that lands here:
+    collector downloads, brand_/card_ renders orphaned by a restart, manual_
+    URL fetches — including whatever future code drops in.
+
+    Flat and non-recursive: only plain files directly in `media_dir` are
+    considered, so a subdirectory (and anything under it) is never touched.
+
+    One scandir pass, one stat per entry, cutoff precomputed — the cost is a
+    few ms even at thousands of files. Failures are counted, never raised: a
+    file still held open must not abort the run. They are NOT logged per file
+    either, because errmail turns every ERROR into an email."""
+    cutoff = time.time() - max_age_h * 3600
+    deleted = freed = failed = 0
+    try:
+        entries = list(os.scandir(media_dir))
+    except OSError:
+        return 0, 0, 0          # no media dir yet — nothing to sweep
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            st = entry.stat()   # one stat: mtime and size come together
+            if st.st_mtime >= cutoff:
+                continue
+            os.unlink(entry.path)
+        except OSError:
+            failed += 1
+            continue
+        deleted += 1
+        freed += st.st_size
+    log.info("media sweep: %d file(s) deleted, %.2f GB freed, %d failed "
+             "(keeping < %dh)", deleted, freed / 2**30, failed, max_age_h)
+    return deleted, freed, failed

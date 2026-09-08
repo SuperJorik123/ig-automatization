@@ -1,7 +1,9 @@
-"""modules/telegram/cleanup.py — the weekly control-group wipe, against a stub
-bot. Offline as always."""
+"""modules/telegram/cleanup.py — the weekly control-group wipe (against a stub
+bot) and the daily media sweep (against a tmp_path). Offline as always."""
 
 import asyncio
+import os
+import time
 
 from modules.telegram import cleanup, reactions
 
@@ -82,3 +84,88 @@ def test_monday_is_the_ptb_day_index_for_monday():
     week = ("sunday", "monday", "tuesday", "wednesday",
             "thursday", "friday", "saturday")
     assert week[cleanup.MONDAY] == "monday"
+
+
+# --------------------------------------------------------------------------- #
+# sweep_media — the daily disk janitor                                        #
+# --------------------------------------------------------------------------- #
+
+def aged(d, name, hours, size=1):
+    """A file in `d` whose mtime is `hours` old."""
+    p = d / name
+    p.write_bytes(b"x" * size)
+    stamp = time.time() - hours * 3600
+    os.utime(p, (stamp, stamp))
+    return p
+
+
+def test_sweep_deletes_files_older_than_the_window(tmp_path):
+    old = aged(tmp_path, "-100777_1.mp4", 30)
+    older = aged(tmp_path, "-100777_2.jpg", 100)
+
+    deleted, freed, failed = cleanup.sweep_media(str(tmp_path), 24)
+
+    assert (deleted, failed) == (2, 0)
+    assert not old.exists() and not older.exists()
+
+
+def test_sweep_keeps_files_inside_the_window(tmp_path):
+    """The retention window is the whole safety mechanism: an open brand-it
+    picker's renders are minutes old and must survive the nightly job."""
+    fresh = aged(tmp_path, "brand_228_dailynews.mp4", 1)
+    edge = aged(tmp_path, "card_src_abc_0.jpg", 23)
+
+    deleted, freed, failed = cleanup.sweep_media(str(tmp_path), 24)
+
+    assert deleted == 0
+    assert fresh.exists() and edge.exists()
+
+
+def test_sweep_reports_bytes_freed(tmp_path):
+    aged(tmp_path, "a.mp4", 30, size=700)
+    aged(tmp_path, "b.mp4", 30, size=300)
+    aged(tmp_path, "keep.mp4", 1, size=5000)
+
+    deleted, freed, failed = cleanup.sweep_media(str(tmp_path), 24)
+
+    assert deleted == 2
+    assert freed == 1000          # only what actually went
+
+
+def test_sweep_ignores_subdirectories(tmp_path):
+    """Flat by design — the sweep must never recurse into a sibling that
+    happens to sit under the media dir."""
+    sub = tmp_path / "nested"
+    sub.mkdir()
+    buried = aged(sub, "old.mp4", 100)
+    stamp = time.time() - 100 * 3600
+    os.utime(sub, (stamp, stamp))
+
+    deleted, freed, failed = cleanup.sweep_media(str(tmp_path), 24)
+
+    assert deleted == 0
+    assert buried.exists() and sub.is_dir()
+
+
+def test_sweep_survives_a_file_it_cannot_delete(tmp_path, monkeypatch):
+    """One locked file must not abort the run — it is counted and the sweep
+    carries on to the rest."""
+    aged(tmp_path, "locked.mp4", 30)
+    aged(tmp_path, "fine.mp4", 30)
+    real = os.unlink
+
+    def flaky(path):
+        if os.path.basename(path) == "locked.mp4":
+            raise OSError("in use")
+        return real(path)
+
+    monkeypatch.setattr(cleanup.os, "unlink", flaky)
+
+    deleted, freed, failed = cleanup.sweep_media(str(tmp_path), 24)
+
+    assert (deleted, failed) == (1, 1)
+
+
+def test_sweep_on_a_missing_directory_is_a_no_op(tmp_path):
+    """A fresh checkout has no media dir until the first download."""
+    assert cleanup.sweep_media(str(tmp_path / "nope"), 24) == (0, 0, 0)

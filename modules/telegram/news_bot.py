@@ -1389,6 +1389,26 @@ async def _weekly_cleanup_job(context) -> None:
         log.exception("weekly cleanup crashed — next Monday retries")
 
 
+async def _media_sweep_job(context) -> None:
+    """Nightly 04:30 local: delete media older than TG_MEDIA_KEEP_H.
+
+    _sweep_orphans() only runs at startup and only knows two prefixes; this is
+    the durable half, and it is what keeps data/media from growing without
+    bound (it reached 17 GB / 3176 files before this job existed). Blocking
+    unlinks go to a thread so the bot keeps answering while it runs."""
+    media_dir = os.path.join(config.TG_DATA_DIR, "media")
+    try:
+        deleted, freed, failed = await asyncio.to_thread(
+            cleanup.sweep_media, media_dir, config.TG_MEDIA_KEEP_H)
+    except Exception:
+        log.exception("media sweep crashed — tomorrow retries")
+        return
+    if failed:
+        # One aggregate line, not one per file: errmail mails every ERROR.
+        log.warning("media sweep: %d file(s) could not be deleted", failed)
+    log.info("media sweep: %d file(s), %.2f GB freed", deleted, freed / 2**30)
+
+
 IG_TOKEN_MAX_AGE_DAYS = 7
 
 
@@ -1435,6 +1455,13 @@ async def _on_start(app) -> None:
                                 time=dt.time(4, 0, tzinfo=local_tz),
                                 days=(cleanup.MONDAY,), name="weekly-cleanup")
         log.info("weekly control-group cleanup scheduled: Mondays 04:00 %s", local_tz)
+        # 04:30, half an hour after the weekly wipe so the two never overlap.
+        # No `days=` — this one runs every night.
+        app.job_queue.run_daily(_media_sweep_job,
+                                time=dt.time(4, 30, tzinfo=local_tz),
+                                name="media-sweep")
+        log.info("media sweep scheduled: daily 04:30 %s (keeping < %dh)",
+                 local_tz, config.TG_MEDIA_KEEP_H)
         if config.IG_GRAPH_ACCOUNTS:
             # first=120 s: a fresh deploy checks the tokens right away, so a
             # broken refresh shows up in the log today, not in a week.
