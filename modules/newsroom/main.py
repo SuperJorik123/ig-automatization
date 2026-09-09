@@ -2,11 +2,10 @@
 modules/newsroom/main.py — the client newsroom bot.
 
 One JobQueue job per configured site. Each tick: fetch the site's recent
-WordPress posts, and if the channel's window is open (one post per
-NR_MIN_INTERVAL_H ± NR_JITTER_H hours — see pace.py), rewrite the newest article waiting,
-publish it to that site's Telegram channel, place the BulkFollows orders, and
-drop the others. The channel carries one current story a day, not the site's
-whole feed.
+WordPress posts, and if this channel has not posted yet today, rewrite the
+LATEST article the site published today, publish it to that site's Telegram
+channel, place the BulkFollows orders, and drop the others. One story a day per
+channel, always that day's — see pace.py for the three rules that make it so.
 
 Run it:
 
@@ -106,6 +105,13 @@ def _schedule_reactions(job_queue, site: dict, post_id: int, link: str | None) -
                        name=f"reactions:{site['name']}:{post_id}")
 
 
+def _now() -> datetime:
+    """The clock, in one place. Every date rule in this file goes through it —
+    the calendar-day gate and the settle delay both — so a test can sit at
+    23:59 or step over midnight without sleeping."""
+    return datetime.now(timezone.utc)
+
+
 # Consecutive fetch failures per site, reset by the next successful fetch.
 # Shared hosts time out now and then; one timeout is not an outage and must
 # not become an email (errmail mails every ERROR). Only the Nth failure IN A
@@ -166,21 +172,39 @@ async def tick(bot, site: dict, job_queue=None) -> str:
     if not pending:
         return f"[{name}] nothing new"
 
-    # One article per channel per window. Checked BEFORE the rewrite,
-    # which is the only paid call in the flow: a throttled tick must cost
-    # nothing, and at NR_POLL_S=300 there are 287 of them for every one that
-    # posts.
-    waiting = pace.cooldown_remaining(
-        site["chat_id"], store.last_post_at(site["chat_id"]),
-        datetime.now(timezone.utc), config.NR_MIN_INTERVAL_H, config.NR_JITTER_H)
-    if waiting > 0:
-        return (f"[{name}] {len(pending)} pending, next post in "
-                f"{pace.format_wait(waiting)}")
+    # Everything below runs BEFORE the rewrite, the only billed call in the
+    # flow: at NR_POLL_S=300 there are 287 held ticks for every one that posts.
+    now = _now()
+    today = pace.utc_day(now)
 
-    # The NEWEST waiting article, not the oldest: one story a day means the
-    # channel should carry today's, and store.pending() returns published_at
-    # ascending.
-    row = pending[-1]
+    if store.posted_on(site["chat_id"], today):
+        return f"[{name}] already posted today, {len(pending)} held"
+
+    # Yesterday's leftovers can never be posted, so drop them now rather than
+    # carry them: without this the first tick after midnight ships an article
+    # from yesterday and today's burst waits for tomorrow — the channel locks
+    # a day behind and never catches up. An article with no readable date is
+    # treated as today's: it came out of the last 20 the site published, and
+    # silently dropping it would be worse than posting it.
+    todays, stale = [], []
+    for r in pending:
+        (todays if (pace.utc_day(r["published_at"]) or today) == today
+         else stale).append(r)
+    for r in stale:
+        store.mark(r["id"], store.SKIPPED)
+    if not todays:
+        return f"[{name}] nothing published today, {len(stale)} dropped"
+
+    # The day's LATEST article — store.pending() returns published_at ascending
+    # — held until the burst has gone quiet. Posting on sight would ship the
+    # FIRST of the morning's 2-5 articles instead of the last.
+    row = todays[-1]
+    holding = pace.hold_remaining(site["chat_id"], row["published_at"], now,
+                                  config.NR_SETTLE_MIN_M, config.NR_SETTLE_MAX_M)
+    if holding > 0:
+        return (f"[{name}] {len(todays)} today, posting in "
+                f"{pace.format_wait(holding)}")
+
     try:
         shipped = await _handle(bot, site, row, job_queue)
     except Exception as exc:
@@ -191,15 +215,15 @@ async def tick(bot, site: dict, job_queue=None) -> str:
         shipped = False
 
     if not (shipped or config.NR_DRY_RUN):
-        # Nothing went out, so the window was never used: leave the rest
-        # pending and let the next tick try the next-freshest instead of
-        # spending the day's slot on one article that could not be posted.
-        return f"[{name}] 0/{len(pending)} posted"
+        # Nothing went out, so the day is still unspent: leave the rest
+        # pending and let the next tick try the next-freshest rather than
+        # burning the channel's whole day on one article that cannot be posted.
+        return f"[{name}] 0/{len(todays)} posted"
 
-    # Dropped, not queued: the client gets the current story, never a backlog
+    # Dropped, not queued: the client gets today's story, never a backlog
     # drip-feeding week-old news. Dry runs drop too, or switching dry-run off
     # would dump everything it "skipped" into the channel at once.
-    dropped = pending[:-1]
+    dropped = [r for r in todays if r["id"] != row["id"]]
     for other in dropped:
         store.mark(other["id"], store.SKIPPED)
     verb = "would post" if config.NR_DRY_RUN else "posted"

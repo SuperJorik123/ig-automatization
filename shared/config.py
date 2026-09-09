@@ -447,17 +447,18 @@ NR_BACKFILL = os.environ.get("NR_BACKFILL", "0").strip().lower() in (
     "1", "true", "yes", "on"
 )
 
-# Roughly one article per channel per NR_MIN_INTERVAL_H hours. A site that
-# publishes five stories in an afternoon must not empty itself into the
-# channel: the tick posts the NEWEST article waiting and drops the rest.
-# 0 disables the cooldown (every tick with anything pending posts again).
-NR_MIN_INTERVAL_H = _float_env("NR_MIN_INTERVAL_H", 24.0)
-
-# Jitter of ±NR_JITTER_H hours around that interval, derived per channel and
-# per window (see modules/newsroom/pace.py) so seven channels do not post in
-# lockstep every day. SIGNED: at the defaults the real gap is 21-27 h, which
-# makes NR_MIN_INTERVAL_H the AVERAGE and not a floor. 0 disables it.
-NR_JITTER_H = _float_env("NR_JITTER_H", 3.0)
+# One article per channel per UTC calendar day, carrying that day's LATEST
+# article (modules/newsroom/pace.py). The sites publish 2-5 articles in one
+# early-morning burst; the channel gets one of them and the rest are dropped.
+#
+# Nothing ships until the day's newest article has been quiet this long, or
+# the tick would post the FIRST of the burst instead of the last. The exact
+# delay is drawn from this range per channel and per day — derived from
+# (chat_id, day), not re-rolled each poll — so seven channels do not post in
+# lockstep and none of them posts on the same minute every morning. The
+# observed bursts run 5-25 minutes, so the floor wants headroom over that.
+NR_SETTLE_MIN_M = _float_env("NR_SETTLE_MIN_M", 45.0)
+NR_SETTLE_MAX_M = _float_env("NR_SETTLE_MAX_M", 120.0)
 
 # BulkFollows credentials for the CLIENT's panel account — a different key and
 # a different balance from BULKFOLLOWS_API_KEY above. Service ids are per site

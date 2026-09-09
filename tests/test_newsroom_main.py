@@ -51,10 +51,23 @@ class FakeJobQueue:
         self.jobs.append({"when": when, "name": name})
 
 
+def _today_at(hour: int, minute: int = 0) -> datetime:
+    """A UTC timestamp on today's date — the day the frozen clock sits on."""
+    return datetime.now(timezone.utc).replace(
+        hour=hour, minute=minute, second=0, microsecond=0)
+
+
 def _article(wp_id=1, **over):
+    """One article, published today at 04:0<wp_id> UTC.
+
+    Today's date matters now: the tick only ever posts an article the site
+    published today. 04:00 mirrors the real bursts (03:30-06:30 UTC) and is
+    two hours behind the frozen clock, so it is settled unless a test says
+    otherwise."""
     a = {"wp_id": wp_id, "url": f"https://acme.test/{wp_id}", "title": f"Story {wp_id}",
          "body": "Body text.", "media_url": None, "media_type": None,
-         "published_at": f"2026-08-{10 + wp_id:02d}T10:00:00+00:00"}
+         "published_at": (_today_at(4) + timedelta(minutes=wp_id)).isoformat(
+             timespec="seconds")}
     a.update(over)
     return a
 
@@ -79,8 +92,10 @@ def main(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "NR_DRY_RUN", False)
     monkeypatch.setattr(config, "NR_BACKFILL", False)
     monkeypatch.setattr(config, "NR_REACTION_DELAY_S", 1200)
-    monkeypatch.setattr(config, "NR_MIN_INTERVAL_H", 24.0)
-    monkeypatch.setattr(config, "NR_JITTER_H", 0.0)  # pace.py owns the jitter
+    # A flat settle so the tick's decisions are exact; pace.py owns the
+    # per-channel spread and tests it there.
+    monkeypatch.setattr(config, "NR_SETTLE_MIN_M", 60.0)
+    monkeypatch.setattr(config, "NR_SETTLE_MAX_M", 60.0)
     monkeypatch.setattr(config, "NR_EMOJI_SERVICES", [
         {"name": "heart", "emoji": "❤️", "service": "5108"},
     ])
@@ -106,6 +121,11 @@ def main(tmp_path, monkeypatch):
                         lambda site, limit=20: list(main_mod.articles))
     monkeypatch.setattr(main_mod.rewrite, "to_telegram",
                         lambda article, site=None: f"POST: {article['title']}")
+
+    # 06:00 UTC today: after the sites' real bursts, and far from midnight so
+    # the day boundary only moves when a test moves it (main.NOW += a day).
+    main_mod.NOW = _today_at(6)
+    monkeypatch.setattr(main_mod, "_now", lambda: main_mod.NOW)
 
     main_mod.placed = placed
     main_mod.store_mod = store_mod
@@ -183,15 +203,15 @@ def test_the_newest_pending_article_is_the_one_posted(main):
     assert titles == ["POST: Story 4"]
 
 
-def test_the_articles_not_posted_are_dropped_not_queued(main, monkeypatch):
-    # The client's channel shows one current story a day; queueing the rest
-    # would drip-feed week-old news forever.
+def test_the_articles_not_posted_are_dropped_not_queued(main):
+    # The client's channel shows one current story a day; queueing the losers
+    # would drip-feed yesterday's news tomorrow.
     run(main.tick(FakeBot(), _site()))
     main.articles = [_article(4), _article(3), _article(2)]
     summary = run(main.tick(FakeBot(), _site()))
     assert "posted 1, dropped 2" in summary
 
-    monkeypatch.setattr(main.config, "NR_MIN_INTERVAL_H", 0)  # window wide open
+    main.NOW += timedelta(days=1)
     bot = FakeBot()
 
     assert "nothing new" in run(main.tick(bot, _site()))
@@ -472,57 +492,52 @@ def test_fetch_failures_alert_only_on_the_third_in_a_row(main, monkeypatch, capl
 
 
 # --------------------------------------------------------------------------- #
-# One post per channel per day                                                #
+# One post per channel per calendar day                                       #
 # --------------------------------------------------------------------------- #
 
 
-def _age_last_post(main, chat_id: str, hours: float) -> None:
-    """Backdate the channel's last post so the cooldown sees a real gap.
-
-    Cheaper and more honest than freezing the clock: the gate reads exactly
-    the row publishing wrote."""
-    when = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
-    with main.store_mod._conn() as c:
-        c.execute("UPDATE posts SET posted_at=? WHERE chat_id=?", (when, chat_id))
-
-
-def _post_one(main):
-    """Get one article published, leaving the channel inside its cooldown."""
-    run(main.tick(FakeBot(), _site()))   # first tick: recorded as seen
-    main.articles = [_article(2)]
+def _open_the_day(main):
+    """Burn the first tick (backfill guard) so the channel is ready to post."""
     run(main.tick(FakeBot(), _site()))
 
 
-def test_a_second_article_the_same_day_is_held(main):
-    _post_one(main)
+def test_the_days_second_article_is_not_posted(main):
+    _open_the_day(main)
+    main.articles = [_article(2)]
+    run(main.tick(FakeBot(), _site()))          # today's story ships
+
     main.articles = [_article(3)]
     bot = FakeBot()
-
     summary = run(main.tick(bot, _site()))
 
     assert bot.sent == []
-    assert "next post in" in summary
+    assert "already posted today" in summary
 
 
-def test_a_held_tick_pays_for_no_rewrite(main, monkeypatch):
+def test_a_tick_after_the_days_post_pays_for_no_rewrite(main, monkeypatch):
     # The gate sits in front of the only billed call in the flow — at
     # NR_POLL_S=300 there are 287 held ticks for every one that posts.
-    _post_one(main)
+    _open_the_day(main)
+    main.articles = [_article(2)]
+    run(main.tick(FakeBot(), _site()))
     main.articles = [_article(3)]
 
     def boom(article, site=None):
-        raise AssertionError("the model must not be called on a held tick")
+        raise AssertionError("the model must not be called after today's post")
 
     monkeypatch.setattr(main.rewrite, "to_telegram", boom)
 
     run(main.tick(FakeBot(), _site()))
 
 
-def test_the_held_article_ships_when_the_window_reopens(main):
-    _post_one(main)
-    main.articles = [_article(3)]
-    run(main.tick(FakeBot(), _site()))          # held
-    _age_last_post(main, "@acme", 25)
+def test_a_new_day_posts_again(main):
+    _open_the_day(main)
+    main.articles = [_article(2)]
+    run(main.tick(FakeBot(), _site()))
+
+    main.NOW += timedelta(days=1)
+    tomorrow = (_today_at(4) + timedelta(days=1)).isoformat()
+    main.articles = [_article(3, published_at=tomorrow)]
     bot = FakeBot()
 
     run(main.tick(bot, _site()))
@@ -530,33 +545,108 @@ def test_the_held_article_ships_when_the_window_reopens(main):
     assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 3"]
 
 
-def test_the_window_reopens_only_after_the_full_interval(main):
-    _post_one(main)
-    main.articles = [_article(3)]
-    _age_last_post(main, "@acme", 23)
-    bot = FakeBot()
-
-    run(main.tick(bot, _site()))
-
-    assert bot.sent == []
+# --------------------------------------------------------------------------- #
+# The burst must settle                                                       #
+# --------------------------------------------------------------------------- #
 
 
-def test_a_day_of_backlog_ships_only_its_freshest(main):
-    _post_one(main)
-    main.articles = [_article(5), _article(4), _article(3)]
-    run(main.tick(FakeBot(), _site()))          # held, all three recorded
-    _age_last_post(main, "@acme", 25)
+def test_the_first_article_of_a_burst_is_not_posted_on_sight(main):
+    # The sites publish 2-5 articles over 5-25 minutes. Posting the moment one
+    # appears ships the FIRST of the morning, not the latest.
+    _open_the_day(main)
+    main.articles = [_article(2, published_at=_today_at(5, 55).isoformat())]
     bot = FakeBot()
 
     summary = run(main.tick(bot, _site()))
 
-    assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 5"]
+    assert bot.sent == []
+    assert "posting in" in summary
+
+
+def test_a_burst_still_arriving_keeps_resetting_the_wait(main):
+    # The wait is measured from the NEWEST article, so the last one through
+    # the door is the one that ships.
+    _open_the_day(main)
+    main.articles = [_article(2, published_at=_today_at(4).isoformat()),
+                     _article(3, published_at=_today_at(5, 50).isoformat())]
+    bot = FakeBot()
+
+    summary = run(main.tick(bot, _site()))
+
+    assert bot.sent == []
+    assert "2 today, posting in" in summary
+
+
+def test_once_the_burst_settles_the_days_last_article_ships(main):
+    _open_the_day(main)
+    main.articles = [_article(2, published_at=_today_at(3, 48).isoformat()),
+                     _article(3, published_at=_today_at(4, 2).isoformat()),
+                     _article(4, published_at=_today_at(4, 22).isoformat())]
+    bot = FakeBot()
+
+    summary = run(main.tick(bot, _site()))
+
+    assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 4"]
     assert "posted 1, dropped 2" in summary
 
 
-def test_a_failed_post_does_not_start_the_cooldown(main, monkeypatch):
-    # Otherwise a single dead send costs the channel its whole day.
-    run(main.tick(FakeBot(), _site()))
+# --------------------------------------------------------------------------- #
+# Only today's articles are eligible                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_yesterdays_leftovers_are_dropped_not_posted(main):
+    # Without this the first tick after midnight ships yesterday's straggler
+    # and today's burst waits for tomorrow — the channel locks a day behind.
+    _open_the_day(main)
+    yesterday = (_today_at(13, 37) - timedelta(days=1)).isoformat()
+    main.articles = [_article(2, published_at=yesterday)]
+    bot = FakeBot()
+
+    summary = run(main.tick(bot, _site()))
+
+    assert bot.sent == []
+    assert "nothing published today, 1 dropped" in summary
+
+
+def test_a_straggler_never_becomes_tomorrows_post(main):
+    _open_the_day(main)
+    main.articles = [_article(2)]
+    run(main.tick(FakeBot(), _site()))                    # today's post
+    straggler = _article(3, published_at=_today_at(13, 37).isoformat())
+    main.articles = [straggler]
+    run(main.tick(FakeBot(), _site()))                    # held: already posted
+
+    main.NOW += timedelta(days=1)
+    fresh = _article(4, published_at=(_today_at(4) + timedelta(days=1)).isoformat())
+    main.articles = [straggler, fresh]
+    bot = FakeBot()
+
+    run(main.tick(bot, _site()))
+
+    assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 4"]
+
+
+def test_an_article_with_no_date_is_treated_as_todays(main):
+    # It came out of the last 20 the site published; dropping it silently
+    # would be worse than posting it.
+    _open_the_day(main)
+    main.articles = [_article(2, published_at=None)]
+    bot = FakeBot()
+
+    run(main.tick(bot, _site()))
+
+    assert len(bot.sent) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Failure and dry run                                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_failed_post_does_not_spend_the_day(main):
+    # Otherwise one dead send costs the channel its whole day.
+    _open_the_day(main)
     main.articles = [_article(2), _article(3)]
 
     class DeadBot(FakeBot):
@@ -583,25 +673,16 @@ def test_a_dry_run_holds_the_channel_like_a_live_one(main, monkeypatch):
     assert "would post 1, dropped 1" in summary
 
 
-def test_each_channel_has_its_own_window(main):
-    # A shared cooldown would let the busiest site mute the other six.
-    _post_one(main)
+def test_each_channel_has_its_own_day(main):
+    # A shared gate would let the busiest site mute the other six.
+    _open_the_day(main)
+    main.articles = [_article(2)]
+    run(main.tick(FakeBot(), _site()))          # acme has posted today
     main.articles = [_article(1)]
     run(main.tick(FakeBot(), _site(name="globex", chat_id="@globex")))  # first tick
     main.articles = [_article(2)]
     bot = FakeBot()
 
     run(main.tick(bot, _site(name="globex", chat_id="@globex")))
-
-    assert len(bot.sent) == 1
-
-
-def test_a_zero_interval_turns_the_cap_off(main, monkeypatch):
-    monkeypatch.setattr(main.config, "NR_MIN_INTERVAL_H", 0)
-    _post_one(main)
-    main.articles = [_article(3)]
-    bot = FakeBot()
-
-    run(main.tick(bot, _site()))
 
     assert len(bot.sent) == 1

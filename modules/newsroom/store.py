@@ -205,18 +205,21 @@ def bump_channel_posts(chat_id: str) -> int:
         return c.execute("SELECT n FROM counters WHERE chat_id=?", (chat_id,)).fetchone()["n"]
 
 
-def last_post_at(chat_id: str) -> str | None:
-    """When this channel last published, ISO UTC, or None if it never has.
+def posted_on(chat_id: str, day: str) -> bool:
+    """Has this channel already published on `day` ("YYYY-MM-DD", UTC)?
 
-    The whole state behind the one-post-per-day rule (modules/newsroom/pace.py)
-    — durable by construction, because it is the same row the BulkFollows
-    orders are filed against. Nothing extra is stored and nothing can drift out
-    of sync with what actually shipped."""
+    The whole gate behind the one-a-day rule (modules/newsroom/pace.py), and
+    it needs no state of its own: `posts` is already the record of what really
+    shipped — the same rows the BulkFollows orders are filed against — so the
+    answer survives restarts and cannot drift out of sync with the channel.
+    `posted_at` is written by _now(), so its first ten characters are the UTC
+    date."""
     with _conn() as c:
         row = c.execute(
-            "SELECT MAX(posted_at) AS t FROM posts WHERE chat_id=?", (chat_id,)
+            "SELECT 1 FROM posts WHERE chat_id=? AND substr(posted_at, 1, 10)=? LIMIT 1",
+            (chat_id, day),
         ).fetchone()
-    return row["t"] if row and row["t"] else None
+    return row is not None
 
 
 def recent_posts(chat_id: str, limit: int = 5) -> list:

@@ -158,29 +158,30 @@ def test_counter_survives_a_reload(store, tmp_path, monkeypatch):
     assert store.bump_channel_posts("@acme") == 4
 
 
-def test_last_post_at_is_none_before_the_first_post(store):
-    assert store.last_post_at("@acme") is None
+def test_posted_on_is_false_before_the_first_post(store):
+    assert store.posted_on("@acme", "2026-09-09") is False
 
 
-def test_last_post_at_is_the_newest_timestamp(store):
-    # The whole state behind the one-a-day rule; the posts table is already
-    # the record of what actually shipped, so nothing can drift out of sync.
+def test_posted_on_finds_the_days_post(store):
+    # The whole gate behind the one-a-day rule; the posts table is already the
+    # record of what actually shipped, so nothing can drift out of sync.
     a = store.add_article("acme", _article(1))
     store.record_post(a, "acme", "@acme", 1, "https://t.me/acme/1")
     with store._conn() as c:
-        c.execute("UPDATE posts SET posted_at='2026-09-01T00:00:00+00:00'")
-    b = store.add_article("acme", _article(2))
-    store.record_post(b, "acme", "@acme", 2, "https://t.me/acme/2")
+        c.execute("UPDATE posts SET posted_at='2026-09-09T05:22:11+00:00'")
 
-    assert store.last_post_at("@acme") > "2026-09-01T00:00:00+00:00"
+    assert store.posted_on("@acme", "2026-09-09") is True
+    assert store.posted_on("@acme", "2026-09-10") is False
 
 
-def test_last_post_at_is_per_channel(store):
-    # A shared cooldown would let the busiest site mute the other six.
+def test_posted_on_is_per_channel(store):
+    # A shared gate would let the busiest site mute the other six.
     a = store.add_article("acme", _article(1))
     store.record_post(a, "acme", "@acme", 1, "https://t.me/acme/1")
+    with store._conn() as c:
+        c.execute("UPDATE posts SET posted_at='2026-09-09T05:22:11+00:00'")
 
-    assert store.last_post_at("@globex") is None
+    assert store.posted_on("@globex", "2026-09-09") is False
 
 
 def test_recent_posts_is_newest_first_and_limited(store):

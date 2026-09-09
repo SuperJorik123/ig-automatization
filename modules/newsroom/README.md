@@ -73,22 +73,38 @@ subscribers. It keys on the site having no rows, not on the database being
 empty, so adding site #8 is guarded too. Override with `NR_BACKFILL=1` only when
 you mean it.
 
-**Roughly one article per channel per day, newest wins.** A site can publish five
-stories in an afternoon; the channel gets one. The gate sits in `tick()`
-*before* the rewrite — the only billed call in the flow — because at
-`NR_POLL_S=300` there are 287 held ticks for every one that posts. When the
-window opens, the **newest** article waiting goes out and the rest are marked
-skipped: a queue would drip-feed week-old news forever and grow without bound
-on a busy site. Nothing is dropped unless something actually shipped, so a
-failed send costs one article, not the channel's whole day. The cooldown reads
-`MAX(posted_at)` from the `posts` table — the record of what really shipped, so
-it survives restarts and cannot drift out of sync. Its jitter (`NR_JITTER_H`)
-is *derived* from `(chat_id, last post)`, not drawn: a fresh random per poll
-would let the channel post on the lowest of 288 daily draws, pinning every
-gap to 21 h. Knobs: `NR_MIN_INTERVAL_H` (24), `NR_JITTER_H` (3) — the
-jitter is **signed**, so the real gap is 21-27 h and the interval is the
-average rather than a floor. `--force-latest`
-bypasses the gate but still starts the cooldown.
+**One article per channel per calendar day, and it is that day's latest.**
+Each site publishes 2-5 articles in one burst lasting 5-25 minutes, early
+morning (03:30-06:30 UTC, occasionally 01:20-02:05), plus the odd afternoon
+straggler. The channel behind it gets exactly one of them. Three rules make
+that work, and the last two are the ones easy to leave out:
+
+*One per day* — `store.posted_on(chat_id, today)` is the gate, and it sits in
+front of the rewrite, the only billed call in the flow. `posts` is already the
+record of what shipped, so the gate needs no state of its own and cannot drift.
+
+*Only today's articles are eligible* — yesterday's leftovers and yesterday's
+straggler are marked skipped, never posted. Without this the first tick after
+midnight ships an article from yesterday, today's burst then waits for
+tomorrow, and the channel locks a day behind permanently. An article with no
+readable date counts as today's: it came out of the last 20 the site
+published, and dropping it silently would be worse.
+
+*The burst must settle* — nothing ships until the day's **newest** article has
+been quiet for `NR_SETTLE_MIN_M`..`NR_SETTLE_MAX_M` minutes (45-120). Posting
+on sight would ship the *first* article of the morning instead of the last;
+measuring the wait from the newest means a burst still arriving keeps resetting
+it. The exact delay is *derived* from `(chat_id, day)`, not drawn — a fresh
+random on each of 288 daily polls would pin every post to the 45-minute floor —
+so it is stable across polls and restarts, different per channel, and different
+each day.
+
+Nothing is dropped unless something actually shipped, so a failed send costs
+one article rather than the channel's whole day. **An article is never posted
+twice** regardless of any of this: `store.pending()` returns only `status='new'`
+rows, publishing flips them to `posted`, and `UNIQUE(site, wp_id)` with
+`INSERT OR IGNORE` means a refetched article cannot re-enter the queue. Only
+`--force-latest` re-posts, and only when you type it.
 
 **Per-site service ids.** `modules/telegram/reactions.py` reads
 `config.BULKFOLLOWS_SERVICE_ID` from a module global — correct for one operator

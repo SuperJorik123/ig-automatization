@@ -1,8 +1,7 @@
-"""modules/newsroom/pace.py — the one-post-per-channel-per-day rule.
+"""modules/newsroom/pace.py — when one channel may post.
 
 Pure and offline by construction: the module takes `now` as an argument and
-reads no config, so every case below is an exact assertion rather than a
-sleep.
+reads no config, so every case below is an exact assertion rather than a sleep.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -11,109 +10,123 @@ import pytest
 
 from modules.newsroom import pace
 
-NOW = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 9, 6, 0, 0, tzinfo=timezone.utc)
 
 
-def ago(hours: float) -> str:
-    return (NOW - timedelta(hours=hours)).isoformat(timespec="seconds")
-
-
-# --------------------------------------------------------------------------- #
-# The cooldown                                                                #
-# --------------------------------------------------------------------------- #
-
-
-def test_a_channel_that_never_posted_may_post_now():
-    assert pace.cooldown_remaining("@acme", None, NOW, 24, 3) == 0.0
-    assert pace.cooldown_remaining("@acme", "", NOW, 24, 3) == 0.0
-
-
-def test_a_post_an_hour_ago_blocks_for_the_rest_of_the_day():
-    left = pace.cooldown_remaining("@acme", ago(1), NOW, 24, 0)
-
-    assert left == pytest.approx(23 * 3600)
-
-
-def test_the_window_opens_again_after_the_interval():
-    assert pace.cooldown_remaining("@acme", ago(24.5), NOW, 24, 0) == 0.0
-
-
-def test_a_zero_interval_disables_the_cooldown():
-    assert pace.cooldown_remaining("@acme", ago(0.01), NOW, 0, 0) == 0.0
-
-
-def test_a_naive_timestamp_is_read_as_utc():
-    naive = (NOW - timedelta(hours=1)).replace(tzinfo=None).isoformat()
-
-    assert pace.cooldown_remaining("@acme", naive, NOW, 24, 0) == pytest.approx(23 * 3600)
-
-
-def test_an_unparseable_timestamp_fails_open():
-    # One bad row must not wedge a client's channel forever; the post that
-    # follows writes a good timestamp.
-    assert pace.cooldown_remaining("@acme", "not-a-date", NOW, 24, 3) == 0.0
+def ago(minutes: float) -> str:
+    return (NOW - timedelta(minutes=minutes)).isoformat(timespec="seconds")
 
 
 # --------------------------------------------------------------------------- #
-# The jitter                                                                  #
+# The calendar day                                                            #
 # --------------------------------------------------------------------------- #
 
 
-def test_jitter_stays_inside_its_range():
+def test_utc_day_is_the_date_alone():
+    assert pace.utc_day("2026-09-09T04:22:00+00:00") == "2026-09-09"
+    assert pace.utc_day(NOW) == "2026-09-09"
+
+
+def test_utc_day_reads_a_naive_stamp_as_utc():
+    assert pace.utc_day("2026-09-09T04:22:00") == "2026-09-09"
+
+
+def test_utc_day_normalises_an_offset():
+    # 23:30 in UTC+2 is still the 9th in UTC — one day, decided in one place.
+    assert pace.utc_day("2026-09-09T23:30:00+02:00") == "2026-09-09"
+
+
+def test_utc_day_of_junk_is_empty():
+    # The caller treats "" as "no readable date" and falls back to today
+    # rather than silently dropping the article.
+    assert pace.utc_day("not-a-date") == ""
+    assert pace.utc_day(None) == ""
+
+
+# --------------------------------------------------------------------------- #
+# The settle delay                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def test_settle_stays_inside_its_range():
     for i in range(50):
-        j = pace.jitter_seconds(f"@chan{i}", ago(24), 3)
-        assert -3 * 3600 <= j < 3 * 3600
+        assert 45 * 60 <= pace.settle_seconds(f"@chan{i}", "2026-09-09", 45, 120) < 120 * 60
 
 
-def test_jitter_is_stable_across_calls():
+def test_settle_is_stable_across_calls():
     # The whole point: re-drawing on every 5-minute poll would let the channel
     # post on the lowest of 288 draws, which is the floor.
-    first = pace.jitter_seconds("@acme", ago(24), 3)
+    first = pace.settle_seconds("@acme", "2026-09-09", 45, 120)
 
-    assert all(pace.jitter_seconds("@acme", ago(24), 3) == first for _ in range(5))
+    assert all(pace.settle_seconds("@acme", "2026-09-09", 45, 120) == first
+               for _ in range(5))
 
 
-def test_jitter_differs_per_channel():
-    stamp = ago(24)
-    spread = {pace.jitter_seconds(f"@chan{i}", stamp, 3) for i in range(10)}
+def test_settle_differs_per_channel():
+    spread = {pace.settle_seconds(f"@chan{i}", "2026-09-09", 45, 120) for i in range(10)}
 
     assert len(spread) == 10  # seven channels must not post in lockstep
 
 
-def test_jitter_moves_with_the_window():
-    assert pace.jitter_seconds("@acme", ago(24), 3) != pace.jitter_seconds("@acme", ago(48), 3)
+def test_settle_differs_per_day():
+    # Otherwise a channel posts at the same minute every morning.
+    assert (pace.settle_seconds("@acme", "2026-09-09", 45, 120)
+            != pace.settle_seconds("@acme", "2026-09-10", 45, 120))
 
 
-def test_jitter_swings_both_ways():
-    # 24 h ± 3 h: some channels come due early, some late. A one-sided jitter
-    # would make 24 h a floor instead of the average.
-    stamp = ago(24)  # exactly one interval old, so jitter is all that is left
-    signs = {pace.jitter_seconds(f"@chan{i}", stamp, 3) > 0 for i in range(20)}
-
-    assert signs == {True, False}
+def test_a_flat_range_is_an_exact_delay():
+    assert pace.settle_seconds("@acme", "2026-09-09", 60, 60) == 60 * 60
 
 
-def test_the_real_gap_is_the_interval_plus_or_minus_the_jitter():
-    # The window the client was promised: never shorter than 21 h, never
-    # longer than 27 h.
-    for i in range(50):
-        chan, stamp = f"@chan{i}", ago(21)
-        due_after = 21 * 3600 + pace.cooldown_remaining(chan, stamp, NOW, 24, 3)
-        assert 21 * 3600 <= due_after <= 27 * 3600
+def test_a_reversed_range_is_read_the_right_way_round():
+    lo = pace.settle_seconds("@acme", "2026-09-09", 120, 45)
+
+    assert 45 * 60 <= lo < 120 * 60
 
 
-def test_an_early_draw_opens_the_window_before_the_interval():
-    # Find a channel whose draw came in negative and check it may post at 22 h.
-    stamp = ago(22)
-    early = [f"@chan{i}" for i in range(20)
-             if pace.jitter_seconds(f"@chan{i}", stamp, 3) < -2 * 3600]
-
-    assert early, "no channel drew a large negative offset — check the seeding"
-    assert pace.cooldown_remaining(early[0], stamp, NOW, 24, 3) == 0.0
+# --------------------------------------------------------------------------- #
+# The hold                                                                    #
+# --------------------------------------------------------------------------- #
 
 
-def test_zero_jitter_is_off():
-    assert pace.jitter_seconds("@acme", ago(24), 0) == 0.0
+def test_a_fresh_article_is_held():
+    # Posting on sight ships the FIRST article of the morning burst, not the
+    # last.
+    assert pace.hold_remaining("@acme", ago(5), NOW, 60, 60) == pytest.approx(55 * 60)
+
+
+def test_a_settled_article_is_released():
+    assert pace.hold_remaining("@acme", ago(90), NOW, 60, 60) == 0.0
+
+
+def test_the_hold_is_measured_from_the_newest_article():
+    # A burst still arriving keeps resetting the wait, which is what makes
+    # "the latest" mean the day's last and not the first through the door.
+    assert pace.hold_remaining("@acme", ago(10), NOW, 60, 60) > 0
+    assert pace.hold_remaining("@acme", ago(70), NOW, 60, 60) == 0.0
+
+
+def test_an_undated_article_is_never_held():
+    # Failing open: an article with no readable date must not sit in the queue
+    # forever.
+    assert pace.hold_remaining("@acme", "not-a-date", NOW, 60, 60) == 0.0
+    assert pace.hold_remaining("@acme", None, NOW, 60, 60) == 0.0
+
+
+def test_a_real_burst_releases_once_after_its_last_article():
+    # wsmirror, 2026-09-09: 03:48 03:50 04:02 04:09 04:22, flat 60 min settle.
+    burst = [datetime(2026, 9, 9, 3, 48, tzinfo=timezone.utc),
+             datetime(2026, 9, 9, 3, 50, tzinfo=timezone.utc),
+             datetime(2026, 9, 9, 4, 2, tzinfo=timezone.utc),
+             datetime(2026, 9, 9, 4, 9, tzinfo=timezone.utc),
+             datetime(2026, 9, 9, 4, 22, tzinfo=timezone.utc)]
+    newest = burst[-1]
+
+    at_0500 = datetime(2026, 9, 9, 5, 0, tzinfo=timezone.utc)
+    at_0525 = datetime(2026, 9, 9, 5, 25, tzinfo=timezone.utc)
+
+    assert pace.hold_remaining("@acme", newest, at_0500, 60, 60) > 0
+    assert pace.hold_remaining("@acme", newest, at_0525, 60, 60) == 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -122,6 +135,6 @@ def test_zero_jitter_is_off():
 
 
 def test_format_wait_reads_like_a_clock():
-    assert pace.format_wait(18 * 3600 + 42 * 60) == "18h42m"
+    assert pace.format_wait(1 * 3600 + 5 * 60) == "1h05m"
     assert pace.format_wait(42 * 60) == "42m"
     assert pace.format_wait(0) == "0m"
