@@ -205,6 +205,20 @@ def bump_channel_posts(chat_id: str) -> int:
         return c.execute("SELECT n FROM counters WHERE chat_id=?", (chat_id,)).fetchone()["n"]
 
 
+def last_post_at(chat_id: str) -> str | None:
+    """When this channel last published, ISO UTC, or None if it never has.
+
+    The whole state behind the one-post-per-day rule (modules/newsroom/pace.py)
+    — durable by construction, because it is the same row the BulkFollows
+    orders are filed against. Nothing extra is stored and nothing can drift out
+    of sync with what actually shipped."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT MAX(posted_at) AS t FROM posts WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+    return row["t"] if row and row["t"] else None
+
+
 def recent_posts(chat_id: str, limit: int = 5) -> list:
     """The channel's most recent posts, newest first. Not used by the current
     order flow (the panel's bonus service takes a channel link and finds the

@@ -9,6 +9,7 @@ client's subscribers and cannot be undone.
 import asyncio
 import importlib
 import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -78,6 +79,8 @@ def main(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "NR_DRY_RUN", False)
     monkeypatch.setattr(config, "NR_BACKFILL", False)
     monkeypatch.setattr(config, "NR_REACTION_DELAY_S", 1200)
+    monkeypatch.setattr(config, "NR_MIN_INTERVAL_H", 24.0)
+    monkeypatch.setattr(config, "NR_JITTER_H", 0.0)  # pace.py owns the jitter
     monkeypatch.setattr(config, "NR_EMOJI_SERVICES", [
         {"name": "heart", "emoji": "❤️", "service": "5108"},
     ])
@@ -140,13 +143,15 @@ def test_articles_after_the_first_tick_are_posted(main):
 
 
 def test_backfill_flag_posts_the_first_batch(main, monkeypatch):
+    # Backfill lifts the first-tick guard, not the daily cap: the newest of
+    # the batch goes out and the rest are dropped like any other day.
     monkeypatch.setattr(main.config, "NR_BACKFILL", True)
     main.articles = [_article(1), _article(2)]
     bot = FakeBot()
 
     run(main.tick(bot, _site()))
 
-    assert len(bot.sent) == 2
+    assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 2"]
 
 
 def test_first_tick_guard_keys_on_the_site_not_the_database(main):
@@ -165,7 +170,9 @@ def test_first_tick_guard_keys_on_the_site_not_the_database(main):
 # --------------------------------------------------------------------------- #
 
 
-def test_posts_are_sent_oldest_first(main):
+def test_the_newest_pending_article_is_the_one_posted(main):
+    # One story a day means the channel should carry TODAY's, not the oldest
+    # of a pile — store.pending() hands them over oldest-first.
     run(main.tick(FakeBot(), _site()))  # burn the first tick
 
     main.articles = [_article(4), _article(3), _article(2)]
@@ -173,7 +180,22 @@ def test_posts_are_sent_oldest_first(main):
     run(main.tick(bot, _site()))
 
     titles = [s["text"].splitlines()[0] for s in bot.sent]
-    assert titles == ["POST: Story 2", "POST: Story 3", "POST: Story 4"]
+    assert titles == ["POST: Story 4"]
+
+
+def test_the_articles_not_posted_are_dropped_not_queued(main, monkeypatch):
+    # The client's channel shows one current story a day; queueing the rest
+    # would drip-feed week-old news forever.
+    run(main.tick(FakeBot(), _site()))
+    main.articles = [_article(4), _article(3), _article(2)]
+    summary = run(main.tick(FakeBot(), _site()))
+    assert "posted 1, dropped 2" in summary
+
+    monkeypatch.setattr(main.config, "NR_MIN_INTERVAL_H", 0)  # window wide open
+    bot = FakeBot()
+
+    assert "nothing new" in run(main.tick(bot, _site()))
+    assert bot.sent == []
 
 
 def test_an_article_is_never_posted_twice(main):
@@ -370,23 +392,25 @@ def test_a_send_failure_marks_the_article_and_does_not_retry(main, monkeypatch):
 
 
 def test_one_bad_article_does_not_block_the_rest(main, monkeypatch):
+    # The newest article fails, so nothing shipped and the window was never
+    # used: the next tick must fall through to the next-freshest rather than
+    # spend the day's slot on an article that cannot be posted.
     run(main.tick(FakeBot(), _site()))
     main.articles = [_article(2), _article(3)]
 
-    calls = {"n": 0}
-
     def flaky(article, site=None):
-        calls["n"] += 1
-        if article["wp_id"] == 2:
+        if article["wp_id"] == 3:
             raise RuntimeError("model exploded")
-        return "POST: fine"
+        return f"POST: Story {article['wp_id']}"
 
     monkeypatch.setattr(main.rewrite, "to_telegram", flaky)
-    bot = FakeBot()
 
+    assert "0/2 posted" in run(main.tick(FakeBot(), _site()))
+
+    bot = FakeBot()
     run(main.tick(bot, _site()))
 
-    assert len(bot.sent) == 1  # article 3 still shipped
+    assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 2"]
 
 
 def test_an_empty_rewrite_is_skipped_not_posted(main, monkeypatch):
@@ -445,3 +469,139 @@ def test_fetch_failures_alert_only_on_the_third_in_a_row(main, monkeypatch, capl
         for _ in range(2):
             run(main.tick(FakeBot(), _site()))
         assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+# --------------------------------------------------------------------------- #
+# One post per channel per day                                                #
+# --------------------------------------------------------------------------- #
+
+
+def _age_last_post(main, chat_id: str, hours: float) -> None:
+    """Backdate the channel's last post so the cooldown sees a real gap.
+
+    Cheaper and more honest than freezing the clock: the gate reads exactly
+    the row publishing wrote."""
+    when = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
+    with main.store_mod._conn() as c:
+        c.execute("UPDATE posts SET posted_at=? WHERE chat_id=?", (when, chat_id))
+
+
+def _post_one(main):
+    """Get one article published, leaving the channel inside its cooldown."""
+    run(main.tick(FakeBot(), _site()))   # first tick: recorded as seen
+    main.articles = [_article(2)]
+    run(main.tick(FakeBot(), _site()))
+
+
+def test_a_second_article_the_same_day_is_held(main):
+    _post_one(main)
+    main.articles = [_article(3)]
+    bot = FakeBot()
+
+    summary = run(main.tick(bot, _site()))
+
+    assert bot.sent == []
+    assert "next post in" in summary
+
+
+def test_a_held_tick_pays_for_no_rewrite(main, monkeypatch):
+    # The gate sits in front of the only billed call in the flow — at
+    # NR_POLL_S=300 there are 287 held ticks for every one that posts.
+    _post_one(main)
+    main.articles = [_article(3)]
+
+    def boom(article, site=None):
+        raise AssertionError("the model must not be called on a held tick")
+
+    monkeypatch.setattr(main.rewrite, "to_telegram", boom)
+
+    run(main.tick(FakeBot(), _site()))
+
+
+def test_the_held_article_ships_when_the_window_reopens(main):
+    _post_one(main)
+    main.articles = [_article(3)]
+    run(main.tick(FakeBot(), _site()))          # held
+    _age_last_post(main, "@acme", 25)
+    bot = FakeBot()
+
+    run(main.tick(bot, _site()))
+
+    assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 3"]
+
+
+def test_the_window_reopens_only_after_the_full_interval(main):
+    _post_one(main)
+    main.articles = [_article(3)]
+    _age_last_post(main, "@acme", 23)
+    bot = FakeBot()
+
+    run(main.tick(bot, _site()))
+
+    assert bot.sent == []
+
+
+def test_a_day_of_backlog_ships_only_its_freshest(main):
+    _post_one(main)
+    main.articles = [_article(5), _article(4), _article(3)]
+    run(main.tick(FakeBot(), _site()))          # held, all three recorded
+    _age_last_post(main, "@acme", 25)
+    bot = FakeBot()
+
+    summary = run(main.tick(bot, _site()))
+
+    assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 5"]
+    assert "posted 1, dropped 2" in summary
+
+
+def test_a_failed_post_does_not_start_the_cooldown(main, monkeypatch):
+    # Otherwise a single dead send costs the channel its whole day.
+    run(main.tick(FakeBot(), _site()))
+    main.articles = [_article(2), _article(3)]
+
+    class DeadBot(FakeBot):
+        async def send_message(self, **kw):
+            raise RuntimeError("chat not found")
+
+    run(main.tick(DeadBot(), _site()))          # article 3 fails
+    bot = FakeBot()
+
+    run(main.tick(bot, _site()))
+
+    assert [s["text"].splitlines()[0] for s in bot.sent] == ["POST: Story 2"]
+
+
+def test_a_dry_run_holds_the_channel_like_a_live_one(main, monkeypatch):
+    # A dry run that drips faster than production is not a rehearsal.
+    monkeypatch.setattr(main.config, "NR_DRY_RUN", True)
+    main.articles = [_article(1)]
+    run(main.tick(FakeBot(), _site()))          # first tick, recorded as seen
+    main.articles = [_article(3), _article(2)]
+
+    summary = run(main.tick(FakeBot(), _site()))
+
+    assert "would post 1, dropped 1" in summary
+
+
+def test_each_channel_has_its_own_window(main):
+    # A shared cooldown would let the busiest site mute the other six.
+    _post_one(main)
+    main.articles = [_article(1)]
+    run(main.tick(FakeBot(), _site(name="globex", chat_id="@globex")))  # first tick
+    main.articles = [_article(2)]
+    bot = FakeBot()
+
+    run(main.tick(bot, _site(name="globex", chat_id="@globex")))
+
+    assert len(bot.sent) == 1
+
+
+def test_a_zero_interval_turns_the_cap_off(main, monkeypatch):
+    monkeypatch.setattr(main.config, "NR_MIN_INTERVAL_H", 0)
+    _post_one(main)
+    main.articles = [_article(3)]
+    bot = FakeBot()
+
+    run(main.tick(bot, _site()))
+
+    assert len(bot.sent) == 1

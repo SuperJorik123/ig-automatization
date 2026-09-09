@@ -47,7 +47,8 @@ and what re-enabling costs — grep for `DORMANT` before rebuilding anything.
 
 | File | Purpose |
 | --- | --- |
-| `main.py` | Entrypoint. One JobQueue job per site; `tick()` is the per-site poll and is the only place the flow is sequenced. Holds the **backfill guard**. |
+| `main.py` | Entrypoint. One JobQueue job per site; `tick()` is the per-site poll and is the only place the flow is sequenced. Holds the **backfill guard** and the **one-a-day gate**. |
+| `pace.py` | How often one channel may post — the cooldown and its jitter. Pure and offline-testable. |
 | `wp.py` | WordPress REST poller. Fetches the last 20 published posts with `_embed` and filters against stored ids — **never a `?after=` watermark** (see below). `clean_html` turns `rendered` fields into prose. |
 | `rewrite.py` | Article → Telegram post, one OpenRouter call. Never raises: any failure degrades to the article's own title and lede. `--sample <site>` is the prompt-tuning harness. |
 | `publish.py` | Sends the post. Media goes to Telegram **as a URL**, never downloaded. `compose()` reserves the link's length before trimming. |
@@ -56,7 +57,7 @@ and what re-enabling costs — grep for `DORMANT` before rebuilding anything.
 | `store.py` | SQLite (`data/newsroom.db`): articles, posts, orders, counters. |
 | `sites/*.json` | One file per site ↔ channel pair. `example.json` is the template and is never loaded. |
 
-## Three decisions that look like details
+## Four decisions that look like details
 
 **No date watermark on the poller.** `?after=<last seen>` is the obvious
 optimisation and it loses articles permanently: WordPress lets an editor
@@ -71,6 +72,21 @@ back-articles in one burst to a live channel, in front of the client's
 subscribers. It keys on the site having no rows, not on the database being
 empty, so adding site #8 is guarded too. Override with `NR_BACKFILL=1` only when
 you mean it.
+
+**One article per channel per day, newest wins.** A site can publish five
+stories in an afternoon; the channel gets one. The gate sits in `tick()`
+*before* the rewrite — the only billed call in the flow — because at
+`NR_POLL_S=300` there are 287 held ticks for every one that posts. When the
+window opens, the **newest** article waiting goes out and the rest are marked
+skipped: a queue would drip-feed week-old news forever and grow without bound
+on a busy site. Nothing is dropped unless something actually shipped, so a
+failed send costs one article, not the channel's whole day. The cooldown reads
+`MAX(posted_at)` from the `posts` table — the record of what really shipped, so
+it survives restarts and cannot drift out of sync. Its jitter (`NR_JITTER_H`)
+is *derived* from `(chat_id, last post)`, not drawn: a fresh random per poll
+would let the channel post on the lowest of 288 daily draws, which is the
+floor. Knobs: `NR_MIN_INTERVAL_H` (24), `NR_JITTER_H` (3). `--force-latest`
+bypasses the gate but still starts the cooldown.
 
 **Per-site service ids.** `modules/telegram/reactions.py` reads
 `config.BULKFOLLOWS_SERVICE_ID` from a module global — correct for one operator

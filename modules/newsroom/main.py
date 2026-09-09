@@ -2,8 +2,11 @@
 modules/newsroom/main.py — the client newsroom bot.
 
 One JobQueue job per configured site. Each tick: fetch the site's recent
-WordPress posts, rewrite the ones not seen before, publish each to that site's
-Telegram channel, and place the BulkFollows orders.
+WordPress posts, and if the channel's window is open (at most one post per
+NR_MIN_INTERVAL_H hours — see pace.py), rewrite the newest article waiting,
+publish it to that site's Telegram channel, place the BulkFollows orders, and
+drop the others. The channel carries one current story a day, not the site's
+whole feed.
 
 Run it:
 
@@ -25,6 +28,7 @@ import asyncio
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -32,7 +36,7 @@ from telegram.ext import Application  # noqa: E402
 
 from shared import config  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
-from modules.newsroom import orders, publish, rewrite, store, wp  # noqa: E402
+from modules.newsroom import orders, pace, publish, rewrite, store, wp  # noqa: E402
 
 log = logging.getLogger("newsroom")
 
@@ -162,17 +166,44 @@ async def tick(bot, site: dict, job_queue=None) -> str:
     if not pending:
         return f"[{name}] nothing new"
 
-    posted = 0
-    for row in pending:
-        try:
-            posted += await _handle(bot, site, row, job_queue)
-        except Exception as exc:
-            # One article's failure must not wedge the site's queue.
-            log.exception("[%s] unhandled error on article %s: %s",
-                          name, row["wp_id"], exc)
-            store.mark(row["id"], store.FAILED)
+    # At most one article per channel per window. Checked BEFORE the rewrite,
+    # which is the only paid call in the flow: a throttled tick must cost
+    # nothing, and at NR_POLL_S=300 there are 287 of them for every one that
+    # posts.
+    waiting = pace.cooldown_remaining(
+        site["chat_id"], store.last_post_at(site["chat_id"]),
+        datetime.now(timezone.utc), config.NR_MIN_INTERVAL_H, config.NR_JITTER_H)
+    if waiting > 0:
+        return (f"[{name}] {len(pending)} pending, next post in "
+                f"{pace.format_wait(waiting)}")
 
-    return f"[{name}] {posted}/{len(pending)} posted"
+    # The NEWEST waiting article, not the oldest: one story a day means the
+    # channel should carry today's, and store.pending() returns published_at
+    # ascending.
+    row = pending[-1]
+    try:
+        shipped = await _handle(bot, site, row, job_queue)
+    except Exception as exc:
+        # One article's failure must not wedge the site's queue.
+        log.exception("[%s] unhandled error on article %s: %s",
+                      name, row["wp_id"], exc)
+        store.mark(row["id"], store.FAILED)
+        shipped = False
+
+    if not (shipped or config.NR_DRY_RUN):
+        # Nothing went out, so the window was never used: leave the rest
+        # pending and let the next tick try the next-freshest instead of
+        # spending the day's slot on one article that could not be posted.
+        return f"[{name}] 0/{len(pending)} posted"
+
+    # Dropped, not queued: the client gets the current story, never a backlog
+    # drip-feeding week-old news. Dry runs drop too, or switching dry-run off
+    # would dump everything it "skipped" into the channel at once.
+    dropped = pending[:-1]
+    for other in dropped:
+        store.mark(other["id"], store.SKIPPED)
+    verb = "would post" if config.NR_DRY_RUN else "posted"
+    return f"[{name}] {verb} 1, dropped {len(dropped)}"
 
 
 async def force_latest(bot, site: dict) -> str:
