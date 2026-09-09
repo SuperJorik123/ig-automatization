@@ -447,16 +447,16 @@ NR_BACKFILL = os.environ.get("NR_BACKFILL", "0").strip().lower() in (
     "1", "true", "yes", "on"
 )
 
-# At most one article per channel per NR_MIN_INTERVAL_H hours. A site that
+# Roughly one article per channel per NR_MIN_INTERVAL_H hours. A site that
 # publishes five stories in an afternoon must not empty itself into the
 # channel: the tick posts the NEWEST article waiting and drops the rest.
 # 0 disables the cooldown (every tick with anything pending posts again).
 NR_MIN_INTERVAL_H = _float_env("NR_MIN_INTERVAL_H", 24.0)
 
-# Extra wait of 0..NR_JITTER_H hours on top of the interval, derived per
-# channel and per window (see modules/newsroom/pace.py) so seven channels do
-# not post in lockstep every day. Only ever ADDS, so the interval above stays
-# a hard floor. 0 disables it.
+# Jitter of ±NR_JITTER_H hours around that interval, derived per channel and
+# per window (see modules/newsroom/pace.py) so seven channels do not post in
+# lockstep every day. SIGNED: at the defaults the real gap is 21-27 h, which
+# makes NR_MIN_INTERVAL_H the AVERAGE and not a floor. 0 disables it.
 NR_JITTER_H = _float_env("NR_JITTER_H", 3.0)
 
 # BulkFollows credentials for the CLIENT's panel account — a different key and

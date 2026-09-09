@@ -2,8 +2,8 @@
 modules/newsroom/main.py — the client newsroom bot.
 
 One JobQueue job per configured site. Each tick: fetch the site's recent
-WordPress posts, and if the channel's window is open (at most one post per
-NR_MIN_INTERVAL_H hours — see pace.py), rewrite the newest article waiting,
+WordPress posts, and if the channel's window is open (one post per
+NR_MIN_INTERVAL_H ± NR_JITTER_H hours — see pace.py), rewrite the newest article waiting,
 publish it to that site's Telegram channel, place the BulkFollows orders, and
 drop the others. The channel carries one current story a day, not the site's
 whole feed.
@@ -166,7 +166,7 @@ async def tick(bot, site: dict, job_queue=None) -> str:
     if not pending:
         return f"[{name}] nothing new"
 
-    # At most one article per channel per window. Checked BEFORE the rewrite,
+    # One article per channel per window. Checked BEFORE the rewrite,
     # which is the only paid call in the flow: a throttled tick must cost
     # nothing, and at NR_POLL_S=300 there are 287 of them for every one that
     # posts.

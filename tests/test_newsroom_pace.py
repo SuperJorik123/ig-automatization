@@ -62,7 +62,7 @@ def test_an_unparseable_timestamp_fails_open():
 def test_jitter_stays_inside_its_range():
     for i in range(50):
         j = pace.jitter_seconds(f"@chan{i}", ago(24), 3)
-        assert 0.0 <= j < 3 * 3600
+        assert -3 * 3600 <= j < 3 * 3600
 
 
 def test_jitter_is_stable_across_calls():
@@ -84,12 +84,32 @@ def test_jitter_moves_with_the_window():
     assert pace.jitter_seconds("@acme", ago(24), 3) != pace.jitter_seconds("@acme", ago(48), 3)
 
 
-def test_jitter_only_ever_delays():
-    # 24 h is the promise to the client, so an unlucky draw may never shorten
-    # the wait below it.
-    stamp = ago(24)  # exactly one interval old, jitter is all that is left
-    assert pace.cooldown_remaining("@acme", stamp, NOW, 24, 3) > 0
-    assert pace.cooldown_remaining("@acme", stamp, NOW, 24, 3) < 3 * 3600
+def test_jitter_swings_both_ways():
+    # 24 h ± 3 h: some channels come due early, some late. A one-sided jitter
+    # would make 24 h a floor instead of the average.
+    stamp = ago(24)  # exactly one interval old, so jitter is all that is left
+    signs = {pace.jitter_seconds(f"@chan{i}", stamp, 3) > 0 for i in range(20)}
+
+    assert signs == {True, False}
+
+
+def test_the_real_gap_is_the_interval_plus_or_minus_the_jitter():
+    # The window the client was promised: never shorter than 21 h, never
+    # longer than 27 h.
+    for i in range(50):
+        chan, stamp = f"@chan{i}", ago(21)
+        due_after = 21 * 3600 + pace.cooldown_remaining(chan, stamp, NOW, 24, 3)
+        assert 21 * 3600 <= due_after <= 27 * 3600
+
+
+def test_an_early_draw_opens_the_window_before_the_interval():
+    # Find a channel whose draw came in negative and check it may post at 22 h.
+    stamp = ago(22)
+    early = [f"@chan{i}" for i in range(20)
+             if pace.jitter_seconds(f"@chan{i}", stamp, 3) < -2 * 3600]
+
+    assert early, "no channel drew a large negative offset — check the seeding"
+    assert pace.cooldown_remaining(early[0], stamp, NOW, 24, 3) == 0.0
 
 
 def test_zero_jitter_is_off():
