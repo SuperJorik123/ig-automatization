@@ -135,12 +135,16 @@ SCORER_MODEL = os.environ.get("SCORER_MODEL", "").strip() or TRANSLATE_MODEL
 # the ":online" suffix, which works on any model id; a plain id will still
 # answer, just without looking anything up.
 #
+# gpt-5.6-luna is the cheap tier of the 5.6 family ($0.20/M in, $1.20/M out) —
+# 25x under the gpt-5.5 this used to default to, on a job whose bill is now the
+# $0.01 search rather than the tokens.
+#
 # IG_CAPTION_ENABLED=0 is the kill switch. Search is billed per result on top
 # of tokens (~$0.02 a caption), so it is the one leg here worth being able to
 # turn off without touching a model id. Off, the bare headline is posted, which
 # is exactly what shipped before this existed.
 IG_CAPTION_MODEL = (os.environ.get("IG_CAPTION_MODEL", "").strip()
-                    or "openai/gpt-5.5:online")
+                    or "openai/gpt-5.6-luna:online")
 IG_CAPTION_ENABLED = os.environ.get("IG_CAPTION_ENABLED", "1").strip().lower() not in (
     "0", "false", "no", "off"
 )

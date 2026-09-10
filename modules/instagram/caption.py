@@ -31,11 +31,19 @@ brand afterwards through the same translator the headline goes through, so a
 Russian account gets Russian prose and — per the translator's FORMAT rule —
 the identical, untranslated hashtags.
 
-Neither `temperature` nor `max_tokens` is sent. Several current OpenAI models
-on OpenRouter reject a non-default temperature, and a reasoning model can spend
-a small `max_tokens` budget before it writes a word; either would surface here
-as an APIError or an empty completion — that is, as a post that silently lost
-its caption. Length is governed by the prompt instead.
+`temperature` is not sent — several current OpenAI models on OpenRouter reject
+a non-default one, which would surface here as an APIError, that is, as a post
+that silently lost its caption.
+
+`max_tokens` IS sent, generously (MAX_TOKENS below), and that is a fix, not a
+limit. OpenRouter reserves credit for a request's WORST CASE before it runs:
+uncapped, that is the model's full 65,536-token ceiling, so the gateway demands
+a balance covering 65,536 output tokens for a job that emits about six hundred.
+On 2026-09-09 that rejected a live caption with a 402 at a balance of $1.42 and
+the post went out as the bare headline. A cap large enough that a reasoning
+model can think first and still write — the failure mode the uncapped call was
+avoiding — drops the reserve by an order of magnitude. Length is still governed
+by the prompt, not by this number; nothing should ever come near it.
 
 CLI, for tuning the prompt against real headlines:
     py modules/instagram/caption.py "Released footage shows plane crash at Miami International Airport"
@@ -66,6 +74,11 @@ _client = (
     if config.OPENROUTER_API_KEY
     else None
 )
+
+# Reasoning tokens plus a caption of at most 2200 characters. Wide enough that
+# the model is never the one that stops (see the module docstring), narrow
+# enough that OpenRouter's up-front credit reservation stays under a cent.
+MAX_TOKENS = 8000
 
 _SYSTEM = (
     "You write the Instagram captions for a news account. You are given one "
@@ -155,6 +168,7 @@ def expand(headline: str, model: str | None = None) -> str:
     try:
         resp = _client.chat.completions.create(
             model=model or config.IG_CAPTION_MODEL,
+            max_tokens=MAX_TOKENS,
             messages=[
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": headline},

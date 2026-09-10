@@ -107,13 +107,24 @@ def test_the_headline_is_the_user_message(on, monkeypatch):
                                              "content": "Pentagon criticized"}
 
 
-def test_neither_temperature_nor_max_tokens_is_sent(on, monkeypatch):
-    """Both are rejected or wasted by current OpenAI models on OpenRouter, and
-    either one failing costs the post its caption. See the module docstring."""
+def test_no_temperature_is_sent(on, monkeypatch):
+    """Current OpenAI models on OpenRouter reject a non-default temperature,
+    and that APIError costs the post its caption. See the module docstring."""
     fake = _client(monkeypatch, content=EXAMPLE)
     caption.expand("Pentagon criticized")
     assert "temperature" not in fake.calls[0]
-    assert "max_tokens" not in fake.calls[0]
+
+
+def test_max_tokens_is_capped_so_openrouter_reserves_little(on, monkeypatch):
+    """OpenRouter reserves credit for the WORST CASE up front, so an uncapped
+    call demands a balance covering the model's full 65,536-token ceiling — on
+    2026-09-09 that 402'd a live caption and the post went out as the bare
+    headline. Roomy enough to never truncate, small enough to be affordable."""
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Pentagon criticized")
+    assert fake.calls[0]["max_tokens"] == caption.MAX_TOKENS
+    # A 2200-character caption plus room for a reasoning model to think.
+    assert 2000 <= caption.MAX_TOKENS <= 16000
 
 
 # --------------------------------------------------------------------------- #
