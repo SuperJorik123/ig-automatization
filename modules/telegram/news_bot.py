@@ -1027,30 +1027,45 @@ async def _do_render_card(q, context, state: dict) -> None:
 
 
 async def _ig_captions(source_text: str, pairs: list) -> dict[str, str]:
-    """The expanded Instagram caption, keyed by brand language.
+    """The Instagram caption for each brand, keyed by brand NAME.
 
     Instagram is the only platform here that posts more than the headline (see
     modules/instagram/caption.py), so this runs only when an IG pair is
     actually in the set — the web search is billed per publish, not per render,
     and a post that never goes to IG never pays for it.
 
-    One expansion, then the same per-language cache _render_branded uses for
-    the headline: N brands cost one search plus one translate per DISTINCT
-    language, and a brand with no lang gets the source text as written. Never
-    raises: an empty dict means every IG pair falls back to its headline, which
-    is what shipped before this existed.
+    KEYED BY BRAND, NOT BY LANGUAGE. It used to be by language, and twelve of
+    the thirteen brands are "en": every English account published the same
+    caption within seconds of the others, which is duplicate content by any
+    reading. So the search is still bought ONCE, and the WORDING varies per
+    account — `caption.plan` gives the first account of each language the
+    shared caption (translated, exactly as before) and every account after it
+    a cheap searchless rewrite, then each account draws its own five hashtags
+    out of the shared pool. N accounts of one language cost one search plus
+    N-1 rewrites at well under a cent each.
+
+    Never raises: an empty dict means every IG pair falls back to its headline,
+    which is what shipped before any of this existed, and a single failed
+    rewrite falls back to the shared caption on its own.
     """
-    langs = {p["render"]["brand"]["lang"]
-             for p in pairs if p["platform"] == "ig"}
-    if not langs or not (source_text or "").strip():
+    brands = [p["render"]["brand"] for p in pairs if p["platform"] == "ig"]
+    if not brands or not (source_text or "").strip():
         return {}
     try:
         full = await asyncio.to_thread(ig_caption.expand, source_text)
         out = {}
-        for lang in langs:
-            out[lang] = (await asyncio.to_thread(
-                translator.translate, full, lang, config.SOURCE_LANG)
-                if lang else full)
+        for entry in ig_caption.plan(brands, ig_caption.seed_for(source_text)):
+            lang = entry["lang"]
+            if entry["angle"]:
+                # The rewrite carries the translation too — one call, not two.
+                text = await asyncio.to_thread(
+                    ig_caption.rephrase, full, entry["angle"], lang)
+            elif lang:
+                text = await asyncio.to_thread(
+                    translator.translate, full, lang, config.SOURCE_LANG)
+            else:
+                text = full
+            out[entry["name"]] = ig_caption.pick_hashtags(text, entry["offset"])
         return out
     except Exception:
         log.exception("instagram caption expansion failed — posting headlines")
@@ -1107,10 +1122,11 @@ async def _do_publish(q, context, state: dict) -> None:
                 try:
                     publish = (ig_graph.publish_photo if r.get("kind") == "photo"
                                else ig_graph.publish_reel)
-                    # The expanded caption, in this brand's language; the bare
-                    # headline whenever expansion was off or didn't come back.
+                    # This brand's own caption — its own wording and its own
+                    # hashtags; the bare headline whenever expansion was off or
+                    # didn't come back.
                     result = await asyncio.to_thread(
-                        publish, url, ig_caps.get(b["lang"]) or r["headline"],
+                        publish, url, ig_caps.get(b["name"]) or r["headline"],
                         b["ig"])
                 finally:
                     drop()

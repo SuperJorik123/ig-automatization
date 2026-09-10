@@ -31,6 +31,32 @@ brand afterwards through the same translator the headline goes through, so a
 Russian account gets Russian prose and — per the translator's FORMAT rule —
 the identical, untranslated hashtags.
 
+ONE CAPTION IS NOT ENOUGH FOR N ACCOUNTS. That expansion used to be cached per
+LANGUAGE, and twelve of the thirteen brands are "en" — so every English
+Instagram account published the same caption, character for character, within
+seconds of each other. That is what Instagram reads as duplicate content. The
+fix is not n searches: the search is the whole bill (~$0.01 a post, more than
+the tokens), while the wording is nearly free. So the facts are bought ONCE and
+the wording varies per account:
+
+  `expand`   one `:online` call, unchanged, except that it now asks for a POOL
+             of hashtags (POOL_HASHTAGS) rather than the five one post carries.
+  `plan`     pure: which accounts need a variant, with which angle and which
+             hashtag offset. The FIRST account of each language keeps the
+             shared caption — that call is already paid for.
+  `rephrase` one cheap, SEARCHLESS call per remaining account
+             (IG_CAPTION_VARIANT_MODEL): same facts, different opening,
+             different order, per a rotating ANGLES directive. Given a `lang`
+             it also translates, so a foreign-language account's variant IS its
+             translation — one call, not two.
+  `pick_hashtags`
+             pure: each account keeps the pool's two most specific tags and
+             rotates three more out of the tail. No tokens, and no two accounts
+             carry the same tag line.
+
+The angle rotates by POST as well as by account (`seed_for`), so an account
+does not open every one of its posts the same way.
+
 `temperature` is not sent — several current OpenAI models on OpenRouter reject
 a non-default one, which would surface here as an APIError, that is, as a post
 that silently lost its caption.
@@ -45,14 +71,20 @@ model can think first and still write — the failure mode the uncapped call was
 avoiding — drops the reserve by an order of magnitude. Length is still governed
 by the prompt, not by this number; nothing should ever come near it.
 
-CLI, for tuning the prompt against real headlines:
+CLI, for tuning the prompts against real headlines — `--accounts N` prints the
+post as N accounts would publish it, which is the only way to see whether the
+angles are actually pulling the rewrites apart:
     py modules/instagram/caption.py "Released footage shows plane crash at Miami International Airport"
+    py modules/instagram/caption.py --accounts 4 "Released footage shows plane crash …"
 """
 
+import itertools
 import logging
+import math
 import os
 import re
 import sys
+import zlib
 
 # Repo-root bootstrap for direct runs (`py modules/instagram/caption.py ...`).
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -108,9 +140,11 @@ _SYSTEM = (
     "exclamation marks, no emoji, no rhetorical questions, no first person, "
     "no \"Breaking:\", no call to action, no \"follow us for more\", no links, "
     "no sign-off.\n"
-    "HASHTAGS — one line, AT MOST FIVE, lowercase, space-separated, letters "
-    "and digits only inside each tag. Five is a ceiling, not a target: three "
-    "right tags beat five padded ones.\n"
+    "HASHTAGS — one line, EXACTLY EIGHT, lowercase, space-separated, letters "
+    "and digits only inside each tag. That line is a POOL: the accounts "
+    "publishing this story each draw a few tags from it, so eight genuinely "
+    "relevant ones are wanted here. If the story cannot carry eight, give "
+    "fewer — a tag that is not about this story is worse than a short line.\n"
     "  Pick them RELEVANCE FIRST. Every tag must be something this particular "
     "story is actually about — the place it happened, the institution or "
     "public figure at its centre, its subject, its topic. A tag a reader "
@@ -122,12 +156,54 @@ _SYSTEM = (
     "#attemptedmurdercase). Never reach for size alone: a popular tag that is "
     "not about this story is worse than one tag fewer.\n"
     "  Order them most specific first — place, then the main actors or "
-    "subject, then the topic, then AT MOST ONE general one (#news or "
-    "#breakingnews, not both). Tag places, institutions, countries and public "
-    "events — never a private individual's name.\n\n"
+    "subject, then the topic, then the general ones (#news, #breakingnews) "
+    "last; the first two are the tags every account keeps, so they must be "
+    "the two this story is most about. Tag places, institutions, countries "
+    "and public events — never a private individual's name.\n\n"
     "Output ONLY the caption. No preamble, no explanation, no markdown, no "
     "bold, no bullet points, no surrounding quotation marks, no numbered "
     "citation markers, no source list at the end."
+)
+
+_VARIANT_SYSTEM = (
+    "You are the editor of a news account. Another account in the same group "
+    "has already published the caption below, word for word, for the same "
+    "story. Rewrite it as YOUR account's caption, so that a reader who sees "
+    "both does not see the same post twice.\n\n"
+    "HOW YOURS MUST DIFFER: {angle}\n\n"
+    "SAME FACTS, NOTHING ADDED — every name, number, date, place, quote and "
+    "attribution in your version comes from the caption you were given, "
+    "unchanged. You have not looked this story up and you know nothing the "
+    "caption does not say: no background, no consequence, no speculation, no "
+    "detail that merely sounds plausible. Leaving a secondary fact out to make "
+    "the rewrite work is fine; putting a new one in is not.\n"
+    "A REWRITE, NOT A PARAPHRASE — a different opening sentence, a different "
+    "order of facts, different sentence lengths. Trading words for synonyms is "
+    "not enough: the two captions must not line up sentence for sentence.\n"
+    "SHAPE — line 1 is the headline, rewritten as a DIFFERENT phrasing of the "
+    "same headline: same facts, same meaning, other words. Then a blank line, "
+    "then the paragraphs with a blank line between them, then a blank line and "
+    "the hashtag line.\n"
+    "HASHTAGS — the last line is copied through character for character: the "
+    "same tags in the same order, none added, none dropped, none translated. "
+    "They are chosen elsewhere.\n"
+    "REGISTER — neutral wire-service prose, the way Reuters or AP writes. No "
+    "hype, no editorialising, no exclamation marks, no emoji, no rhetorical "
+    "questions, no first person, no \"Breaking:\", no call to action, no "
+    "links, no sign-off.\n\n"
+    "Output ONLY the caption. No preamble, no explanation, no markdown, no "
+    "surrounding quotation marks, and no note about what you changed."
+)
+
+# Appended when the account publishes in another language: for it, the variant
+# IS the translation, so the rewrite and the translate are one call rather than
+# two. The hashtag rule is the translator's own, and for the same reason —
+# tags are only worth anything if they are the same tags everywhere.
+_VARIANT_LANG = (
+    "\n\nLANGUAGE — write your caption in {lang}, and in {lang} only, as a "
+    "native {lang} newsroom would write it rather than as a translation of the "
+    "English. The hashtag line is the exception: it stays exactly as it is, "
+    "character for character, untranslated."
 )
 
 # A model that searched will sometimes bracket its sources inline despite the
@@ -135,12 +211,48 @@ _SYSTEM = (
 # lose an otherwise good caption to them.
 _CITATION = re.compile(r"[ \t]*\[\d{1,3}\](?=[\s.,;:!?)]|$)")
 
-# The prompt asks for at most five hashtags; this is what makes it true. A
-# model overshoots a count often enough, and an eleven-tag news post reads as
-# spam on the account, so the trailing tag line is cut to length here rather
-# than trusted. The prompt orders tags most-specific-first, so keeping the
-# HEAD keeps the ones tied to this story and drops the generic tail.
+# What ONE account puts under ONE post. Five is a ceiling, not a target.
 MAX_HASHTAGS = 5
+
+# What `expand` asks the model for, and what `pick_hashtags` deals five out of.
+# A pool is the cheapest de-duplication there is: eight tags, two kept by every
+# account and three rotated out of the remaining six, gives six accounts six
+# different tag lines for no tokens at all. Bigger buys little — past eight the
+# model is reaching for tags the story is not about, which is the one thing
+# RELEVANCE FIRST in the prompt is there to stop.
+POOL_HASHTAGS = 8
+
+# The head of the pool every account keeps. The prompt orders tags
+# most-specific-first, so these two are what the story is actually about —
+# rotating them away to manufacture a difference would cost more reach than the
+# duplicate text ever did.
+KEEP_HASHTAGS = 2
+
+# Stride through the tag combinations (see `pick_hashtags`). Any number
+# coprime with the number of combinations walks all of them; a prime is the
+# cheapest way to be coprime with most list lengths.
+_COMBO_STEP = 7
+
+# The rewrite directives `plan` deals out, one per account after the first of
+# its language. Each forces a DIFFERENT STRUCTURE rather than a synonym pass:
+# two captions that open on the same sentence and run the same facts in the
+# same order still read as the same post, however the adjectives differ. And a
+# structural instruction is one a model follows without a temperature — which
+# cannot be sent here anyway (several current OpenAI models on OpenRouter
+# reject a non-default one; see the module docstring).
+ANGLES = (
+    "Open on WHERE it happened, then who and what.",
+    "Open on the official or institutional response, then the event itself.",
+    "Open on the number at the centre of the story — the toll, the sum, the "
+    "count — then how it came about.",
+    "Open on what happens next (the investigation, the vote, the hearing), "
+    "then work back to what caused it.",
+    "Write it TIGHT: two paragraphs, no more, the hardest facts only.",
+    "Write it as FOUR short paragraphs, roughly one fact each.",
+    "Open on the person or the body at the centre of the story, then the "
+    "event.",
+    "Open on WHEN it happened and how it unfolded, then the consequences.",
+)
 
 # A line that is nothing but hashtags — the caption's last line, by the shape
 # the prompt asks for. Anything else (a paragraph that happens to mention a
@@ -154,19 +266,68 @@ _FENCE = re.compile(r"^```[a-zA-Z]*\n(.*)\n```$", re.DOTALL)
 _LABEL = re.compile(r"^(caption|instagram caption|post)\s*:\s*\n+", re.IGNORECASE)
 
 
-def _cap_hashtags(text: str, limit: int = MAX_HASHTAGS) -> str:
-    """Cut the caption's trailing hashtag line down to `limit` tags."""
-    lines = text.split("\n")
+def _tag_line_index(lines: list) -> int:
+    """Index of the caption's hashtag line, or -1 when it has none.
+
+    The LAST non-empty line is the only candidate, and only when it is nothing
+    but hashtags — a closing paragraph that happens to name one must not be
+    chopped."""
     for i in range(len(lines) - 1, -1, -1):
         stripped = lines[i].strip()
         if not stripped:
             continue
-        # The last non-empty line is the only candidate: decide on it and stop.
-        if _TAG_LINE.match(stripped):
-            tags = stripped.split()
-            if len(tags) > limit:
-                lines[i] = " ".join(tags[:limit])
-        break
+        return i if _TAG_LINE.match(stripped) else -1
+    return -1
+
+
+def _cap_hashtags(text: str, limit: int = POOL_HASHTAGS) -> str:
+    """Cut the caption's trailing hashtag line down to `limit` tags.
+
+    The ceiling here is the POOL, not the post: `pick_hashtags` deals each
+    account its five out of what survives. A model that ignores the count
+    entirely must still not hand a twenty-tag line down the chain."""
+    lines = text.split("\n")
+    i = _tag_line_index(lines)
+    if i < 0:
+        return text
+    tags = lines[i].strip().split()
+    if len(tags) > limit:
+        lines[i] = " ".join(tags[:limit])
+    return "\n".join(lines)
+
+
+def pick_hashtags(text: str, offset: int, limit: int = MAX_HASHTAGS,
+                  keep: int = KEEP_HASHTAGS) -> str:
+    """One account's share of the caption's hashtag pool.
+
+    The first `keep` tags are what the story is about, and every account keeps
+    them (the prompt orders the pool most-specific-first); the rest of the line
+    is a window of `limit - keep` tags rotated `offset` places into the tail, so
+    consecutive offsets give different tag lines. Pure, deterministic and free —
+    the cheap half of not looking like the same post on six accounts.
+
+    Returns `text` untouched when there is no hashtag line, or when the line is
+    already within `limit`: dealing five out of five could only drop a relevant
+    tag, which costs more reach than the duplicate line does.
+    """
+    lines = text.split("\n")
+    i = _tag_line_index(lines)
+    if i < 0:
+        return text
+    tags = lines[i].strip().split()
+    if len(tags) <= limit:
+        return text
+    head, tail = tags[:keep], tags[keep:]
+    # Every COMBINATION of the tail, not a rotating window: a window of three
+    # over a tail of six wraps after six accounts, and there are thirteen
+    # brands. C(6,3) is twenty distinct lines, none of them repeating a tag.
+    combos = list(itertools.combinations(tail, limit - len(head)))
+    # Neighbouring offsets are neighbouring accounts on the same post, and
+    # lexicographic neighbours share two tags out of three — step through the
+    # list by a coprime stride instead, which visits every combination exactly
+    # once but puts consecutive accounts far apart in it.
+    step = _COMBO_STEP if math.gcd(_COMBO_STEP, len(combos)) == 1 else 1
+    lines[i] = " ".join(head + list(combos[int(offset) * step % len(combos)]))
     return "\n".join(lines)
 
 
@@ -231,6 +392,102 @@ def expand(headline: str, model: str | None = None) -> str:
     return trim_caption(out)
 
 
+def seed_for(text: str) -> int:
+    """A stable number to rotate this post's angles and hashtags by.
+
+    Not `hash()`: Python salts string hashing per process, so a restart between
+    the render and the publish would re-plan the same post differently. crc32
+    is the same number on every machine and every run.
+    """
+    return zlib.crc32((text or "").encode("utf-8"))
+
+
+def angle_for(index: int) -> str:
+    """The rewrite directive at `index`, wrapping round ANGLES."""
+    return ANGLES[int(index) % len(ANGLES)]
+
+
+def plan(brands: list, seed: int = 0) -> list:
+    """Who rewrites, how, and with which slice of the hashtag pool.
+
+    `brands` is the Instagram brands of one publish, in a stable order (config
+    loads them alphabetically). Returns one entry per brand — `name`, `lang`,
+    `angle` and `offset` — in the same order.
+
+    THE FIRST BRAND OF EACH LANGUAGE GETS NO ANGLE: it publishes the shared
+    caption, whose call is already paid for, and nothing it could be rewritten
+    away from has been published yet. Every brand after it in that language
+    gets its own angle, so no two accounts run the same words. `offset` is
+    always distinct, so their hashtag lines differ even when the prose does
+    not (a brand whose rewrite call fails falls back to the shared caption).
+
+    `seed` rotates the whole deal per post (`seed_for`), so an account does not
+    open every post it publishes the same way. Pure and offline-testable.
+    """
+    out, seen = [], set()
+    for i, brand in enumerate(brands):
+        lang = (brand.get("lang") or "").strip()
+        first = lang not in seen
+        seen.add(lang)
+        out.append({
+            "name": brand.get("name", ""),
+            "lang": lang,
+            "angle": None if first else angle_for(seed + i),
+            "offset": seed + i,
+        })
+    return out
+
+
+def rephrase(text: str, angle: str, lang: str = "",
+             model: str | None = None) -> str:
+    """One account's variant of a caption another account is publishing.
+
+    `angle` is a directive out of ANGLES; `lang`, when given, also translates,
+    which is what keeps a foreign-language account at one call instead of two.
+    No search: the facts are already in `text`, and a second search would
+    double the only real bill this feature has.
+
+    Returns `text` unchanged when a variant isn't wanted or possible — no
+    angle, no text, the kill switch off, no API key, a failed or empty call.
+    Never raises, for the same reason `expand` doesn't: the accounts sharing
+    one caption is a smaller problem than an account posting none. Blocking;
+    async callers go through asyncio.to_thread.
+    """
+    text = (text or "").strip()
+    if not text or not (angle or "").strip():
+        return text
+    if not config.IG_CAPTION_ENABLED:
+        return text
+    if _client is None:
+        log.warning("OPENROUTER_API_KEY not set — accounts share the caption")
+        return text
+
+    system = _VARIANT_SYSTEM.format(angle=angle.strip())
+    if (lang or "").strip():
+        system += _VARIANT_LANG.format(lang=lang.strip())
+
+    try:
+        resp = _client.chat.completions.create(
+            model=model or config.IG_CAPTION_VARIANT_MODEL,
+            max_tokens=MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": text},
+            ],
+        )
+    except Exception as exc:
+        log.error("instagram caption variant (%s) failed: %s — posting the "
+                  "shared caption", angle.strip()[:40], exc)
+        return text
+
+    out = _clean(resp.choices[0].message.content or "")
+    if not out:
+        log.warning("instagram caption variant (%s) came back empty — posting "
+                    "the shared caption", angle.strip()[:40])
+        return text
+    return trim_caption(out)
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -241,6 +498,23 @@ if __name__ == "__main__":
     ap.add_argument("headline", nargs="+", help="the headline to expand")
     ap.add_argument("--model", default=None,
                     help=f"override IG_CAPTION_MODEL ({config.IG_CAPTION_MODEL})")
+    ap.add_argument("--accounts", type=int, default=1, metavar="N",
+                    help="print the caption as N accounts would publish it — "
+                         "one search, then N-1 rewrites (default 1)")
+    ap.add_argument("--lang", default="", metavar="CODE",
+                    help="language for the rewritten accounts (default: the "
+                         "source language)")
     args = ap.parse_args()
 
-    print(expand(" ".join(args.headline), model=args.model))
+    headline = " ".join(args.headline)
+    shared = expand(headline, model=args.model)
+    fake = [{"name": f"account{i + 1}", "lang": args.lang if i else ""}
+            for i in range(max(1, args.accounts))]
+    for entry in plan(fake, seed_for(headline)):
+        text = (rephrase(shared, entry["angle"], entry["lang"])
+                if entry["angle"] else shared)
+        if len(fake) > 1:
+            print(f"--- {entry['name']} "
+                  f"({entry['angle'] or 'the shared caption'}) ---")
+        print(pick_hashtags(text, entry["offset"]))
+        print()

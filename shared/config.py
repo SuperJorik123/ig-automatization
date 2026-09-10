@@ -149,6 +149,22 @@ IG_CAPTION_ENABLED = os.environ.get("IG_CAPTION_ENABLED", "1").strip().lower() n
     "0", "false", "no", "off"
 )
 
+# Every Instagram account on a post used to publish the SAME caption — one
+# expansion, cached per language, and twelve of the thirteen brands are "en".
+# Identical text across accounts is what Instagram reads as duplicate content,
+# so each account after the first of its language rewrites the shared caption
+# through this model: same facts, different opening, different order.
+#
+# NO ":online" HERE. The facts were already searched for and are sitting in the
+# caption being rewritten; a second search would double the only real bill this
+# feature has (~$0.01 a post) to buy nothing. The rewrite itself is ~1k in /
+# ~600 out — under a tenth of a cent per account.
+#
+# IG_CAPTION_ENABLED switches this off with the expansion: off, the accounts
+# share the bare headline, exactly as they did before any of this existed.
+IG_CAPTION_VARIANT_MODEL = (os.environ.get("IG_CAPTION_VARIANT_MODEL", "").strip()
+                            or "openai/gpt-5.6-luna")
+
 # Collector's working dir: SQLite queue + downloaded media + login session.
 TG_DATA_DIR = os.path.join(ROOT_DIR, "modules", "telegram", "data")
 
