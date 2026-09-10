@@ -23,8 +23,12 @@ EXAMPLE = (
     "vehicles and caught fire. Five people were killed and five others were "
     "injured.\n"
     "\n"
-    "#miami #florida #planecrash #aviation #amazon #breakingnews #usa"
+    "#miami #florida #planecrash #aviation #amazon"
 )
+
+# The same caption as a model that ignored the count would return it: the
+# prompt's most-specific-first order, run past the five the account allows.
+EXAMPLE_TOO_MANY_TAGS = EXAMPLE + " #breakingnews #usa"
 
 
 class _Fake:
@@ -166,7 +170,32 @@ def test_hashtag_line_survives_cleaning(on, monkeypatch):
     translator copies them verbatim and IG indexes them."""
     _client(monkeypatch, content=EXAMPLE)
     assert caption.expand("h").splitlines()[-1] == (
-        "#miami #florida #planecrash #aviation #amazon #breakingnews #usa")
+        "#miami #florida #planecrash #aviation #amazon")
+    assert caption.expand("h").count("#") == 5
+
+
+def test_an_overlong_hashtag_line_is_cut_to_five(on, monkeypatch):
+    """The prompt asks for at most five; a model that overshoots must not put
+    an eleven-tag spam line on a news account. Most-specific-first ordering
+    means the HEAD is the part tied to the story, so that is what survives."""
+    _client(monkeypatch, content=EXAMPLE_TOO_MANY_TAGS)
+    tags = caption.expand("h").splitlines()[-1].split()
+    assert len(tags) == caption.MAX_HASHTAGS
+    assert tags == ["#miami", "#florida", "#planecrash", "#aviation", "#amazon"]
+
+
+def test_a_short_hashtag_line_is_left_alone(on, monkeypatch):
+    _client(monkeypatch, content="Headline\n\nA paragraph.\n\n#ohio #crime")
+    assert caption.expand("h").splitlines()[-1] == "#ohio #crime"
+
+
+def test_prose_mentioning_a_tag_is_not_treated_as_the_tag_line(on, monkeypatch):
+    """Only a line that is NOTHING but hashtags is a candidate — a closing
+    paragraph that happens to name one must not be chopped."""
+    body = ("Headline\n\nThe campaign used #ohio and six other tags across a "
+            "dozen posts this week, according to the filing.")
+    _client(monkeypatch, content=body)
+    assert caption.expand("h") == body
 
 
 # --------------------------------------------------------------------------- #

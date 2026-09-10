@@ -108,11 +108,23 @@ _SYSTEM = (
     "exclamation marks, no emoji, no rhetorical questions, no first person, "
     "no \"Breaking:\", no call to action, no \"follow us for more\", no links, "
     "no sign-off.\n"
-    "HASHTAGS — one line, five to nine of them, lowercase, space-separated, "
-    "letters and digits only inside each tag. Order them place, then the main "
-    "actors or subject, then the topic, then the general ones (#news, "
-    "#breakingnews). Tag places, institutions, countries and public events — "
-    "never a private individual's name.\n\n"
+    "HASHTAGS — one line, AT MOST FIVE, lowercase, space-separated, letters "
+    "and digits only inside each tag. Five is a ceiling, not a target: three "
+    "right tags beat five padded ones.\n"
+    "  Pick them RELEVANCE FIRST. Every tag must be something this particular "
+    "story is actually about — the place it happened, the institution or "
+    "public figure at its centre, its subject, its topic. A tag a reader "
+    "could not connect to the caption above it does not go in, however big "
+    "that tag is.\n"
+    "  Among the tags that pass that test, prefer the ones people actually "
+    "search and follow — the short, established, high-traffic form over the "
+    "long specific one nobody types (#ohio, not #ohiocourtsystem; #crime, not "
+    "#attemptedmurdercase). Never reach for size alone: a popular tag that is "
+    "not about this story is worse than one tag fewer.\n"
+    "  Order them most specific first — place, then the main actors or "
+    "subject, then the topic, then AT MOST ONE general one (#news or "
+    "#breakingnews, not both). Tag places, institutions, countries and public "
+    "events — never a private individual's name.\n\n"
     "Output ONLY the caption. No preamble, no explanation, no markdown, no "
     "bold, no bullet points, no surrounding quotation marks, no numbered "
     "citation markers, no source list at the end."
@@ -123,11 +135,39 @@ _SYSTEM = (
 # lose an otherwise good caption to them.
 _CITATION = re.compile(r"[ \t]*\[\d{1,3}\](?=[\s.,;:!?)]|$)")
 
+# The prompt asks for at most five hashtags; this is what makes it true. A
+# model overshoots a count often enough, and an eleven-tag news post reads as
+# spam on the account, so the trailing tag line is cut to length here rather
+# than trusted. The prompt orders tags most-specific-first, so keeping the
+# HEAD keeps the ones tied to this story and drops the generic tail.
+MAX_HASHTAGS = 5
+
+# A line that is nothing but hashtags — the caption's last line, by the shape
+# the prompt asks for. Anything else (a paragraph that happens to mention a
+# tag) is left alone.
+_TAG_LINE = re.compile(r"^#[^\s#]+(?:\s+#[^\s#]+)*$")
+
 # ``` / ```text fences around the whole answer.
 _FENCE = re.compile(r"^```[a-zA-Z]*\n(.*)\n```$", re.DOTALL)
 
 # A "Caption:"-style label on its own first line.
 _LABEL = re.compile(r"^(caption|instagram caption|post)\s*:\s*\n+", re.IGNORECASE)
+
+
+def _cap_hashtags(text: str, limit: int = MAX_HASHTAGS) -> str:
+    """Cut the caption's trailing hashtag line down to `limit` tags."""
+    lines = text.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        # The last non-empty line is the only candidate: decide on it and stop.
+        if _TAG_LINE.match(stripped):
+            tags = stripped.split()
+            if len(tags) > limit:
+                lines[i] = " ".join(tags[:limit])
+        break
+    return "\n".join(lines)
 
 
 def _clean(text: str) -> str:
@@ -142,6 +182,7 @@ def _clean(text: str) -> str:
         out = out[1:-1].strip()
     # Collapse the runs of blank lines a model leaves between paragraphs.
     out = re.sub(r"\n{3,}", "\n\n", out)
+    out = _cap_hashtags(out)
     return out.strip()
 
 
