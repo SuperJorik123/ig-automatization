@@ -397,7 +397,7 @@ def test_rephrase_disabled_returns_the_caption_without_calling(on, monkeypatch):
     assert fake.calls == []
 
 
-def test_rephrase_without_an_angle_does_not_call(on, monkeypatch):
+def test_rephrase_without_an_angle_or_a_style_does_not_call(on, monkeypatch):
     fake = _client(monkeypatch, content=VARIANT)
     assert caption.rephrase(EXAMPLE, "") == EXAMPLE
     assert fake.calls == []
@@ -419,3 +419,172 @@ def test_pick_hashtags_never_repeats_a_tag_in_a_line():
     for i in range(20):
         tags = caption.pick_hashtags(POOL, i).splitlines()[-1].split()
         assert len(tags) == len(set(tags))
+
+
+# --------------------------------------------------------------------------- #
+# per-account variants: the house style                                       #
+# --------------------------------------------------------------------------- #
+
+
+STYLED = [
+    {"name": "worldbrief", "lang": "en", "style": "Two paragraphs, never more."},
+    {"name": "wswire", "lang": "en", "style": "One long lede sentence."},
+    {"name": "plainbrand", "lang": "en"},
+]
+
+
+def _rewrites(entry):
+    """What news_bot asks: does this account write its own caption at all?"""
+    return bool(entry["angle"] or entry["style"])
+
+
+def test_a_styled_brand_always_gets_its_own_call():
+    """A style is the whole point of having one, and the shared caption is
+    written in no account's voice — so the free ride passes to a brand that
+    has none."""
+    p = caption.plan(STYLED, seed=0)
+    assert _rewrites(p[0]) and _rewrites(p[1])
+    assert not _rewrites(p[2])
+
+
+def test_a_styled_brand_gets_no_angle_on_top_of_its_voice():
+    """Two structural instructions fight: a voice that says "two paragraphs,
+    never more" against an angle that says "write it as four short
+    paragraphs" comes back in neither."""
+    p = caption.plan(STYLED, seed=0)
+    assert p[0]["angle"] is None and p[1]["angle"] is None
+
+
+def test_a_voiceless_brand_gets_an_angle_instead():
+    brands = STYLED + [{"name": "otherplain", "lang": "en"}]
+    p = caption.plan(brands, seed=0)
+    assert p[3]["angle"] and not p[3]["style"]
+
+
+def test_the_free_ride_is_taken_once_per_language():
+    brands = STYLED + [{"name": "otherplain", "lang": "en"}]
+    p = caption.plan(brands, seed=0)
+    assert [_rewrites(e) for e in p] == [True, True, False, True]
+
+
+def test_with_every_brand_styled_nobody_takes_the_shared_caption():
+    p = caption.plan(STYLED[:2], seed=0)
+    assert all(_rewrites(e) for e in p)
+
+
+def test_a_style_alone_is_enough_to_rewrite(on, monkeypatch):
+    """news_bot calls rephrase for a styled account with no angle at all."""
+    fake = _client(monkeypatch, content=VARIANT)
+    assert caption.rephrase(EXAMPLE, "", style="Two paragraphs.") == VARIANT
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert "Two paragraphs." in sent
+    assert "HOW YOURS MUST DIFFER" not in sent
+
+
+def test_neither_angle_nor_style_does_not_call(on, monkeypatch):
+    fake = _client(monkeypatch, content=VARIANT)
+    assert caption.rephrase(EXAMPLE, "", style="") == EXAMPLE
+    assert fake.calls == []
+
+
+def test_plan_carries_the_style_through():
+    p = caption.plan(STYLED, seed=0)
+    assert p[0]["style"] == "Two paragraphs, never more."
+    assert p[2]["style"] == ""
+
+
+def test_the_style_is_sent_with_the_angle(on, monkeypatch):
+    fake = _client(monkeypatch, content=VARIANT)
+    caption.rephrase(EXAMPLE, caption.ANGLES[0], style="Two paragraphs, never more.")
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert "Two paragraphs, never more." in sent
+    assert caption.ANGLES[0] in sent
+
+
+def test_the_style_never_outranks_the_facts(on, monkeypatch):
+    """A voice changes how a fact is told, never which facts exist — the
+    prompt has to say so next to the style itself, not only above it."""
+    fake = _client(monkeypatch, content=VARIANT)
+    caption.rephrase(EXAMPLE, caption.ANGLES[0], style="Punchy and loud.")
+    sent = fake.calls[0]["messages"][0]["content"]
+    house = sent.index("HOUSE STYLE")
+    assert "never which facts exist" in sent[house:]
+
+
+def test_no_style_sends_no_house_style_section(on, monkeypatch):
+    fake = _client(monkeypatch, content=VARIANT)
+    caption.rephrase(EXAMPLE, caption.ANGLES[0])
+    assert "HOUSE STYLE" not in fake.calls[0]["messages"][0]["content"]
+
+
+def test_style_and_language_travel_together_in_one_call(on, monkeypatch):
+    fake = _client(monkeypatch, content=VARIANT)
+    caption.rephrase(EXAMPLE, caption.ANGLES[0], lang="ru", style="Numbers first.")
+    assert len(fake.calls) == 1
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert "Numbers first." in sent and "ru" in sent
+
+
+def test_a_blank_line_with_a_space_on_it_is_still_blank(on, monkeypatch):
+    """A model leaves a space on an "empty" line often enough, and the
+    blank-run regex does not see it as blank — it shipped as an empty first
+    paragraph on a live post (2026-09-11)."""
+    _client(monkeypatch, content="Headline\n \n\nA paragraph.  \n\n#news")
+    assert caption.expand("h") == "Headline\n\nA paragraph.\n\n#news"
+
+
+def test_the_house_style_examples_are_marked_as_form_only(on, monkeypatch):
+    """A style descriptor carries examples, and a model copied one verbatim
+    onto a story it did not fit — "The investigation continues." on a protest
+    (2026-09-11). The prompt has to say examples are shapes, not text."""
+    fake = _client(monkeypatch, content=VARIANT)
+    caption.rephrase(EXAMPLE, "", style="End on a status line.")
+    sent = fake.calls[0]["messages"][0]["content"]
+    house = sent.index("HOUSE STYLE")
+    assert "FORM ONLY" in sent[house:]
+
+
+# --------------------------------------------------------------------------- #
+# a mangled hashtag line                                                      #
+# --------------------------------------------------------------------------- #
+
+
+KEYCAP = "#\ufe0f\u20e3 "        # what the model sent instead of "#"
+
+
+def test_a_keycap_hashtag_line_is_repaired(on, monkeypatch):
+    """Live, 2026-09-11: the model returned the KEYCAP HASH emoji plus a
+    space. Instagram indexes none of that, and _TAG_LINE did not match it, so
+    the line escaped the pool cap AND the per-account pick, and four accounts
+    published the same eight dead tags."""
+    line = KEYCAP + "madrid " + KEYCAP + "spain " + KEYCAP + "housing"
+    _client(monkeypatch, content="Headline\n\nA paragraph.\n\n" + line)
+    assert caption.expand("h").splitlines()[-1] == "#madrid #spain #housing"
+
+
+def test_a_repaired_line_is_then_capped_and_picked(on, monkeypatch):
+    tags = " ".join(KEYCAP + t for t in
+                    ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j"))
+    _client(monkeypatch, content="Headline\n\nA paragraph.\n\n" + tags)
+    out = caption.expand("h")
+    assert len(out.splitlines()[-1].split()) == caption.POOL_HASHTAGS
+    assert len(caption.pick_hashtags(out, 0).splitlines()[-1].split()) == \
+        caption.MAX_HASHTAGS
+
+
+def test_comma_separated_tags_are_repaired(on, monkeypatch):
+    _client(monkeypatch, content="Headline\n\nA paragraph.\n\n"
+                                 "#madrid, #spain, #housing")
+    assert caption.expand("h").splitlines()[-1] == "#madrid #spain #housing"
+
+
+def test_prose_containing_a_hash_is_never_repaired(on, monkeypatch):
+    body = ("Headline\n\nThe campaign used #ohio, and six other tags, "
+            "across a dozen posts.")
+    _client(monkeypatch, content=body)
+    assert caption.expand("h") == body
+
+
+def test_a_clean_tag_line_is_left_exactly_alone(on, monkeypatch):
+    _client(monkeypatch, content=EXAMPLE)
+    assert caption.expand("h") == EXAMPLE

@@ -328,3 +328,182 @@ def test_render_writes_rows_separated_by_cr_only(tmp_path, monkeypatch):
 
     assert b"\n" not in seen["bytes"]
     assert b"\r" in seen["bytes"]
+
+
+# --------------------------------------------------------------------------- #
+# load_writing_style — the one non-visual key in style.json                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_writing_style_is_read_from_style_json(tmp_path):
+    (tmp_path / "style.json").write_text(
+        '{"background": "#000000", "writing_style": "Two paragraphs."}',
+        encoding="utf-8")
+    assert branding.load_writing_style(str(tmp_path)) == "Two paragraphs."
+
+
+def test_writing_style_is_whitespace_collapsed(tmp_path):
+    """A descriptor is written across lines in the file and has to arrive at
+    the model as one paragraph."""
+    (tmp_path / "style.json").write_text(
+        '{"writing_style": "Two   paragraphs.\\n\\nNever more."}',
+        encoding="utf-8")
+    assert branding.load_writing_style(str(tmp_path)) == \
+        "Two paragraphs. Never more."
+
+
+def test_writing_style_is_capped(tmp_path):
+    (tmp_path / "style.json").write_text(
+        '{"writing_style": "%s"}' % ("x" * 5000), encoding="utf-8")
+    assert len(branding.load_writing_style(str(tmp_path))) == \
+        branding.MAX_WRITING_STYLE
+
+
+def test_a_brand_with_no_style_file_has_no_voice(tmp_path):
+    assert branding.load_writing_style(str(tmp_path)) == ""
+
+
+def test_a_brand_whose_style_file_is_broken_has_no_voice(tmp_path):
+    """Never raises: a caption voice is not worth failing a publish over."""
+    (tmp_path / "style.json").write_text("{not json", encoding="utf-8")
+    assert branding.load_writing_style(str(tmp_path)) == ""
+
+
+def test_a_non_string_style_is_ignored(tmp_path):
+    (tmp_path / "style.json").write_text('{"writing_style": 42}',
+                                         encoding="utf-8")
+    assert branding.load_writing_style(str(tmp_path)) == ""
+
+
+def test_load_style_does_not_return_the_voice(tmp_path):
+    """The ffmpeg path must never see a paragraph of English prose."""
+    (tmp_path / "style.json").write_text(
+        '{"background": "#112233", "writing_style": "Two paragraphs."}',
+        encoding="utf-8")
+    assert "writing_style" not in branding.load_style(str(tmp_path))
+
+
+# --- render_branded_multi batching -----------------------------------------
+# Each extra output in one ffmpeg pass is another x264 encoder inside the same
+# process (~390 MB at 1080x1920), so the pass is split into batches. These
+# tests stub ffmpeg out — they are about how the jobs are grouped, not pixels.
+
+def _logo(tmp_path, name):
+    d = tmp_path / name
+    d.mkdir()
+    p = d / "logo.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n")     # _prepare_job only checks isfile
+    return str(p)
+
+
+def _multi_jobs(tmp_path, n):
+    return [{"headline": f"brand {i}", "logo_path": _logo(tmp_path, f"b{i}"),
+             "out_path": str(tmp_path / f"out_{i}.mp4")} for i in range(n)]
+
+
+def _outs_of(cmd):
+    return [c for c in cmd
+            if c.endswith(".mp4") and os.path.basename(c).startswith("out_")]
+
+
+def _stub_ffmpeg(monkeypatch, fail_on=None):
+    """Record every ffmpeg command and write the outputs it was asked for.
+    `fail_on` is the 0-based batch index that comes back non-zero."""
+    runs = []
+
+    class _Proc:
+        def __init__(self, rc):
+            self.returncode = rc
+            self.stderr = "out of memory" if rc else ""
+
+    def fake_run(cmd, **kw):
+        runs.append(cmd)
+        if fail_on is not None and len(runs) - 1 == fail_on:
+            return _Proc(1)
+        for out in _outs_of(cmd):
+            with open(out, "wb") as fh:
+                fh.write(b"fake mp4")
+        return _Proc(0)
+
+    monkeypatch.setattr(branding.subprocess, "run", fake_run)
+    return runs
+
+
+def test_render_multi_splits_into_batches(tmp_path, monkeypatch):
+    runs = _stub_ffmpeg(monkeypatch)
+    jobs = _multi_jobs(tmp_path, 5)
+
+    branding.render_branded_multi(str(tmp_path / "src.mp4"), jobs, batch=2)
+
+    assert [len(_outs_of(c)) for c in runs] == [2, 2, 1]
+
+
+def test_render_multi_batched_returns_every_path_in_job_order(tmp_path, monkeypatch):
+    _stub_ffmpeg(monkeypatch)
+    jobs = _multi_jobs(tmp_path, 5)
+
+    outs = branding.render_branded_multi(str(tmp_path / "src.mp4"), jobs, batch=2)
+
+    assert outs == [j["out_path"] for j in jobs]
+    assert all(os.path.isfile(o) for o in outs)
+
+
+def test_render_multi_batch_failure_removes_earlier_batches_too(tmp_path, monkeypatch):
+    """All-or-nothing survives batching: news_bot catches this and retries
+    brand-by-brand, so a half-written set would leave orphan files behind and
+    make the fallback's outputs ambiguous."""
+    runs = _stub_ffmpeg(monkeypatch, fail_on=1)
+    jobs = _multi_jobs(tmp_path, 5)
+
+    with pytest.raises(RuntimeError):
+        branding.render_branded_multi(str(tmp_path / "src.mp4"), jobs, batch=2)
+
+    assert len(runs) == 2                                   # stopped at the failure
+    assert not any(os.path.exists(j["out_path"]) for j in jobs)
+
+
+def test_render_multi_batched_cleans_up_every_textfile(tmp_path, monkeypatch):
+    _stub_ffmpeg(monkeypatch)
+    jobs = _multi_jobs(tmp_path, 5)
+
+    branding.render_branded_multi(str(tmp_path / "src.mp4"), jobs, batch=2)
+
+    assert not any(os.path.exists(j["out_path"] + ".txt") for j in jobs)
+
+
+def test_render_multi_bad_logo_in_a_later_batch_runs_no_ffmpeg(tmp_path, monkeypatch):
+    """Every job is validated up front, so a broken brand fails on the tap
+    rather than a batch and a half into the render."""
+    runs = _stub_ffmpeg(monkeypatch)
+    jobs = _multi_jobs(tmp_path, 5)
+    jobs[4]["logo_path"] = str(tmp_path / "nope.png")
+
+    with pytest.raises(FileNotFoundError):
+        branding.render_branded_multi(str(tmp_path / "src.mp4"), jobs, batch=2)
+
+    assert runs == []
+
+
+def test_render_multi_batch_zero_means_one_pass(tmp_path, monkeypatch):
+    runs = _stub_ffmpeg(monkeypatch)
+    jobs = _multi_jobs(tmp_path, 5)
+
+    branding.render_branded_multi(str(tmp_path / "src.mp4"), jobs, batch=0)
+
+    assert len(runs) == 1
+    assert len(_outs_of(runs[0])) == 5
+
+
+def test_render_multi_defaults_to_the_module_batch_size(tmp_path, monkeypatch):
+    monkeypatch.setattr(branding, "RENDER_BATCH", 3)
+    runs = _stub_ffmpeg(monkeypatch)
+
+    branding.render_branded_multi(str(tmp_path / "src.mp4"), _multi_jobs(tmp_path, 7))
+
+    assert [len(_outs_of(c)) for c in runs] == [3, 3, 1]
+
+
+def test_render_batch_default_fits_a_small_vps():
+    """~0.5 GB + ~0.39 GB per brand, measured at 1080x1920 — four brands is
+    1.65 GB, which needs 4 GB of RAM. Raising this raises the ceiling."""
+    assert branding.RENDER_BATCH == 4

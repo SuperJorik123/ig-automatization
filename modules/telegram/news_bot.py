@@ -1038,17 +1038,25 @@ async def _ig_captions(source_text: str, pairs: list) -> dict[str, str]:
     the thirteen brands are "en": every English account published the same
     caption within seconds of the others, which is duplicate content by any
     reading. So the search is still bought ONCE, and the WORDING varies per
-    account — `caption.plan` gives the first account of each language the
-    shared caption (translated, exactly as before) and every account after it
-    a cheap searchless rewrite, then each account draws its own five hashtags
-    out of the shared pool. N accounts of one language cost one search plus
-    N-1 rewrites at well under a cent each.
+    account — `caption.plan` says who rewrites and how, and each account draws
+    its own five hashtags out of the shared pool. N accounts cost one search
+    (~$0.05, nearly all of it the web search) plus a rewrite each at $0.0004.
+
+    EACH ACCOUNT WRITES IN ITS OWN VOICE: `writing_style` out of
+    brands/<name>/style.json, which is why the brand dicts are copied with a
+    `style` attached before planning. The angle keeps two accounts apart on one
+    post; the style is the same on every post an account publishes, which is
+    what makes it recognisable rather than merely different. A brand with no
+    style file behaves exactly as it did before styles existed.
 
     Never raises: an empty dict means every IG pair falls back to its headline,
     which is what shipped before any of this existed, and a single failed
     rewrite falls back to the shared caption on its own.
     """
-    brands = [p["render"]["brand"] for p in pairs if p["platform"] == "ig"]
+    brands = [dict(p["render"]["brand"],
+                   style=branding.load_writing_style(
+                       os.path.dirname(p["render"]["brand"]["logo"])))
+              for p in pairs if p["platform"] == "ig"]
     if not brands or not (source_text or "").strip():
         return {}
     try:
@@ -1056,10 +1064,13 @@ async def _ig_captions(source_text: str, pairs: list) -> dict[str, str]:
         out = {}
         for entry in ig_caption.plan(brands, ig_caption.seed_for(source_text)):
             lang = entry["lang"]
-            if entry["angle"]:
-                # The rewrite carries the translation too — one call, not two.
+            if entry["angle"] or entry["style"]:
+                # In this account's own voice where it has one, an angle where
+                # it doesn't. The rewrite carries the translation too — one
+                # call, not two.
                 text = await asyncio.to_thread(
-                    ig_caption.rephrase, full, entry["angle"], lang)
+                    ig_caption.rephrase, full, entry["angle"], lang,
+                    entry["style"])
             elif lang:
                 text = await asyncio.to_thread(
                     translator.translate, full, lang, config.SOURCE_LANG)

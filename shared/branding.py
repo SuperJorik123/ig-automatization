@@ -30,6 +30,7 @@ ffmpeg built with libfreetype (all standard builds are).
 """
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -37,6 +38,8 @@ import textwrap
 import unicodedata
 
 from shared import renderlock
+
+log = logging.getLogger(__name__)
 
 # shared/branding.py -> shared/ -> <repo root>
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -180,6 +183,9 @@ def load_style(brand_dir: str) -> dict:
         font              path (absolute / next to the logo) or system font name
         font_size         px, default 41 (wrapping width scales with it)
 
+    `writing_style` is also read out of this file, by `load_writing_style` —
+    it is the account's caption voice and is deliberately not returned here.
+
     Raises ValueError for malformed JSON or values, FileNotFoundError for a
     font that can't be resolved — a typo must be loud, not silently ignored."""
     style = dict(DEFAULT_STYLE)
@@ -218,6 +224,42 @@ def load_style(brand_dir: str) -> dict:
             raise ValueError(f"{path}: font_size must be 8..200")
         style["font_size"] = size
     return style
+
+
+# The one key in style.json that has nothing to do with the render: the
+# account's WRITING voice, used by modules/instagram/caption.py to rewrite the
+# shared Instagram caption in this brand's own style. It lives here because
+# style.json is this module's file and a brand should have one style file, not
+# two — but load_style() deliberately does not return it, so nothing in the
+# ffmpeg path can be confused by a paragraph of English prose.
+WRITING_STYLE_KEY = "writing_style"
+
+# A style long enough to drown the rewrite instructions is a mistake, not a
+# voice; the descriptors that ship with the repo are 300-500 characters.
+MAX_WRITING_STYLE = 1200
+
+
+def load_writing_style(brand_dir: str) -> str:
+    """The brand's writing voice from `<brand_dir>/style.json`, or "".
+
+    Never raises: a missing file, a broken file, a missing key or a
+    non-string value all mean "this brand has no voice of its own", and the
+    caption falls back to the neutral wire register every account used before
+    styles existed. A caption is not worth failing a publish over — which is
+    the same contract modules/instagram/caption.py holds.
+    """
+    path = os.path.join(brand_dir, STYLE_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        value = raw[WRITING_STYLE_KEY]
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    if not isinstance(value, str):
+        log.warning("%s: %s is not a string — ignoring it",
+                    path, WRITING_STYLE_KEY)
+        return ""
+    return " ".join(value.split())[:MAX_WRITING_STYLE]
 
 
 _charset_cache: dict[str, frozenset | None] = {}
@@ -425,6 +467,17 @@ def _filter_graph_multi(jobs: list[dict]) -> str:
     return blurfill_chain() + ";" + split + ";" + chains
 
 
+# Brands per ffmpeg pass. Every extra output in a pass is another x264 encoder
+# living inside the SAME process — measured at 1080x1920: ~0.5 GB for the first
+# brand and ~390 MB for each one after it (13 brands in one pass peaked at
+# 5.0 GB, which is how a 2 GB VPS reaches 99% RAM and the OOM killer takes the
+# render). Batching caps the peak at roughly 0.5 + 0.39*(BATCH-1) GB while
+# keeping the shared decode/blur inside each pass, so the saving the single
+# pass exists for is only lost BETWEEN batches. 4 fits a 4 GB box; drop it to 2
+# on a 2 GB one. 0 or less = one pass for everything, the old behaviour.
+RENDER_BATCH = int(os.environ.get("BRAND_RENDER_BATCH") or 4)
+
+
 # The per-output half of the encode command, identical for every render here
 # and in shorts_format: x264 at the speed preset above, faststart for
 # streaming players.
@@ -500,42 +553,66 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
     return out_path
 
 
-def render_branded_multi(video_path: str, jobs: list[dict]) -> list[str]:
-    """Every brand in ONE ffmpeg pass: the source is decoded and the blur-fill
-    canvas built once, split N ways, each branch adding its own logo + banner
-    and encoding its own output — same per-file result as N `render_branded`
-    calls, minus the repeated decode/blur/composite work (the encodes dominate
-    and still happen N times). Each job dict: `headline`, `logo_path`,
-    `out_path`, optional `style`.
+def _render_pass(video_path: str, prepared: list[dict]) -> None:
+    """One ffmpeg invocation for `prepared` (already validated by
+    `_prepare_job`): the source decoded and the blur-fill canvas built once,
+    split N ways, each branch adding its own logo + banner and encoding its
+    own output. Raises RuntimeError with ffmpeg's stderr tail on a failure;
+    the caller owns the cleanup of the outputs."""
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path]
+    for p in prepared:
+        cmd += ["-i", p["logo_path"]]
+    cmd += ["-filter_complex", _filter_graph_multi(prepared)]
+    for i, p in enumerate(prepared):
+        # "0:a?" — map the source audio when there is one, silently skip
+        # when there isn't (screen recordings often ship without).
+        cmd += ["-map", f"[v{i}]", "-map", "0:a?",
+                *ENCODE_ARGS, p["out_path"]]
+    # The slot is taken per batch, not once around the whole set: between two
+    # batches is exactly where another process's render should get its turn.
+    with renderlock.render_slot():
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-300:]}")
 
-    All-or-nothing: any failure removes every output and raises. A caller
-    that needs per-brand isolation (news_bot does) catches this and falls
-    back to one `render_branded` per job. Returns out paths in job order."""
+
+def render_branded_multi(video_path: str, jobs: list[dict],
+                         batch: int | None = None) -> list[str]:
+    """Every brand rendered, `batch` of them per ffmpeg pass (default
+    `RENDER_BATCH`; 0 or less puts them all in one pass). Within a pass the
+    source is decoded and the blur-fill canvas built once and split N ways —
+    the encodes still happen N times and are what dominates, which is why the
+    pass is capped at all: N simultaneous x264 encoders is N times the encoder
+    memory, and that is what pegs a small VPS. Each job dict: `headline`,
+    `logo_path`, `out_path`, optional `style`.
+
+    Every job is validated up front, so a bad logo or a broken style.json
+    fails before the first ffmpeg starts rather than a batch and a half in.
+
+    All-or-nothing across ALL batches: any failure removes every output
+    written so far — including finished earlier batches — and raises. A caller
+    that needs per-brand isolation (news_bot does) catches this and falls back
+    to one `render_branded` per job. Returns out paths in job order."""
     if not jobs:
         return []
+    size = batch if batch is not None else RENDER_BATCH
+    if size <= 0:
+        size = len(jobs)
     prepared = []
     try:
         for job in jobs:
             prepared.append(_prepare_job(job["headline"], job["logo_path"],
                                          job["out_path"], job.get("style")))
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path]
-        for p in prepared:
-            cmd += ["-i", p["logo_path"]]
-        cmd += ["-filter_complex", _filter_graph_multi(prepared)]
-        for i, p in enumerate(prepared):
-            # "0:a?" — map the source audio when there is one, silently skip
-            # when there isn't (screen recordings often ship without).
-            cmd += ["-map", f"[v{i}]", "-map", "0:a?",
-                    *ENCODE_ARGS, p["out_path"]]
-        with renderlock.render_slot():
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            for p in prepared:
-                try:
-                    os.remove(p["out_path"])
-                except OSError:
-                    pass
-            raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-300:]}")
+        for start in range(0, len(prepared), size):
+            try:
+                _render_pass(video_path, prepared[start:start + size])
+            except Exception:
+                for p in prepared:
+                    try:
+                        os.remove(p["out_path"])
+                    except OSError:
+                        pass
+                raise
         return [p["out_path"] for p in prepared]
     finally:
         for p in prepared:

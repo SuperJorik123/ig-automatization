@@ -45,10 +45,13 @@ the wording varies per account:
              hashtag offset. The FIRST account of each language keeps the
              shared caption — that call is already paid for.
   `rephrase` one cheap, SEARCHLESS call per remaining account
-             (IG_CAPTION_VARIANT_MODEL): same facts, different opening,
-             different order, per a rotating ANGLES directive. Given a `lang`
-             it also translates, so a foreign-language account's variant IS its
-             translation — one call, not two.
+             (IG_CAPTION_VARIANT_MODEL): same facts, in THIS ACCOUNT'S VOICE —
+             the `writing_style` out of brands/<name>/style.json, which is the
+             same on every post it publishes. An account with no voice gets a
+             rotating ANGLES directive instead, never both: two structural
+             instructions fight and the caption comes back in neither. Given a
+             `lang` it also translates, so a foreign-language account's variant
+             IS its translation — one call, not two.
   `pick_hashtags`
              pure: each account keeps the pool's two most specific tags and
              rotates three more out of the tail. No tokens, and no two accounts
@@ -141,7 +144,9 @@ _SYSTEM = (
     "no \"Breaking:\", no call to action, no \"follow us for more\", no links, "
     "no sign-off.\n"
     "HASHTAGS — one line, EXACTLY EIGHT, lowercase, space-separated, letters "
-    "and digits only inside each tag. That line is a POOL: the accounts "
+    "and digits only inside each tag. Each tag is a plain ASCII \"#\" with the "
+    "word immediately after it — \"#madrid\", never a keycap emoji, never a "
+    "space after the hash, never a comma between tags. That line is a POOL: the accounts "
     "publishing this story each draw a few tags from it, so eight genuinely "
     "relevant ones are wanted here. If the story cannot carry eight, give "
     "fewer — a tag that is not about this story is worse than a short line.\n"
@@ -165,12 +170,21 @@ _SYSTEM = (
     "citation markers, no source list at the end."
 )
 
-_VARIANT_SYSTEM = (
+_VARIANT_INTRO = (
     "You are the editor of a news account. Another account in the same group "
     "has already published the caption below, word for word, for the same "
     "story. Rewrite it as YOUR account's caption, so that a reader who sees "
     "both does not see the same post twice.\n\n"
-    "HOW YOURS MUST DIFFER: {angle}\n\n"
+)
+
+# Only for an account with no voice of its own. An account that HAS one is
+# differentiated by that, and adding an angle on top makes the two fight: a
+# house style that says "two paragraphs, never more" and an angle that says
+# "write it as four short paragraphs" cancel out, and what comes back is in
+# neither voice. Live proof on 2026-09-11, which is why this is conditional.
+_VARIANT_ANGLE = "HOW YOURS MUST DIFFER: {angle}\n\n"
+
+_VARIANT_RULES = (
     "SAME FACTS, NOTHING ADDED — every name, number, date, place, quote and "
     "attribution in your version comes from the caption you were given, "
     "unchanged. You have not looked this story up and you know nothing the "
@@ -183,7 +197,10 @@ _VARIANT_SYSTEM = (
     "SHAPE — line 1 is the headline, rewritten as a DIFFERENT phrasing of the "
     "same headline: same facts, same meaning, other words. Then a blank line, "
     "then the paragraphs with a blank line between them, then a blank line and "
-    "the hashtag line.\n"
+    "the hashtag line. THE FIRST PARAGRAPH STILL CARRIES THE NEWS — who, what, "
+    "where, when — however short or unconventional your house style is. A "
+    "caption that opens on a detail and leaves the reader to infer the story "
+    "from the headline is a failed caption, not a terse one.\n"
     "HASHTAGS — the last line is copied through character for character: the "
     "same tags in the same order, none added, none dropped, none translated. "
     "They are chosen elsewhere.\n"
@@ -193,6 +210,29 @@ _VARIANT_SYSTEM = (
     "links, no sign-off.\n\n"
     "Output ONLY the caption. No preamble, no explanation, no markdown, no "
     "surrounding quotation marks, and no note about what you changed."
+)
+
+# Appended when the account has a voice of its own — `writing_style` in
+# brands/<name>/style.json (shared/branding.load_writing_style). The angle says
+# how this post differs from the one next door; the STYLE says how this account
+# always writes, and it is the same string on every post it publishes, which is
+# what makes an account recognisable rather than merely different.
+#
+# It goes in AFTER the register rule and overrides it on matters of form only:
+# FAITHFUL is above both, because a voice changes how a fact is told and never
+# which facts there are.
+_VARIANT_STYLE = (
+    "\n\nHOUSE STYLE — this is how your account always writes, and it "
+    "outranks the neutral register above wherever the two disagree on FORM. "
+    "It never outranks SAME FACTS, NOTHING ADDED: a voice changes how a fact "
+    "is told, never which facts exist, and an adjective the source does not "
+    "support is an invention whatever the house style is.\n"
+    "Any example inside the house style illustrates FORM ONLY. Never copy an "
+    "example's words, names, places, times or closing lines into the caption "
+    "— a style that shows you \"The investigation continues.\" is showing you "
+    "the shape of a closing line, and putting that sentence on a story with no "
+    "investigation in it is a fabrication. Every example you follow gets "
+    "refilled with THIS story's facts.\n{style}"
 )
 
 # Appended when the account publishes in another language: for it, the variant
@@ -331,6 +371,39 @@ def pick_hashtags(text: str, offset: int, limit: int = MAX_HASHTAGS,
     return "\n".join(lines)
 
 
+# What a model returns when it means "#madrid" and gets it wrong. Seen live on
+# 2026-09-11: "#\uFE0F\u20E3 madrid", the KEYCAP HASH emoji plus a space, which
+# is not a hashtag on Instagram and — worse — does not match _TAG_LINE, so the
+# tag line silently escaped both the pool cap and the per-account pick and every
+# account published the same eight dead tags. A malformed tag line has to be
+# repaired here, not passed down.
+_TAG_NOISE = str.maketrans({"\uFE0F": "", "\u20E3": "", ",": " ", ";": " "})
+_HASH_GAP = re.compile(r"#[ \t]+(?=[^\s#])")
+
+
+def _normalise_tag_line(text: str) -> str:
+    """Repair the caption's last line when a model mangles the hashtags.
+
+    Only the last non-empty line is touched, and only when the repair turns it
+    into a clean tag line — prose that merely contains a "#" is left exactly as
+    it was, which is the same rule every other hashtag helper here follows.
+    """
+    lines = text.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        if "#" not in stripped:
+            return text
+        fixed = " ".join(stripped.translate(_TAG_NOISE).split())
+        fixed = _HASH_GAP.sub("#", fixed)
+        if fixed != stripped and _TAG_LINE.match(fixed):
+            lines[i] = fixed
+            return "\n".join(lines)
+        return text
+    return text
+
+
 def _clean(text: str) -> str:
     """Undo the wrappers a chat model reaches for when told not to."""
     out = (text or "").strip()
@@ -342,7 +415,12 @@ def _clean(text: str) -> str:
     if len(out) > 1 and out[0] == '"' and out[-1] == '"':
         out = out[1:-1].strip()
     # Collapse the runs of blank lines a model leaves between paragraphs.
+    # Trailing spaces first: a "blank" line the model left a space on is not
+    # blank to the regex, and it survived as an empty first paragraph on a
+    # live post (2026-09-11).
+    out = "\n".join(line.rstrip() for line in out.split("\n"))
     out = re.sub(r"\n{3,}", "\n\n", out)
+    out = _normalise_tag_line(out)
     out = _cap_hashtags(out)
     return out.strip()
 
@@ -414,47 +492,73 @@ def plan(brands: list, seed: int = 0) -> list:
     loads them alphabetically). Returns one entry per brand — `name`, `lang`,
     `angle` and `offset` — in the same order.
 
-    THE FIRST BRAND OF EACH LANGUAGE GETS NO ANGLE: it publishes the shared
+    ONE VOICELESS BRAND PER LANGUAGE GETS NO ANGLE: it publishes the shared
     caption, whose call is already paid for, and nothing it could be rewritten
-    away from has been published yet. Every brand after it in that language
-    gets its own angle, so no two accounts run the same words. `offset` is
-    always distinct, so their hashtag lines differ even when the prose does
-    not (a brand whose rewrite call fails falls back to the shared caption).
+    away from has been published yet. Every other brand in that language gets
+    its own angle, so no two accounts run the same words. `offset` is always
+    distinct, so their hashtag lines differ even when the prose does not (a
+    brand whose rewrite call fails falls back to the shared caption).
+
+    A BRAND WITH A `style` IS NEVER THAT ONE, AND GETS NO ANGLE. Its voice is
+    the whole point of having one, and the shared caption is written in no
+    account's voice — so a styled brand always gets its own call, and the free
+    ride passes to the first brand of that language with no style at all. With
+    every brand styled (which is the case for the JNN accounts on Instagram)
+    nobody takes it and the shared caption is only ever a source text.
+
+    The angle is NOT stacked on top of a style: the two are both structural
+    instructions and they fight — a voice that says "two paragraphs, never
+    more" against an angle that says "write it as four short paragraphs" comes
+    back in neither. So an entry carries an angle OR a style, and `rephrase`
+    is called for either.
 
     `seed` rotates the whole deal per post (`seed_for`), so an account does not
     open every post it publishes the same way. Pure and offline-testable.
     """
-    out, seen = [], set()
+    out, free = [], set()
     for i, brand in enumerate(brands):
         lang = (brand.get("lang") or "").strip()
-        first = lang not in seen
-        seen.add(lang)
+        style = (brand.get("style") or "").strip()
+        # The free ride is per language, and only a voiceless brand can take it.
+        shared = not style and lang not in free
+        if shared:
+            free.add(lang)
         out.append({
             "name": brand.get("name", ""),
             "lang": lang,
-            "angle": None if first else angle_for(seed + i),
+            "style": style,
+            # A voice differentiates on its own; an angle is what a
+            # voiceless account is given instead.
+            "angle": None if (shared or style) else angle_for(seed + i),
             "offset": seed + i,
         })
     return out
 
 
-def rephrase(text: str, angle: str, lang: str = "",
+def rephrase(text: str, angle: str, lang: str = "", style: str = "",
              model: str | None = None) -> str:
     """One account's variant of a caption another account is publishing.
 
-    `angle` is a directive out of ANGLES; `lang`, when given, also translates,
-    which is what keeps a foreign-language account at one call instead of two.
-    No search: the facts are already in `text`, and a second search would
-    double the only real bill this feature has.
+    Takes an `angle` OR a `style`, never both (see `plan`): `style` is the
+    account's permanent voice (`writing_style` in brands/<name>/style.json),
+    the same on every post it publishes and what makes it recognisable;
+    `angle` is a per-post structural directive out of ANGLES, which is what a
+    voiceless account gets instead so it at least differs from its neighbour.
+    `lang`, when given, also translates, which is what keeps a
+    foreign-language account at one call instead of two. No search: the facts
+    are already in `text`, and a second search would double the only real bill
+    this feature has.
 
-    Returns `text` unchanged when a variant isn't wanted or possible — no
-    angle, no text, the kill switch off, no API key, a failed or empty call.
+    Returns `text` unchanged when a variant isn't wanted or possible — neither
+    angle nor style, no text, the kill switch off, no API key, a failed or
+    empty call.
     Never raises, for the same reason `expand` doesn't: the accounts sharing
     one caption is a smaller problem than an account posting none. Blocking;
     async callers go through asyncio.to_thread.
     """
     text = (text or "").strip()
-    if not text or not (angle or "").strip():
+    angle, style = (angle or "").strip(), (style or "").strip()
+    if not text or not (angle or style):
         return text
     if not config.IG_CAPTION_ENABLED:
         return text
@@ -462,7 +566,12 @@ def rephrase(text: str, angle: str, lang: str = "",
         log.warning("OPENROUTER_API_KEY not set — accounts share the caption")
         return text
 
-    system = _VARIANT_SYSTEM.format(angle=angle.strip())
+    system = _VARIANT_INTRO
+    if angle:
+        system += _VARIANT_ANGLE.format(angle=angle)
+    system += _VARIANT_RULES
+    if style:
+        system += _VARIANT_STYLE.format(style=style)
     if (lang or "").strip():
         system += _VARIANT_LANG.format(lang=lang.strip())
 
@@ -477,13 +586,13 @@ def rephrase(text: str, angle: str, lang: str = "",
         )
     except Exception as exc:
         log.error("instagram caption variant (%s) failed: %s — posting the "
-                  "shared caption", angle.strip()[:40], exc)
+                  "shared caption", (angle or style)[:40], exc)
         return text
 
     out = _clean(resp.choices[0].message.content or "")
     if not out:
         log.warning("instagram caption variant (%s) came back empty — posting "
-                    "the shared caption", angle.strip()[:40])
+                    "the shared caption", (angle or style)[:40])
         return text
     return trim_caption(out)
 
@@ -504,17 +613,28 @@ if __name__ == "__main__":
     ap.add_argument("--lang", default="", metavar="CODE",
                     help="language for the rewritten accounts (default: the "
                          "source language)")
+    ap.add_argument("--brands", default="", metavar="A,B,C",
+                    help="real brand names instead of --accounts, each writing "
+                         "in its own brands/<name>/style.json voice")
     args = ap.parse_args()
 
     headline = " ".join(args.headline)
     shared = expand(headline, model=args.model)
-    fake = [{"name": f"account{i + 1}", "lang": args.lang if i else ""}
-            for i in range(max(1, args.accounts))]
+    if args.brands:
+        from shared import branding
+        fake = [{"name": n, "lang": args.lang,
+                 "style": branding.load_writing_style(os.path.join(
+                     _ROOT, "brands", n))}
+                for n in args.brands.split(",") if n.strip()]
+    else:
+        fake = [{"name": f"account{i + 1}", "lang": args.lang if i else ""}
+                for i in range(max(1, args.accounts))]
     for entry in plan(fake, seed_for(headline)):
-        text = (rephrase(shared, entry["angle"], entry["lang"])
-                if entry["angle"] else shared)
+        text = (rephrase(shared, entry["angle"], entry["lang"], entry["style"])
+                if (entry["angle"] or entry["style"]) else shared)
         if len(fake) > 1:
-            print(f"--- {entry['name']} "
-                  f"({entry['angle'] or 'the shared caption'}) ---")
+            print(f"--- {entry['name']}: "
+                  f"{'its own voice' if entry['style'] else entry['angle'] or 'the shared caption'}"
+                  f" ---")
         print(pick_hashtags(text, entry["offset"]))
         print()
