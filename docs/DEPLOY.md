@@ -13,6 +13,7 @@ there is nothing for it to talk to on a server.
 | Headline font | `/usr/local/share/fonts/segoeuib.ttf`, copied from Windows. `branding.FONT_CANDIDATES` finds it there; without it every clip falls back to the much heavier shipped DejaVu. |
 | Timezone | `Europe/Bucharest`, matching `TIMEZONE` in `.env` — the weekly cleanup and `TG_FIRST_TICK` are local-clock. |
 | Swap | 2 GB at `/swapfile` (1 vCPU / 2 GB RAM; 1080×1920 encodes need the headroom). |
+| RAM sizing | Measured peaks: 4 services idle ~0.5 GB; branded video ~0.5 GB + ~0.39 GB per extra brand **within one ffmpeg pass**, capped by `BRAND_RENDER_BATCH` (default 4 → ~1.65 GB); one photo card **6.9 GB on `bria-rmbg`, 0.73 GB on `u2net`**. 2 GB needs `CARD_CUTOUT_MODEL=u2net` and `BRAND_RENDER_BATCH=2`; 4 GB runs the defaults; only 8 GB runs bria-rmbg cards. The `[monitor] Memory at 99%` mails come from these peaks — `psutil.virtual_memory().percent` is `MemAvailable`-based, so they are real pressure, not page cache. |
 
 ## Services
 
