@@ -20,7 +20,8 @@ white text on a black@0.55 box in the repo-shipped bold font.
       "text": "#ffffff",         // headline color
       "font": "Verdana",         // absolute path, a file in this folder, or a
                                  // system font name/filename (arialbd.ttf)
-      "font_size": 41            // px; wrapping width scales with it
+      "font_size": 41,           // px; wrapping width scales with it
+      "writing_style": "..."     // the account's CAPTION voice, see below
     }
 
 `background_alpha` only defaults to 0.55 for the built-in black box — an
@@ -28,6 +29,35 @@ explicitly configured color is drawn opaque unless you set the key yourself.
 A malformed color, an out-of-range size or an unresolvable font raises at
 render time rather than silently falling back, so typos surface in the news
 bot's error reply.
+
+## writing_style — the account's voice
+
+The one key here that has nothing to do with the render. One Instagram post
+goes out to several accounts at once, and they used to publish the same
+caption character for character, which reads as duplicate content. Each
+account now rewrites the shared caption in its own voice, and this string is
+that voice (`shared/branding.load_writing_style` →
+`modules/instagram/caption.rephrase`).
+
+WRITE MECHANICS, NOT ADJECTIVES. "Punchy and engaging" does nothing to a
+model; "Lead with the hardest fact inside the first six words, never open on
+a subordinate clause, attribution after the fact rather than before it" is
+followed exactly. The axes worth naming are the lede (what the first sentence
+opens on), sentence length, attribution placement, paragraph count, tense, and
+the closing move. Keep it to a few hundred characters — it is capped at
+`MAX_WRITING_STYLE` and a style long enough to drown the rewrite instructions
+is a mistake, not a voice.
+
+The voice is FIXED per account (what makes it recognisable) and composes with
+a per-post rotating angle (what keeps two accounts apart on the same story).
+Neither can touch the facts: the prompt puts the house style below "same
+facts, nothing added" explicitly, so a loud voice cannot acquire an adjective
+the source did not support.
+
+Unlike the colours, a broken or missing `writing_style` never raises — the
+account falls back to the neutral wire register every account used before
+voices existed. The eight JNN brands ship one; the GMN five deliberately do
+not.
 ## Wiring the accounts
 
 The brand's platform accounts live in `credentials/brands/<name>.json` (one
