@@ -18,6 +18,28 @@ from dotenv import load_dotenv
 
 from shared import credentials
 
+# Numeric tuning knobs come from .env as strings. Both helpers fall back to
+# the default on anything unparseable — a typo in one knob must never stop a
+# bot from starting. Defined up here because the settings below use them.
+
+
+def _int_env(name: str, default: int) -> int:
+    """Int from .env, falling back to `default` on anything unparseable — a
+    typo in one tuning knob must not stop the bot from starting."""
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    """Float from .env, same fall-back contract as _int_env."""
+    try:
+        return float(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
 # shared/config.py -> shared/ -> <repo root>
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -165,6 +187,37 @@ IG_CAPTION_ENABLED = os.environ.get("IG_CAPTION_ENABLED", "1").strip().lower() n
 IG_CAPTION_VARIANT_MODEL = (os.environ.get("IG_CAPTION_VARIANT_MODEL", "").strip()
                             or "openai/gpt-5.6-luna")
 
+# Footage analysis (shared/vision.py) — the call that runs BEFORE the caption's
+# web search, so the search is driven by what the media actually shows instead
+# of by the words the operator typed. Without it a clip of one boxer published
+# a caption about a different, more famous one (2026-09).
+#
+# The model must be natively multimodal WITH AUDIO: half of what a caption
+# needs ("people nearby began shouting") is on the audio track, not on screen.
+# gemini-2.5-flash takes video and audio in one part and is already the
+# translator's default here.
+#
+# NO ":online" HERE, deliberately. This call's whole purpose is to look at the
+# media and nothing else; a search on the operator's headline at this point
+# would reintroduce the bug the inversion exists to fix.
+#
+# IG_VISION_ENABLED=0 is the kill switch: off, the caption is expanded from the
+# headline alone, which is exactly what shipped before this existed.
+IG_VISION_MODEL = (os.environ.get("IG_VISION_MODEL", "").strip()
+                   or "google/gemini-2.5-flash")
+IG_VISION_ENABLED = os.environ.get("IG_VISION_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no", "off"
+)
+
+# A local clip has to travel as a base64 data URL (OpenRouter takes a plain
+# https video URL only for YouTube links, and Gemini reads public YouTube
+# videos only), so the bytes ride in the request body and base64 adds a third
+# on top. IG_VISION_MAX_S caps how much of a long clip is analysed; the ffmpeg
+# pre-pass then has to land under IG_VISION_MAX_MB or the analysis is skipped
+# rather than posting a 60 MB request.
+IG_VISION_MAX_S = _int_env("IG_VISION_MAX_S", 120)
+IG_VISION_MAX_MB = _float_env("IG_VISION_MAX_MB", 18.0)
+
 # Collector's working dir: SQLite queue + downloaded media + login session.
 TG_DATA_DIR = os.path.join(ROOT_DIR, "modules", "telegram", "data")
 
@@ -309,15 +362,6 @@ BRANDS = _parse_brands(os.environ.get("BRANDS", ""), os.environ)
 # --------------------------------------------------------------------------- #
 
 
-def _int_env(name: str, default: int) -> int:
-    """Int from .env, falling back to `default` on anything unparseable — a
-    typo in one tuning knob must not stop the bot from starting."""
-    try:
-        return int(os.environ.get(name, "").strip() or default)
-    except ValueError:
-        return default
-
-
 # A collected story only counts as news if it carries MEDIA — one or more
 # photos and/or videos. Text-only posts (source-channel commentary, link
 # dumps, announcements) are rejected BEFORE scoring, so they cost nothing.
@@ -379,14 +423,6 @@ TG_FIRST_TICK = os.environ.get("TG_FIRST_TICK", "").strip()
 # --------------------------------------------------------------------------- #
 # Monitoring / alert email (shared/monitoring — mailer, errmail, checks)      #
 # --------------------------------------------------------------------------- #
-
-
-def _float_env(name: str, default: float) -> float:
-    """Float from .env, same fall-back contract as _int_env."""
-    try:
-        return float(os.environ.get(name, "").strip() or default)
-    except ValueError:
-        return default
 
 
 # The mailbox alerts are sent FROM and the address they go TO. Both

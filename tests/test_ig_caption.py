@@ -664,3 +664,99 @@ def test_prose_containing_a_hash_is_never_repaired(on, monkeypatch):
 def test_a_clean_tag_line_is_left_exactly_alone(on, monkeypatch):
     _client(monkeypatch, content=EXAMPLE)
     assert caption.expand("h") == EXAMPLE
+
+
+# --------------------------------------------------------------------------- #
+# footage-first expansion                                                     #
+# --------------------------------------------------------------------------- #
+#
+# The caption used to be written from the headline alone, which meant the
+# :online search — a plugin that runs BEFORE the model and builds its query
+# from the prompt — went looking for the headline's words and published a
+# caption about whatever most famous story matched them. The footage now goes
+# in first and the search is told it may only corroborate it.
+
+FOOTAGE = {
+    "summary": "An elderly man walks along a street as a bear crosses behind him.",
+    "beats": [
+        "A man walks along a pavement past parked cars.",
+        "A bear steps out of the treeline a few feet behind him.",
+        "He turns, sees the bear and backs away.",
+    ],
+    "audible": "Bystanders shouting, warning the man to turn around.",
+    "setting": "A residential street, daytime.",
+    "headline_ok": True,
+    "headline_note": "",
+    "headline_suggestion": "",
+}
+
+
+def _system_of(fake) -> str:
+    return fake.calls[0]["messages"][0]["content"]
+
+
+def _user_of(fake) -> str:
+    return fake.calls[0]["messages"][-1]["content"]
+
+
+def test_no_footage_sends_exactly_what_it_always_sent(on, monkeypatch):
+    """The old path has to stay byte-identical: vision is best-effort, and an
+    analysis that fails must not change the caption that gets written."""
+    a = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Plane crash at Miami International")
+    b = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Plane crash at Miami International", footage={})
+    assert a.calls[0]["messages"] == b.calls[0]["messages"]
+
+
+def test_the_footage_is_sent_with_the_headline(on, monkeypatch):
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Man walks past bear", footage=FOOTAGE)
+    user = _user_of(fake)
+    assert "Man walks past bear" in user
+    assert FOOTAGE["summary"] in user
+    assert "Bystanders shouting" in user
+    assert "A bear steps out of the treeline" in user
+
+
+def test_the_footage_prompt_makes_the_media_outrank_the_search(on, monkeypatch):
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Man walks past bear", footage=FOOTAGE)
+    system = _system_of(fake).lower()
+    assert "ground truth" in system
+    assert "contradict" in system
+
+
+def test_the_footage_prompt_forbids_restating_the_headline(on, monkeypatch):
+    """The thin duplicate caption — headline, then one paragraph saying the
+    headline again — is the second half of the bug this replaced."""
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Man walks past bear", footage=FOOTAGE)
+    assert "restate" in _system_of(fake).lower()
+
+
+def test_the_footage_prompt_offers_both_registers(on, monkeypatch):
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Man walks past bear", footage=FOOTAGE)
+    system = _system_of(fake)
+    assert "THE CLIP IS THE STORY" in system
+    assert "A REPORTED EVENT" in system
+
+
+def test_footage_expansion_still_never_raises(on, monkeypatch):
+    _client(monkeypatch, exc=RuntimeError("gateway down"))
+    assert caption.expand("Man walks past bear", footage=FOOTAGE) == \
+        "Man walks past bear"
+
+
+def test_footage_expansion_is_cleaned_like_any_other(on, monkeypatch):
+    _client(monkeypatch, content="```\n" + EXAMPLE + "\n```")
+    assert caption.expand("h", footage=FOOTAGE) == EXAMPLE
+
+
+def test_disabled_skips_the_call_even_with_footage(on, monkeypatch):
+    fake = _client(monkeypatch, content=EXAMPLE)
+    monkeypatch.setattr(config, "IG_CAPTION_ENABLED", False)
+    assert caption.expand("Man walks past bear", footage=FOOTAGE) == \
+        "Man walks past bear"
+    assert fake.calls == []

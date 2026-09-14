@@ -13,6 +13,22 @@ this module makes of it: one OpenRouter call on a web-search-enabled model
 the gateway live search) that looks the story up as it stands today and writes
 those paragraphs out of what it finds.
 
+THE MEDIA GOES IN FIRST. `:online` is a search plugin that runs BEFORE the
+model sees the prompt and builds its query out of that prompt — so a prompt
+that is only a headline searches the headline's WORDS and comes back with the
+most prominent story matching them. In 2026-09 that published a caption about
+Floyd Mayweather over a clip of a completely different boxer: the search was
+never wrong about Mayweather, it was answering a question nobody should have
+asked. Attaching the video to that same call would not have helped, because
+the search would still have fired off the headline first.
+
+So `expand` takes a second argument: `footage`, shared/vision.describe's report
+of what the media actually shows, audio included. With it in the prompt the
+search query is built from the footage, the search drops to corroboration
+(names, places, dates — anything contradicting the report is dropped), and the
+caption is written from the media. Without it — analysis off, or failed —
+the request is byte-for-byte the one this function has always sent.
+
 Two contracts, both taken from modules/telegram/translator.py, because they are
 what make a model safe to put in a publishing path:
 
@@ -21,10 +37,9 @@ what make a model safe to put in a publishing path:
   the operator has already tapped publish; a caption hiccup must cost the post
   its paragraphs, not its existence.
 
-  FAITHFUL — the search is there to source the headline's own story, not to
-  build a story around it. The prompt says so at length, and says to write one
-  short paragraph rather than pad when the search comes back thin. On a news
-  account an invented detail costs more than a short caption ever will.
+  FAITHFUL — the search sources the story the MEDIA shows, and never builds a
+  story around the headline. On a news account an invented detail costs more
+  than a short caption ever will.
 
 The output is in the source headline's language. news_bot translates it per
 brand afterwards through the same translator the headline goes through, so a
@@ -86,9 +101,11 @@ by the prompt, not by this number; nothing should ever come near it.
 
 CLI, for tuning the prompts against real headlines — `--accounts N` prints the
 post as N accounts would publish it, which is the only way to see whether the
-angles are actually pulling the rewrites apart:
+angles are actually pulling the rewrites apart, and `--media` runs the whole
+inverted pipeline against a real clip:
     py modules/instagram/caption.py "Released footage shows plane crash at Miami International Airport"
     py modules/instagram/caption.py --accounts 4 "Released footage shows plane crash …"
+    py modules/instagram/caption.py --media clip.mp4 "Man walks past a bear"
 """
 
 import itertools
@@ -106,7 +123,7 @@ if _ROOT not in sys.path:
 
 from openai import OpenAI  # noqa: E402
 
-from shared import config  # noqa: E402
+from shared import config, vision  # noqa: E402
 from modules.instagram.graph import trim_caption  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -124,6 +141,34 @@ _client = (
 # the model is never the one that stops (see the module docstring), narrow
 # enough that OpenRouter's up-front credit reservation stays under a cent.
 MAX_TOKENS = 8000
+
+# The hashtag rules, shared by both system prompts below. One pool of eight,
+# dealt out per account by `pick_hashtags` — so the two prompts have to ask for
+# the same thing, or the dealing is done over a line never built for it.
+_HASHTAG_RULES = (
+    "HASHTAGS — one line, EXACTLY EIGHT, lowercase, space-separated, letters "
+    "and digits only inside each tag. Each tag is a plain ASCII \"#\" with the "
+    "word immediately after it — \"#madrid\", never a keycap emoji, never a "
+    "space after the hash, never a comma between tags. That line is a POOL: the accounts "
+    "publishing this story each draw a few tags from it, so eight genuinely "
+    "relevant ones are wanted here. If the story cannot carry eight, give "
+    "fewer — a tag that is not about this story is worse than a short line.\n"
+    "  Pick them RELEVANCE FIRST. Every tag must be something this particular "
+    "story is actually about — the place it happened, the institution or "
+    "public figure at its centre, its subject, its topic. A tag a reader "
+    "could not connect to the caption above it does not go in, however big "
+    "that tag is.\n"
+    "  Among the tags that pass that test, prefer the ones people actually "
+    "search and follow — the short, established, high-traffic form over the "
+    "long specific one nobody types (#ohio, not #ohiocourtsystem; #crime, not "
+    "#attemptedmurdercase). Never reach for size alone: a popular tag that is "
+    "not about this story is worse than one tag fewer.\n"
+    "  Order them most specific first — place, then the main actors or "
+    "subject, then the topic, then the general ones (#news, #breakingnews) "
+    "last; the first two are the tags every account keeps, so they must be "
+    "the two this story is most about. Tag places, institutions, countries "
+    "and public events — never a private individual's name.\n"
+)
 
 _SYSTEM = (
     "You write the Instagram captions for a news account. You are given one "
@@ -153,31 +198,116 @@ _SYSTEM = (
     "exclamation marks, no emoji, no rhetorical questions, no first person, "
     "no \"Breaking:\", no call to action, no \"follow us for more\", no links, "
     "no sign-off.\n"
-    "HASHTAGS — one line, EXACTLY EIGHT, lowercase, space-separated, letters "
-    "and digits only inside each tag. Each tag is a plain ASCII \"#\" with the "
-    "word immediately after it — \"#madrid\", never a keycap emoji, never a "
-    "space after the hash, never a comma between tags. That line is a POOL: the accounts "
-    "publishing this story each draw a few tags from it, so eight genuinely "
-    "relevant ones are wanted here. If the story cannot carry eight, give "
-    "fewer — a tag that is not about this story is worse than a short line.\n"
-    "  Pick them RELEVANCE FIRST. Every tag must be something this particular "
-    "story is actually about — the place it happened, the institution or "
-    "public figure at its centre, its subject, its topic. A tag a reader "
-    "could not connect to the caption above it does not go in, however big "
-    "that tag is.\n"
-    "  Among the tags that pass that test, prefer the ones people actually "
-    "search and follow — the short, established, high-traffic form over the "
-    "long specific one nobody types (#ohio, not #ohiocourtsystem; #crime, not "
-    "#attemptedmurdercase). Never reach for size alone: a popular tag that is "
-    "not about this story is worse than one tag fewer.\n"
-    "  Order them most specific first — place, then the main actors or "
-    "subject, then the topic, then the general ones (#news, #breakingnews) "
-    "last; the first two are the tags every account keeps, so they must be "
-    "the two this story is most about. Tag places, institutions, countries "
-    "and public events — never a private individual's name.\n\n"
+    + _HASHTAG_RULES +
+    "\nOutput ONLY the caption. No preamble, no explanation, no markdown, no "
+    "bold, no bullet points, no surrounding quotation marks, no numbered "
+    "citation markers, no source list at the end."
+)
+
+# The footage-first system prompt. What it says about faithfulness, register
+# and hashtags is the same; what changes is WHERE THE FACTS COME FROM, and that
+# is the whole point of the inversion:
+#
+#   The `:online` suffix is a search plugin that runs BEFORE the model sees the
+#   prompt, and it builds its query out of that prompt. Given a headline alone
+#   it searches those words and returns the most prominent story matching them
+#   — which is how a clip of one boxer published a caption about Floyd
+#   Mayweather, who is not the man in the video (2026-09). With shared/vision's
+#   report in the prompt, the query is built from what the media actually
+#   shows, and the search drops from being the source of the story to being a
+#   way of putting names and places on it.
+#
+# The second half of that bug was the SHAPE. "If the search returns little,
+# write ONE short paragraph and stop" is a sound rule when the headline is all
+# you have — it is what produced a headline followed by one paragraph restating
+# the headline. With the footage in hand there is always material, so the
+# escape hatch is gone and restating is banned outright.
+_SYSTEM_FOOTAGE = (
+    "You write the Instagram captions for a news account. You are given a "
+    "report of what one video or photo ACTUALLY SHOWS — written by someone who "
+    "watched it — and the headline its operator typed. Write the account's "
+    "caption for that media.\n\n"
+    "THE FOOTAGE IS GROUND TRUTH. The caption describes the media in front of "
+    "you and nothing else. Search the web to find out WHICH event this is and "
+    "to put names, places, dates and official responses on it — but the search "
+    "serves the footage, never the other way round. Anything it returns that "
+    "CONTRADICTS the report, or that belongs to a different event which merely "
+    "matches the headline's words, is the wrong story: drop it and write from "
+    "the footage alone. A search that finds nothing costs this caption "
+    "nothing — you have a full account of what happens, which is all a caption "
+    "needs. The headline does not outrank the report either; it is the "
+    "operator's guess at what the media shows, and where the two disagree the "
+    "report wins.\n\n"
+    "PICK THE REGISTER FROM WHAT YOU HAVE:\n"
+    "  A REPORTED EVENT — your search confirms a real news story behind this "
+    "media: a crash, a court ruling, a strike, an attack, an official "
+    "announcement. Write it as the news. Neutral wire-service prose, the way "
+    "Reuters or AP writes: who and what and where and when first, then the "
+    "supporting facts, the official response, what happens next.\n"
+    "  THE CLIP IS THE STORY — the media is the whole of it, the kind of thing "
+    "that circulates because of what it shows: an animal in a street, a near "
+    "miss, a rescue, a stunt, a crowd reacting. Then NARRATE IT, in the order "
+    "it happens — the situation, what happens, what the people around it do "
+    "and say, how it ends. Plain, calm, readable sentences, the way you would "
+    "tell somebody what they are about to watch. This is the commoner case and "
+    "it is not the lesser caption.\n\n"
+    "SHAPE — exactly this, and nothing else:\n"
+    "  line 1: the headline, reproduced as given.\n"
+    "  a blank line.\n"
+    "  two to four paragraphs, one to three sentences each, a blank line "
+    "between them.\n"
+    "  a blank line.\n"
+    "  last line: the hashtags.\n\n"
+    "NEVER RESTATE THE HEADLINE. The first paragraph ADVANCES the story: it "
+    "sets the scene and begins what happens. A first paragraph that says the "
+    "headline again in longer words is a failed caption, and so is one that "
+    "hedges behind \"footage shows\" or \"apparently\" instead of telling the "
+    "reader what happened. You have watched it, through the report — write "
+    "what happened.\n\n"
+    "FAITHFUL — every fact, name, number, date and quote comes from the "
+    "report, from the headline, or from a search result that genuinely matches "
+    "the report. Invent nothing. Do not name a person the report does not "
+    "name, however familiar somebody looks in your search results — that "
+    "mistake is the reason you are given the report at all. Do not state a "
+    "city, a country or a date the report leaves open: \"a residential "
+    "street\" stays a residential street. Never give a death toll, a casualty "
+    "count, a suspect's name or a cause as settled when your sources "
+    "disagree — attribute it (\"police said\") or leave it out.\n"
+    "REGISTER — no hype, no editorialising, no adjective doing an opinion's "
+    "work, no exclamation marks, no emoji, no rhetorical questions, no first "
+    "person, no \"Breaking:\", no call to action, no \"follow us for more\", "
+    "no links, no sign-off. Narrating a clip is still neutral prose; it is "
+    "simply prose about what happens rather than about what was reported.\n"
+    + _HASHTAG_RULES +
+    "  A clip that is the story carries the tags people browse it under — "
+    "#caughtoncamera, #viralvideo, #wildlife — beside the ones naming what is "
+    "in it. Those are legitimate picks here, and they are not picks for a "
+    "reported news event.\n\n"
+    "Here is the shape a clip-is-the-story caption has. Follow its FORM — how "
+    "it opens, how it moves, how plainly it is written — and never its "
+    "content:\n\n"
+    "Elderly man doesn't notice a bear walking right beside him\n\n"
+    "An elderly man was walking down the street when a bear appeared just a "
+    "few feet away from him.\n\n"
+    "People nearby began shouting and warning him to turn around, but he "
+    "initially didn't hear them. Eventually, he realized what was happening, "
+    "turned around and spotted the bear.\n\n"
+    "He then quickly moved away from the animal as people continued warning "
+    "him.\n\n"
+    "#bear #usa #wildlife #caughtoncamera #viralvideo #news\n\n"
     "Output ONLY the caption. No preamble, no explanation, no markdown, no "
     "bold, no bullet points, no surrounding quotation marks, no numbered "
     "citation markers, no source list at the end."
+)
+
+# The footage report and the headline, clearly separated — the report first,
+# because it is what the caption is written from and what the search is run
+# against; the headline after it, labelled as the operator's, so the model is
+# never invited to treat it as the brief.
+_USER_FOOTAGE = (
+    "{footage}\n\n"
+    "THE OPERATOR'S HEADLINE: {headline}\n\n"
+    "Write the caption."
 )
 
 _VARIANT_INTRO = (
@@ -491,8 +621,20 @@ def _clean(text: str) -> str:
     return out.strip()
 
 
-def expand(headline: str, model: str | None = None) -> str:
+def expand(headline: str, footage: dict | None = None,
+           model: str | None = None) -> str:
     """Expand `headline` into a full Instagram caption with hashtags.
+
+    `footage` is shared/vision.describe's report of what the media actually
+    shows. Given one, the caption is written FROM THE MEDIA and the search is
+    demoted to corroboration — which is the whole point, since `:online` builds
+    its query from this prompt and a headline-only prompt searches the
+    headline's words rather than the story in front of it.
+
+    Falsy `footage` — the analysis was off, failed, or was never run — sends
+    the identical request this function sent before any of it existed. Vision
+    is best-effort by construction; a failed analysis must not change the
+    caption that gets written, only how well informed it is.
 
     Returns `headline` unchanged when expansion isn't wanted or possible:
       - empty headline,
@@ -511,13 +653,20 @@ def expand(headline: str, model: str | None = None) -> str:
                     "as the Instagram caption")
         return headline
 
+    if footage:
+        system = _SYSTEM_FOOTAGE
+        user = _USER_FOOTAGE.format(footage=vision.as_prompt(footage),
+                                    headline=headline)
+    else:
+        system, user = _SYSTEM, headline
+
     try:
         resp = _client.chat.completions.create(
             model=model or config.IG_CAPTION_MODEL,
             max_tokens=MAX_TOKENS,
             messages=[
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": headline},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
         )
     # Broader than the translator's `except APIError`: a gateway fails outside
@@ -682,10 +831,22 @@ if __name__ == "__main__":
     ap.add_argument("--brands", default="", metavar="A,B,C",
                     help="real brand names instead of --accounts, each writing "
                          "in its own brands/<name>/style.json voice")
+    ap.add_argument("--media", default="", metavar="PATH",
+                    help="the clip or photo this caption is for — analysed "
+                         "first, so the search is driven by what it shows "
+                         "instead of by the headline's words")
     args = ap.parse_args()
 
     headline = " ".join(args.headline)
-    shared = expand(headline, model=args.model)
+    footage = vision.describe(args.media, headline) if args.media else {}
+    if args.media:
+        print("--- what the media shows ---")
+        print(vision.as_prompt(footage) or "(no analysis — see the log above)")
+        if footage and not footage["headline_ok"]:
+            print(f"\n!! headline may not match: {footage['headline_note']}")
+            print(f"   suggested: {footage['headline_suggestion']}")
+        print()
+    shared = expand(headline, footage, model=args.model)
     if args.brands:
         from shared import branding
         fake = [{"name": n, "lang": args.lang,
