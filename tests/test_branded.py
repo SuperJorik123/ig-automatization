@@ -191,3 +191,85 @@ def test_platforms_include_ig_for_video_and_photo_renders():
 def test_brand_without_ig_slot_has_no_ig_platform():
     plats = branded.platforms_for([_render(_brand())], 60)
     assert "ig" not in [p["platform"] for p in plats]
+
+
+# --- operator replies: headline vs caption ---------------------------------
+#
+# A reply to an open picker used to mean one thing: replace the headline. The
+# operator can now hand the bot the Instagram caption itself, which is the one
+# input the pipeline could never produce for them.
+
+def test_a_plain_reply_is_still_the_headline():
+    assert branded.parse_reply("Man walks past a bear") == \
+        ("text", "Man walks past a bear")
+
+
+def test_a_caption_prefix_sets_the_caption():
+    field, value = branded.parse_reply("caption: An elderly man was walking")
+    assert field == "caption"
+    assert value == "An elderly man was walking"
+
+
+def test_the_prefix_is_case_and_space_insensitive():
+    for raw in ("Caption: x", "CAPTION:x", "caption :  x", "  caption:   x  "):
+        assert branded.parse_reply(raw) == ("caption", "x"), raw
+
+
+def test_a_caption_keeps_its_own_line_breaks():
+    """A caption is paragraphs — only the prefix is stripped, never the shape."""
+    body = "First paragraph.\n\nSecond paragraph.\n\n#bear #usa"
+    assert branded.parse_reply("caption:\n" + body) == ("caption", body)
+
+
+def test_an_empty_caption_reply_clears_the_override():
+    """`caption:` alone is how the operator takes their text back off and
+    lets the pipeline write one again."""
+    assert branded.parse_reply("caption:") == ("caption", "")
+    assert branded.parse_reply("caption:   ") == ("caption", "")
+
+
+def test_prose_merely_containing_the_word_is_a_headline():
+    assert branded.parse_reply("Caption contest winner announced")[0] == "text"
+
+
+# --- the footage lines on the picker ---------------------------------------
+
+def _footage(ok=True, **kw):
+    out = {"summary": "A man walks past a bear.", "beats": [], "audible": "",
+           "setting": "", "headline_ok": ok, "headline_note": "",
+           "headline_suggestion": ""}
+    out.update(kw)
+    return out
+
+
+def test_no_footage_adds_no_lines():
+    assert branded.footage_lines({}) == []
+
+
+def test_a_matching_headline_shows_only_what_was_seen():
+    lines = branded.footage_lines(_footage())
+    assert len(lines) == 1
+    assert lines[0].startswith("👁")
+    assert "A man walks past a bear." in lines[0]
+
+
+def test_a_mismatched_headline_warns_and_suggests():
+    lines = branded.footage_lines(_footage(
+        ok=False, headline_note="the man in the clip is not the one named",
+        headline_suggestion="Elderly man doesn't notice a bear beside him"))
+    assert any(l.startswith("⚠️") for l in lines)
+    joined = "\n".join(lines)
+    assert "not the one named" in joined
+    assert "Elderly man doesn't notice a bear beside him" in joined
+
+
+def test_a_mismatch_without_a_suggestion_still_warns():
+    lines = branded.footage_lines(_footage(ok=False, headline_note="unrelated"))
+    assert any(l.startswith("⚠️") for l in lines)
+
+
+def test_a_long_summary_is_trimmed_for_the_picker():
+    """Telegram caps a message at 4096 and the picker already shows the
+    headline — the analysis is an orientation line, not the report."""
+    lines = branded.footage_lines(_footage(summary="word " * 400))
+    assert len(lines[0]) < 400

@@ -29,6 +29,7 @@ Callback namespace "b:" (the manual picker owns t:/y:/e:, asks own r:):
 """
 
 import os
+import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -37,6 +38,60 @@ from modules.youtube.shorts_format import MAX_SHORT_S
 
 # (brand-dict key, picker label) — the order platforms appear in the picker.
 PLATFORMS = (("tg", "TG"), ("yt", "YT"), ("tw", "X"), ("ig", "IG"))
+
+# A reply to an open picker used to mean exactly one thing: replace the
+# headline. This prefix is how the operator hands over the Instagram caption
+# itself — the one input the pipeline cannot produce for them, and the fastest
+# way to fix a caption they can already see is wrong. Optional space before the
+# colon, any case; what follows keeps its own line breaks, because a caption is
+# paragraphs and only the prefix is being stripped.
+_CAPTION_PREFIX = re.compile(r"^\s*caption\s*:[ \t]*\r?\n?", re.IGNORECASE)
+
+
+def parse_reply(text: str) -> tuple:
+    """A picker reply as (field, value): "caption" or "text".
+
+    "caption:" with nothing after it is not a mistake — it is how the operator
+    takes their own text back off and lets the pipeline write one again, so it
+    returns an empty caption rather than falling through to the headline.
+    """
+    if _CAPTION_PREFIX.match(text or ""):
+        return "caption", _CAPTION_PREFIX.sub("", text, count=1).strip()
+    return "text", (text or "").strip()
+
+
+# The picker already carries the headline and the operator is reading it on a
+# phone — what the analysis owes them here is one orientation line, not the
+# report. The full thing goes into the caption prompt either way.
+_SUMMARY_CHARS = 300
+
+
+def footage_lines(footage: dict) -> list:
+    """The 👁 / ⚠️ lines a picker shows for a footage analysis.
+
+    Empty for an analysis that didn't happen or didn't come back — vision is
+    best-effort, and a picker that says nothing about it looks exactly like the
+    picker that shipped before it existed.
+
+    The warning is keyed on `headline_ok` alone. A model that suggests a
+    rephrasing of a headline it just approved must not raise a warning on it:
+    the operator who learns the ⚠️ is noise stops reading it on the post where
+    it is right.
+    """
+    if not footage:
+        return []
+    summary = footage.get("summary", "").strip()
+    if len(summary) > _SUMMARY_CHARS:
+        summary = summary[:_SUMMARY_CHARS].rstrip() + "…"
+    lines = [f"👁 {summary}"]
+    if not footage.get("headline_ok", True):
+        note = footage.get("headline_note", "").strip()
+        lines.append("⚠️ headline may not match the media"
+                     + (f" — {note}" if note else ""))
+        suggestion = footage.get("headline_suggestion", "").strip()
+        if suggestion:
+            lines.append(f"   suggested: {suggestion}")
+    return lines
 
 
 def available_brands(brands: list) -> list:

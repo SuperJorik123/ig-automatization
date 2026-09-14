@@ -102,7 +102,7 @@ from modules.twitter import publisher as tw_publisher  # noqa: E402
 from modules.telegram import branded, groups, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
-from shared import branding, photo_card, public_media  # noqa: E402
+from shared import branding, photo_card, public_media, vision  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -210,13 +210,35 @@ def _all_photos(media: list) -> bool:
     return bool(media) and all(m["type"] == "photo" for m in media)
 
 
+# Shown wherever the operator can still act on it. Instagram is the only
+# platform that publishes more than the headline, so this is the only platform
+# the reply affects — and it is the one input the pipeline cannot produce for
+# them, which is why it is advertised rather than left as a known incantation.
+_CAPTION_HINT = "↩️ reply `caption: …` to write the Instagram caption yourself"
+
+
+def _caption_lines(state: dict) -> list:
+    """The operator's own Instagram caption, echoed back so it is never
+    invisible. Shown on every picker that has one, whether or not that picker
+    is where it was typed."""
+    text = (state.get("caption") or "").strip()
+    if not text:
+        return []
+    preview = text if len(text) <= 900 else text[:900] + "…"
+    return ["✍️ your IG caption:\n" + preview]
+
+
 def _gate_text(state: dict) -> str:
     """Body of the as-is / brand gate, for both the video and the photo kind."""
     if state.get("gate_kind") == "photo":
         head = "Create a news card from these photos, or post them as-is?"
     else:
         head = "Brand this clip, or post it as-is?"
-    return head + (f"\n\n📝 {state['text']}" if state["text"] else "")
+    lines = [head]
+    if state["text"]:
+        lines.append(f"📝 {state['text']}")
+    lines += _caption_lines(state)
+    return "\n\n".join(lines)
 
 
 def _gate_markup(state: dict) -> InlineKeyboardMarkup:
@@ -352,7 +374,14 @@ async def _gate(msg, text: str, media: list, files: list | None = None,
 
 def _cleanup(state: dict) -> None:
     """Remove files downloaded for this picker (URL posts). file_id-based
-    media has nothing on disk."""
+    media has nothing on disk.
+
+    Cancels a footage analysis still in flight first: its download would land
+    in a directory this is about to empty, and its edit would land on a picker
+    that no longer exists."""
+    task = state.get("vision_task")
+    if task is not None and not task.done():
+        task.cancel()
     for path in state.get("files", ()):
         try:
             os.remove(path)
@@ -433,21 +462,33 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     _track(msg)  # the operator's own messages get wiped weekly too
     text = msg.caption or msg.text or ""
 
-    # Reply to an open picker = replace that post's caption (any post type).
+    # Reply to an open picker = replace that post's headline, or — behind a
+    # "caption:" prefix — hand over the Instagram caption itself.
     reply = msg.reply_to_message
     if reply is not None and reply.message_id in _pending and text.strip():
         state = _pending[reply.message_id]
-        state["text"] = text.strip()
-        state["cap_src"] = "edited"
+        field, value = branded.parse_reply(text)
+        if field == "caption":
+            state["caption"] = value
+        else:
+            state["text"] = value
+            state["cap_src"] = "edited"
         mode = state.get("mode")
         if mode == "gate":
             body = _gate_text(state)
             markup = _gate_markup(state)
         elif mode == "brand":
             body = _brand_prompt_text(state)
-            markup = branded.brand_keyboard(state["brands"], state["sel_brands"])
+            markup = _brand_markup(state)
         elif mode == "publish":
-            return  # headline is already burned into the renders
+            # The headline is burned into the renders and can't be changed
+            # now — but the Instagram caption is written at publish time, so a
+            # caption reply is still worth taking this late.
+            if field != "caption":
+                return
+            body = _publish_prompt_text(state)
+            markup = branded.platform_keyboard(state["platforms"],
+                                               state["sel_platforms"])
         else:
             body = _prompt_text(state)
             markup = _keyboard(state)
@@ -603,11 +644,34 @@ async def _post_to_twitter(bot, text: str, media: list, dests: list):
 
 
 def _brand_prompt_text(state: dict) -> str:
+    """Brand-picker body: the headline, what the footage analysis saw, and the
+    two things a reply can do.
+
+    The analysis lands here rather than at publish because THIS is the last
+    moment the headline can still be changed — a minute later it is burned into
+    the banner of every render."""
     head = state["text"].strip()
     lines = ["Brand for which brands?"]
     lines.append(f"📝 {head}" if head
                  else "⚠️ no headline yet — reply to this message with it")
-    lines.append("↩️ reply to this message to replace the headline")
+    if state.get("vision_task") is not None and "footage" not in state:
+        lines.append("👁 watching the clip…")
+    else:
+        lines += branded.footage_lines(state.get("footage") or {})
+    lines += _caption_lines(state)
+    lines.append("↩️ reply to this message to replace the headline\n"
+                 + _CAPTION_HINT)
+    return "\n\n".join(lines)
+
+
+def _publish_prompt_text(state: dict) -> str:
+    """Publish-picker body. The headline is burned into the renders by now, but
+    the Instagram caption is still written at publish time — so this is the
+    last place a `caption:` reply can land, and it says so."""
+    lines = ["Publish to which platforms?"]
+    lines += _caption_lines(state)
+    if any(p["platform"] == "ig" for p in state.get("platforms", ())):
+        lines.append(_CAPTION_HINT)
     return "\n\n".join(lines)
 
 
@@ -635,6 +699,78 @@ def _brand_markup(state: dict) -> InlineKeyboardMarkup:
                                   state.get("custom_brands", False))
 
 
+# How long a render will wait for an analysis that is still going. The call
+# starts when the brand picker opens and the operator then has to read it and
+# tick brands, so in practice it has long since landed; this is the ceiling for
+# a gateway that has stopped answering, not an expected wait.
+_VISION_WAIT_S = 90
+
+
+async def _watch_media(bot, state: dict, message) -> None:
+    """Analyse this post's media in the background and put what it saw on the
+    brand picker.
+
+    Started when the picker opens, because THAT is the last moment the headline
+    can still be corrected — after the render it is burned into the banner. It
+    is also why this does the download itself rather than waiting for the
+    render to: the file has to be fetched anyway, and fetching it here buys the
+    operator the analysis while they are still choosing brands.
+
+    Never raises and never blocks anything: a failure leaves state["footage"]
+    empty, which every consumer already treats as "no analysis".
+    """
+    try:
+        if state.get("gate_kind") == "photo" or state.get("card"):
+            paths = await _ensure_local_photos(bot, state)
+            path = paths[0] if paths else ""
+        else:
+            path = await _ensure_local_video(bot, state)
+        footage = await asyncio.to_thread(vision.describe, path, state["text"])
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.error("footage analysis failed: %s — continuing without one", exc)
+        footage = {}
+
+    state["footage"] = footage
+    # The operator may have moved on (rendered, cancelled) while this ran —
+    # only refresh a picker that is still the brand picker.
+    if state.get("mode") != "brand":
+        return
+    try:
+        await message.edit_text(_brand_prompt_text(state),
+                                reply_markup=_brand_markup(state))
+    except Exception:  # message deleted, or unchanged text
+        pass
+
+
+def _start_watching(context, state: dict, message) -> None:
+    """Kick off _watch_media once per post, tracked so the render can wait."""
+    if state.get("vision_task") is not None or not config.IG_VISION_ENABLED:
+        return
+    state["vision_task"] = asyncio.create_task(
+        _watch_media(context.bot, state, message))
+
+
+async def _await_footage(state: dict) -> dict:
+    """The analysis, waiting for it only if it is somehow still running.
+
+    Bounded by _VISION_WAIT_S: a caption without footage is the behaviour that
+    shipped for months, while a render that never starts is a post the operator
+    has to chase. The task is cancelled on a timeout so it can't later edit a
+    picker that has moved on.
+    """
+    task = state.get("vision_task")
+    if task is not None and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), _VISION_WAIT_S)
+        except Exception:
+            log.warning("footage analysis did not finish in %ss — rendering "
+                        "without it", _VISION_WAIT_S)
+            task.cancel()
+    return state.get("footage") or {}
+
+
 async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
     """Taps on the gate / brand picker / publish picker ("b:<verb>")."""
     if verb == "noop":
@@ -657,6 +793,7 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         state["sel_brands"] = {i for i, b in enumerate(state["brands"])
                                if b["has_logo"]}
         state["custom_brands"] = False
+        _start_watching(context, state, q.message)
         await q.edit_message_text(_brand_prompt_text(state),
                                   reply_markup=_brand_markup(state))
         return
@@ -677,6 +814,7 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         state["sel_brands"] = {i for i, b in enumerate(state["brands"])
                                if b["has_logo"]}
         state["custom_brands"] = False
+        _start_watching(context, state, q.message)
         await q.edit_message_text(_brand_prompt_text(state),
                                   reply_markup=_brand_markup(state))
         return
@@ -753,6 +891,9 @@ async def _do_render(q, context, state: dict) -> None:
     brands = [state["brands"][i] for i in sorted(state["sel_brands"])]
     await q.edit_message_text(
         "⏳ rendering " + ", ".join(b["name"] for b in brands) + " …")
+    # Settle the analysis before the headline is burned in — normally already
+    # done, since it started when this picker opened.
+    await _await_footage(state)
 
     try:
         src = await _ensure_local_video(context.bot, state)
@@ -888,7 +1029,7 @@ async def _do_render(q, context, state: dict) -> None:
         # send here is caught below with the state (and its files) still
         # intact to clean up, instead of orphaning everything silently.
         prompt = _track(await q.message.chat.send_message(
-            "Publish to which platforms?",
+            _publish_prompt_text(state),
             reply_markup=branded.platform_keyboard(state["platforms"], set())))
     except Exception as exc:
         log.error("brand publish-picker handoff failed: %s", exc)
@@ -934,6 +1075,7 @@ async def _do_render_card(q, context, state: dict) -> None:
     brands = [state["brands"][i] for i in sorted(state["sel_brands"])]
     await q.edit_message_text(
         "⏳ composing " + ", ".join(b["name"] for b in brands) + " …")
+    await _await_footage(state)
 
     try:
         photos = await _ensure_local_photos(context.bot, state)
@@ -1008,7 +1150,7 @@ async def _do_render_card(q, context, state: dict) -> None:
             _cleanup(state)
             return
         prompt = _track(await q.message.chat.send_message(
-            "Publish to which platforms?",
+            _publish_prompt_text(state),
             reply_markup=branded.platform_keyboard(state["platforms"], set())))
     except Exception as exc:
         log.error("card publish-picker handoff failed: %s", exc)
@@ -1026,7 +1168,8 @@ async def _do_render_card(q, context, state: dict) -> None:
     _pending[prompt.message_id] = state
 
 
-async def _ig_captions(source_text: str, pairs: list) -> dict[str, str]:
+async def _ig_captions(source_text: str, pairs: list, footage: dict | None = None,
+                       manual: str = "") -> dict[str, str]:
     """The Instagram caption for each brand, keyed by brand NAME.
 
     Instagram is the only platform here that posts more than the headline (see
@@ -1049,6 +1192,17 @@ async def _ig_captions(source_text: str, pairs: list) -> dict[str, str]:
     what makes it recognisable rather than merely different. A brand with no
     style file behaves exactly as it did before styles existed.
 
+    `footage` is shared/vision's report of what the media shows — it is what
+    makes the search corroborate the clip instead of chasing the headline's
+    words, and an empty one simply expands from the headline as before.
+
+    `manual` is a caption the OPERATOR typed (a `caption:` reply). It is used
+    as the shared caption verbatim and NOTHING IS BOUGHT — no analysis, no
+    search. What still runs is the per-account layer: their text in each
+    brand's voice, with each brand's own hashtags and its own tag. Publishing
+    one operator caption to thirteen accounts character for character would
+    reintroduce the duplicate content that layer exists to prevent.
+
     Never raises: an empty dict means every IG pair falls back to its headline,
     which is what shipped before any of this existed, and a single failed
     rewrite falls back to the shared caption on its own.
@@ -1057,10 +1211,12 @@ async def _ig_captions(source_text: str, pairs: list) -> dict[str, str]:
                    style=branding.load_writing_style(
                        os.path.dirname(p["render"]["brand"]["logo"])))
               for p in pairs if p["platform"] == "ig"]
-    if not brands or not (source_text or "").strip():
+    manual = (manual or "").strip()
+    if not brands or not (manual or (source_text or "").strip()):
         return {}
     try:
-        full = await asyncio.to_thread(ig_caption.expand, source_text)
+        full = manual or await asyncio.to_thread(
+            ig_caption.expand, source_text, footage or {})
         out = {}
         for entry in ig_caption.plan(brands, ig_caption.seed_for(source_text)):
             lang = entry["lang"]
@@ -1093,8 +1249,11 @@ async def _do_publish(q, context, state: dict) -> None:
     await q.edit_message_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
 
-    # Before the loop: one search-backed expansion shared by every IG pair.
-    ig_caps = await _ig_captions(state.get("text", ""), pairs)
+    # Before the loop: one footage-backed expansion shared by every IG pair —
+    # or the operator's own caption, which buys nothing at all.
+    ig_caps = await _ig_captions(state.get("text", ""), pairs,
+                                 state.get("footage") or {},
+                                 state.get("caption", ""))
 
     lines = []
     for p in pairs:
