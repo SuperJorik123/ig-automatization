@@ -53,9 +53,19 @@ the wording varies per account:
              `lang` it also translates, so a foreign-language account's variant
              IS its translation — one call, not two.
   `pick_hashtags`
-             pure: each account keeps the pool's two most specific tags and
-             rotates three more out of the tail. No tokens, and no two accounts
-             carry the same tag line.
+             pure: each account keeps the pool's two most specific tags,
+             rotates a couple more out of the tail, and signs the line with its
+             OWN tag — #frontiva24 on frontiva24, #europamonitor on
+             europamonitor. No tokens, and no two accounts carry the same tag
+             line.
+
+THE ACCOUNT'S OWN TAG IS MANDATORY (`with_brand_tag`), on every caption it
+publishes and not only on the ones that came back with a pool — a failed
+expansion falls back to the bare headline, and that gets a tag line made for
+it. It is built from the BRAND NAME rather than the Instagram handle, because
+a handle may carry a dot ("vestra.24") and Instagram ends a tag at the first
+character that is not a letter or a digit. It takes the last of the five
+slots rather than adding a sixth.
 
 The angle rotates by POST as well as by account (`seed_for`), so an account
 does not open every one of its posts the same way.
@@ -273,6 +283,13 @@ KEEP_HASHTAGS = 2
 # cheapest way to be coprime with most list lengths.
 _COMBO_STEP = 7
 
+# Everything Instagram does not index inside a tag. A hashtag is letters and
+# digits only — the dot in the handle "vestra.24" ends the tag at "#vestra",
+# which is why the account's tag is built from the BRAND NAME (the directory
+# under brands/, which is already the flat form: vestra24, frontiva24,
+# dailynews) and not from `instagram.account` in its credentials file.
+_TAG_CHARS = re.compile(r"[^a-z0-9]")
+
 # The rewrite directives `plan` deals out, one per account after the first of
 # its language. Each forces a DIFFERENT STRUCTURE rather than a synonym pass:
 # two captions that open on the same sentence and run the same facts in the
@@ -336,39 +353,88 @@ def _cap_hashtags(text: str, limit: int = POOL_HASHTAGS) -> str:
     return "\n".join(lines)
 
 
-def pick_hashtags(text: str, offset: int, limit: int = MAX_HASHTAGS,
-                  keep: int = KEEP_HASHTAGS) -> str:
-    """One account's share of the caption's hashtag pool.
+def brand_tag(brand: str) -> str:
+    """The account's OWN hashtag — "frontiva24" -> "#frontiva24".
 
-    The first `keep` tags are what the story is about, and every account keeps
-    them (the prompt orders the pool most-specific-first); the rest of the line
-    is a window of `limit - keep` tags rotated `offset` places into the tail, so
-    consecutive offsets give different tag lines. Pure, deterministic and free —
-    the cheap half of not looking like the same post on six accounts.
-
-    Returns `text` untouched when there is no hashtag line, or when the line is
-    already within `limit`: dealing five out of five could only drop a relevant
-    tag, which costs more reach than the duplicate line does.
+    Built from the brand name, which is the directory under brands/ and the
+    filename in credentials/brands/, not from the Instagram handle: a handle
+    may carry a dot ("vestra.24", "daily.news.co") and Instagram ends a tag at
+    the first character that is not a letter or a digit. Returns "" for a brand
+    whose name has nothing taggable in it at all.
     """
+    slug = _TAG_CHARS.sub("", (brand or "").strip().lower())
+    return f"#{slug}" if slug else ""
+
+
+def with_brand_tag(text: str, brand: str, limit: int = MAX_HASHTAGS) -> str:
+    """`text` with this account's own tag last on its hashtag line.
+
+    MANDATORY, which is why it is a function of its own and not a branch inside
+    `pick_hashtags`: every caption an account publishes carries the account's
+    tag, including the ones that never went near the pool — the bare headline
+    a failed expansion falls back to gets a tag line made for it.
+
+    The tag is appended rather than prepended (it is a signature, not what the
+    story is about), it is never duplicated if the model already produced it,
+    and it is inside `limit`: a line already at the ceiling loses its LAST
+    story tag, which is its least specific one, never its head.
+    """
+    tag = brand_tag(brand)
+    if not tag or not (text or "").strip():
+        return text
     lines = text.split("\n")
     i = _tag_line_index(lines)
     if i < 0:
-        return text
-    tags = lines[i].strip().split()
-    if len(tags) <= limit:
-        return text
+        return text.rstrip() + "\n\n" + tag
+    tags = [t for t in lines[i].split() if t.lower() != tag]
+    if len(tags) >= limit:
+        tags = tags[:max(limit - 1, 0)]
+    lines[i] = " ".join(tags + [tag])
+    return "\n".join(lines)
+
+
+def pick_hashtags(text: str, offset: int, limit: int = MAX_HASHTAGS,
+                  keep: int = KEEP_HASHTAGS, brand: str = "") -> str:
+    """One account's share of the caption's hashtag pool, plus its own tag.
+
+    The first `keep` tags are what the story is about, and every account keeps
+    them (the prompt orders the pool most-specific-first); the rest of the line
+    is a window of tags rotated `offset` places into the tail, so consecutive
+    offsets give different tag lines. Pure, deterministic and free — the cheap
+    half of not looking like the same post on six accounts.
+
+    `brand` takes the LAST of the `limit` slots for the account's own tag
+    (`with_brand_tag`), so the story is dealt one tag fewer rather than the
+    post carrying a sixth. Without a brand the line is exactly what it was.
+
+    Returns `text` with only the brand tag added when there is no hashtag line,
+    or when the line already fits: dealing four out of four could only drop a
+    relevant tag, which costs more reach than the duplicate line does.
+    """
+    tag = brand_tag(brand)
+    room = limit - 1 if tag else limit
+    lines = text.split("\n")
+    i = _tag_line_index(lines)
+    if i < 0:
+        return with_brand_tag(text, brand, limit)
+    tags = [t for t in lines[i].strip().split() if t.lower() != tag]
+    if len(tags) <= room:
+        return with_brand_tag(text, brand, limit)
+    if room <= keep:
+        lines[i] = " ".join(tags[:max(room, 0)])
+        return with_brand_tag("\n".join(lines), brand, limit)
     head, tail = tags[:keep], tags[keep:]
     # Every COMBINATION of the tail, not a rotating window: a window of three
     # over a tail of six wraps after six accounts, and there are thirteen
     # brands. C(6,3) is twenty distinct lines, none of them repeating a tag.
-    combos = list(itertools.combinations(tail, limit - len(head)))
+    combos = list(itertools.combinations(tail, room - len(head)))
     # Neighbouring offsets are neighbouring accounts on the same post, and
     # lexicographic neighbours share two tags out of three — step through the
     # list by a coprime stride instead, which visits every combination exactly
     # once but puts consecutive accounts far apart in it.
     step = _COMBO_STEP if math.gcd(_COMBO_STEP, len(combos)) == 1 else 1
     lines[i] = " ".join(head + list(combos[int(offset) * step % len(combos)]))
-    return "\n".join(lines)
+    return with_brand_tag("\n".join(lines), brand, limit)
 
 
 # What a model returns when it means "#madrid" and gets it wrong. Seen live on
@@ -636,5 +702,5 @@ if __name__ == "__main__":
             print(f"--- {entry['name']}: "
                   f"{'its own voice' if entry['style'] else entry['angle'] or 'the shared caption'}"
                   f" ---")
-        print(pick_hashtags(text, entry["offset"]))
+        print(pick_hashtags(text, entry["offset"], brand=entry["name"]))
         print()

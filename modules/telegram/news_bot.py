@@ -1076,7 +1076,8 @@ async def _ig_captions(source_text: str, pairs: list) -> dict[str, str]:
                     translator.translate, full, lang, config.SOURCE_LANG)
             else:
                 text = full
-            out[entry["name"]] = ig_caption.pick_hashtags(text, entry["offset"])
+            out[entry["name"]] = ig_caption.pick_hashtags(
+                text, entry["offset"], brand=entry["name"])
         return out
     except Exception:
         log.exception("instagram caption expansion failed — posting headlines")
@@ -1135,9 +1136,12 @@ async def _do_publish(q, context, state: dict) -> None:
                                else ig_graph.publish_reel)
                     # This brand's own caption — its own wording and its own
                     # hashtags; the bare headline whenever expansion was off or
-                    # didn't come back.
+                    # didn't come back. Either way it is signed with the
+                    # account's own tag, which every post carries.
+                    ig_caption_text = ig_caps.get(b["name"]) or \
+                        ig_caption.with_brand_tag(r["headline"], b["name"])
                     result = await asyncio.to_thread(
-                        publish, url, ig_caps.get(b["name"]) or r["headline"],
+                        publish, url, ig_caption_text,
                         b["ig"])
                 finally:
                     drop()

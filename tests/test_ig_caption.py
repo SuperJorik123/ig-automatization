@@ -284,6 +284,82 @@ def test_pick_hashtags_ignores_prose_that_merely_mentions_a_tag():
 
 
 # --------------------------------------------------------------------------- #
+# per-account variants: the account's own tag                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_brand_tag_is_the_brand_name():
+    assert caption.brand_tag("frontiva24") == "#frontiva24"
+    assert caption.brand_tag("europamonitor") == "#europamonitor"
+
+
+def test_brand_tag_drops_what_instagram_would_not_index():
+    """A handle may carry a dot ("vestra.24") and a tag ends at the first
+    character that is not a letter or a digit — so the tag is built flat."""
+    assert caption.brand_tag("Vestra.24") == "#vestra24"
+    assert caption.brand_tag("daily news co") == "#dailynewsco"
+    assert caption.brand_tag("  ") == ""
+
+
+def test_the_account_tag_is_last_and_inside_the_five():
+    tags = caption.pick_hashtags(POOL, 0, brand="frontiva24").splitlines()[-1].split()
+    assert len(tags) == caption.MAX_HASHTAGS
+    assert tags[-1] == "#frontiva24"
+    # The story still keeps its two most specific tags; the brand tag takes a
+    # slot off the rotating tail, never the head.
+    assert tags[:2] == ["#miami", "#florida"]
+
+
+def test_every_account_signs_its_own_line():
+    lines = [caption.pick_hashtags(POOL, i, brand=b).splitlines()[-1]
+             for i, b in enumerate(("altenews", "atlasnews", "frontiva24",
+                                    "europamonitor", "wswire", "vestra24"))]
+    assert len(set(lines)) == len(lines)
+    for b, line in zip(("altenews", "atlasnews", "frontiva24",
+                        "europamonitor", "wswire", "vestra24"), lines):
+        assert line.endswith(f"#{b}")
+
+
+def test_a_short_line_still_gets_the_account_tag():
+    """Nothing to deal is not a reason to publish an unsigned caption."""
+    short = "Headline\n\nA paragraph.\n\n#ohio #crime"
+    out = caption.pick_hashtags(short, 4, brand="altenews")
+    assert out.splitlines()[-1] == "#ohio #crime #altenews"
+
+
+def test_a_caption_with_no_hashtag_line_gets_one():
+    """The bare headline a failed expansion falls back to — the account tag is
+    mandatory, so a tag line is made for it."""
+    out = caption.with_brand_tag("Five killed in Miami crash", "atlasnews")
+    assert out == "Five killed in Miami crash\n\n#atlasnews"
+
+
+def test_the_account_tag_is_never_doubled():
+    line = "Headline\n\nA paragraph.\n\n#miami #frontiva24 #usa"
+    out = caption.with_brand_tag(line, "frontiva24").splitlines()[-1]
+    assert out == "#miami #usa #frontiva24"
+
+
+def test_a_full_line_loses_its_least_specific_tag_not_its_head():
+    line = ("Headline\n\nA paragraph.\n\n"
+            "#miami #florida #planecrash #aviation #news")
+    out = caption.with_brand_tag(line, "wswire").splitlines()[-1].split()
+    assert out == ["#miami", "#florida", "#planecrash", "#aviation", "#wswire"]
+
+
+def test_no_brand_leaves_the_line_exactly_as_it_was():
+    assert caption.pick_hashtags(POOL, 3, brand="") == caption.pick_hashtags(POOL, 3)
+    assert caption.with_brand_tag(POOL, "") == POOL
+
+
+def test_the_account_tag_never_lands_in_prose():
+    body = ("Headline\n\nThe campaign used #ohio and six other tags across a "
+            "dozen posts this week, according to the filing.")
+    assert caption.with_brand_tag(body, "altenews") == \
+        body + "\n\n#altenews"
+
+
+# --------------------------------------------------------------------------- #
 # per-account variants: the plan                                              #
 # --------------------------------------------------------------------------- #
 
