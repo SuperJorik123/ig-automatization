@@ -760,3 +760,14 @@ def test_disabled_skips_the_call_even_with_footage(on, monkeypatch):
     assert caption.expand("Man walks past bear", footage=FOOTAGE) == \
         "Man walks past bear"
     assert fake.calls == []
+
+
+def test_the_footage_prompt_bans_video_description(on, monkeypatch):
+    """The report is a witness account, not a text to paraphrase. Transcribing
+    it gives "the player in the purple shirt" and "a high-pitched noise is
+    heard" — screen language, in a caption read as a story."""
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Man walks past bear", footage=FOOTAGE)
+    system = _system_of(fake)
+    assert "TELL THE STORY, DON'T DESCRIBE THE VIDEO" in system
+    assert "Past tense" in system
