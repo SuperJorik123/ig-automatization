@@ -94,7 +94,7 @@ _SYSTEM = (
     "name a person unless the media itself names them — a caption on screen, "
     "a chyron, a jersey, somebody addressing them by name. Never guess an "
     "identity from resemblance, and never assume the headline's people are "
-    "the people on screen: checking exactly that is why you are here. The "
+    "the people on screen: the headline is context, not evidence. The "
     "same goes for place and date — report the city only if a sign, a plate, "
     "a uniform or the speech says so, and say what is inferable as inferable "
     "(\"an English-speaking country\", \"a residential street\").\n\n"
@@ -105,51 +105,35 @@ _SYSTEM = (
     "sentences — what leads up to it, what happens, how it ends. That order is "
     "what the caption is written from, so a report that only says what the "
     "scene contains is a failed report.\n\n"
-    "CHECK THE HEADLINE. Set headline_ok to false when the media plainly "
-    "contradicts the headline, shows something materially different, or shows "
-    "nothing that supports it. Say why in headline_note and give a better one "
-    "in headline_suggestion — a plain factual headline for what you actually "
-    "saw, under about 90 characters, no clickbait and no exclamation marks. "
-    "When the headline is a fair description of the media, set headline_ok "
-    "true and leave the other two empty. A headline that is merely shorter "
-    "or plainer than what you saw is still fair.\n\n"
     "Reply with ONE JSON object and nothing else — no prose before it, no "
     "explanation after it, no markdown fence:\n"
     "{\n"
     '  "summary": "one sentence: what happens in this media",\n'
     '  "beats": ["what happens first", "then this", "how it ends"],\n'
     '  "audible": "speech, shouting, commentary, or \\"\\" if there is none",\n'
-    '  "setting": "where and when it appears to be, or \\"\\"",\n'
-    '  "headline_ok": true,\n'
-    '  "headline_note": "",\n'
-    '  "headline_suggestion": ""\n'
+    '  "setting": "where and when it appears to be, or \\"\\""\n'
     "}"
 )
 
 _USER_WITH_HEADLINE = (
-    "The operator's headline for this post:\n\n{headline}\n\n"
-    "Report what the media shows, and whether that headline matches it."
+    "The operator's headline for this post, for context only:\n\n{headline}\n\n"
+    "Report what the media shows."
 )
 _USER_NO_HEADLINE = (
     "No headline has been written for this post yet. Report what the media "
-    "shows; leave headline_ok true and the two headline fields empty."
+    "shows."
 )
 
 # A model told to emit bare JSON still wraps it in a fence or a sentence often
 # enough to be worth recovering rather than losing the analysis over.
 _FENCE = re.compile(r"```[a-zA-Z]*\s*(.*?)\s*```", re.DOTALL)
 
-# Every key the callers read, with what an absent one means. headline_ok
-# defaults to True: no complaint is not a complaint, and a warning raised on a
-# perfectly good headline trains the operator to ignore the warning.
+# Every key the callers read, with what an absent one means.
 _SHAPE = {
     "summary": "",
     "beats": [],
     "audible": "",
     "setting": "",
-    "headline_ok": True,
-    "headline_note": "",
-    "headline_suggestion": "",
 }
 
 
@@ -271,10 +255,6 @@ def _parse(raw: str) -> dict:
         if key == "beats":
             out[key] = [str(b).strip() for b in value
                         if isinstance(value, list) and str(b).strip()]
-        elif key == "headline_ok":
-            # Anything that isn't literally true is treated as a complaint
-            # EXCEPT an absent key, which _SHAPE already defaulted to True.
-            out[key] = value is True if key in data else True
         else:
             out[key] = value.strip() if isinstance(value, str) else ""
 
@@ -282,21 +262,14 @@ def _parse(raw: str) -> dict:
     # nothing to put in front of the operator or into the caption prompt.
     if not out["summary"]:
         return {}
-    # A suggestion beside an approving verdict is not a complaint — the picker
-    # branches on headline_ok, so don't let a stray field raise a warning on a
-    # headline the model just approved.
-    if out["headline_ok"]:
-        out["headline_note"] = ""
-        out["headline_suggestion"] = ""
     return out
 
 
 def describe(path: str, headline: str = "", model: str | None = None) -> dict:
     """What `path` shows, as a dict — or {} when that can't be established.
 
-    `headline` is what the operator typed; it is sent along so the model can
-    say whether the media matches it, and may be empty (a post can reach the
-    gate before a headline is written).
+    `headline` is what the operator typed; it is sent along as context only,
+    and may be empty (a post can reach the gate before a headline is written).
 
     Returns {} — never raises — for: analysis switched off, no API key, a
     missing file, a failed or oversized ffmpeg pre-pass, a failed call, or a
@@ -401,7 +374,7 @@ def _cli() -> int:
                     "sees it.")
     parser.add_argument("path")
     parser.add_argument("--headline", default="",
-                        help="check this headline against the media")
+                        help="the operator's headline, sent as context")
     parser.add_argument("--model", default="")
     args = parser.parse_args()
 

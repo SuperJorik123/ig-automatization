@@ -2,9 +2,10 @@
 
 news_bot exits at import without a configured control group, which is why its
 pure pieces normally live in branded.py/groups.py. What is left inside it and
-worth testing is the wiring itself: that a caption the OPERATOR typed skips
-both billed calls, that the footage reaches the expansion, and what the pickers
-say about either. Nothing here touches Telegram, OpenRouter or ffmpeg.
+worth testing is the wiring itself: that the operator's info and the footage
+reach the one expansion, that every account's caption opens on its own
+headline, and what the pickers say. Nothing here touches Telegram, OpenRouter
+or ffmpeg.
 """
 
 import asyncio
@@ -37,23 +38,12 @@ FOOTAGE = {
     "beats": ["He walks past parked cars.", "A bear steps out behind him."],
     "audible": "Bystanders shouting.",
     "setting": "A residential street.",
-    "headline_ok": True,
-    "headline_note": "",
-    "headline_suggestion": "",
 }
 
-MANUAL = (
-    "Elderly man doesn't notice a bear walking right beside him\n"
-    "\n"
-    "An elderly man was walking down the street when a bear appeared just a "
-    "few feet away from him.\n"
-    "\n"
-    "#bear #usa #wildlife #caughtoncamera #viralvideo #news"
-)
+INFO = "Filmed in Asheville, North Carolina. Source: WLOS."
 
+# The body `expand` returns: no headline, paragraphs, then the pool.
 EXPANDED = (
-    "Man walks past a bear\n"
-    "\n"
     "A bear crossed a residential street a few feet behind a man who did not "
     "see it.\n"
     "\n"
@@ -61,13 +51,13 @@ EXPANDED = (
 )
 
 
-def _pair(name="mir", lang="en"):
+def _pair(name="mir", lang="en", headline="Man walks past a bear"):
     brand = {"name": name, "lang": lang, "group": "", "tg": "", "yt": "",
              "tw": "", "ig": f"{name}gram",
              "logo": f"/nonexistent/{name}/logo.png"}
     return {"platform": "ig", "label": f"{name} → IG",
             "render": {"brand": brand, "path": f"/tmp/{name}.mp4",
-                       "headline": "Man walks past a bear"}}
+                       "headline": headline}}
 
 
 @pytest.fixture
@@ -75,8 +65,8 @@ def calls(monkeypatch):
     """Record every billed call the caption layer would make."""
     seen = {"expand": [], "rephrase": []}
 
-    def _expand(headline, footage=None, model=None):
-        seen["expand"].append((headline, footage))
+    def _expand(headline, footage=None, model=None, info=""):
+        seen["expand"].append((headline, footage, info))
         return EXPANDED
 
     def _rephrase(text, angle, lang="", style="", model=None):
@@ -95,64 +85,33 @@ def _run(*args, **kw):
 
 
 # --------------------------------------------------------------------------- #
-# the operator's own caption                                                  #
+# the operator's info and the footage reaching the expansion                  #
 # --------------------------------------------------------------------------- #
 
 
-def test_a_manual_caption_buys_nothing(calls):
-    """No analysis, no search — the operator has already done the writing."""
-    out = _run("Man walks past a bear", [_pair()], FOOTAGE, MANUAL)
-    assert calls["expand"] == []
-    assert out
+def test_the_info_is_passed_to_the_expansion(calls):
+    _run("Man walks past a bear", [_pair()], FOOTAGE, INFO)
+    assert calls["expand"] == [("Man walks past a bear", FOOTAGE, INFO)]
 
 
-def test_a_manual_caption_is_the_source_every_account_rewrites(calls):
-    """Verbatim on thirteen accounts is the duplicate content the per-account
-    layer exists to prevent — so their text goes in as the source, not as the
-    output."""
-    out = _run("h", [_pair("mir"), _pair("wswire")], {}, MANUAL)
-    assert set(out) == {"mir", "wswire"}
-    rewritten = [c[0] for c in calls["rephrase"]]
-    assert rewritten and all(c == MANUAL for c in rewritten)
-
-
-def test_a_manual_caption_still_signs_each_account(calls):
-    out = _run("h", [_pair("mir"), _pair("wswire")], {}, MANUAL)
-    assert out["mir"].splitlines()[-1].split()[-1] == "#mir"
-    assert out["wswire"].splitlines()[-1].split()[-1] == "#wswire"
-
-
-def test_a_manual_caption_works_with_no_headline_at_all(calls):
-    """The caption is the whole post on Instagram — an empty headline is no
-    reason to refuse the text the operator typed."""
-    assert _run("", [_pair()], {}, MANUAL)
-    assert calls["expand"] == []
-
-
-def test_a_blank_manual_caption_falls_back_to_expanding(calls):
-    """`caption:` alone clears the override; it must not also silence IG."""
-    out = _run("Man walks past a bear", [_pair()], FOOTAGE, "   ")
+def test_info_does_not_skip_the_search(calls):
+    """Info informs the caption; it is not the caption. The AI still writes."""
+    _run("Man walks past a bear", [_pair()], {}, INFO)
     assert len(calls["expand"]) == 1
-    assert out
-
-
-# --------------------------------------------------------------------------- #
-# the footage reaching the expansion                                          #
-# --------------------------------------------------------------------------- #
 
 
 def test_the_footage_is_passed_to_the_expansion(calls):
     _run("Man walks past a bear", [_pair()], FOOTAGE)
-    assert calls["expand"] == [("Man walks past a bear", FOOTAGE)]
+    assert calls["expand"] == [("Man walks past a bear", FOOTAGE, "")]
 
 
 def test_no_footage_passes_an_empty_dict(calls):
     _run("Man walks past a bear", [_pair()])
-    assert calls["expand"] == [("Man walks past a bear", {})]
+    assert calls["expand"] == [("Man walks past a bear", {}, "")]
 
 
 def test_the_search_is_bought_once_for_every_account(calls):
-    _run("h", [_pair("a"), _pair("b"), _pair("c")], FOOTAGE)
+    _run("h", [_pair("a"), _pair("b"), _pair("c")], FOOTAGE, INFO)
     assert len(calls["expand"]) == 1
 
 
@@ -162,12 +121,64 @@ def test_a_post_with_no_instagram_pair_buys_nothing(calls):
     assert calls["expand"] == []
 
 
+def test_no_headline_buys_nothing(calls):
+    assert _run("", [_pair()], {}, INFO) == {}
+    assert calls["expand"] == []
+
+
 def test_a_failure_leaves_every_pair_on_its_headline(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("gateway down")
 
     monkeypatch.setattr(news_bot.ig_caption, "expand", _boom)
     assert _run("h", [_pair()], FOOTAGE) == {}
+
+
+def test_an_empty_expansion_leaves_every_pair_on_its_headline(monkeypatch):
+    monkeypatch.setattr(news_bot.ig_caption, "expand", lambda *a, **kw: "")
+    assert _run("h", [_pair()], FOOTAGE) == {}
+
+
+# --------------------------------------------------------------------------- #
+# the finished caption                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_caption_opens_on_the_headline_then_a_blank_line(calls):
+    out = _run("Man walks past a bear", [_pair()], FOOTAGE)
+    assert out["mir"].startswith("Man walks past a bear\n\nA bear crossed")
+
+
+def test_each_account_opens_on_its_own_render_headline(calls):
+    """The translated headline on a brand's banner is the one its caption
+    opens with — not the source text the operator typed."""
+    out = _run("Man walks past a bear",
+               [_pair("mir"), _pair("rusnews", "ru", headline="Мужчина и медведь")],
+               FOOTAGE)
+    assert out["mir"].splitlines()[0] == "Man walks past a bear"
+    assert out["rusnews"].splitlines()[0] == "Мужчина и медведь"
+
+
+def test_every_account_tag_line_opens_with_its_own_tag(calls):
+    out = _run("h", [_pair("mir"), _pair("wswire")], FOOTAGE)
+    assert out["mir"].splitlines()[-1].split()[0] == "#mir"
+    assert out["wswire"].splitlines()[-1].split()[0] == "#wswire"
+
+
+def test_every_account_gets_five_unique_tags(calls):
+    out = _run("h", [_pair("mir"), _pair("wswire")], FOOTAGE)
+    for caption in out.values():
+        tags = caption.splitlines()[-1].split()
+        assert len(tags) == 5
+        assert len({t.lower() for t in tags}) == 5
+
+
+def test_a_sibling_brand_tag_is_never_dealt(monkeypatch, calls):
+    monkeypatch.setattr(news_bot.ig_caption, "expand",
+                        lambda *a, **kw: "Para.\n\n#wswire #bear #usa #news")
+    out = _run("h", [_pair("mir"), _pair("wswire")], FOOTAGE)
+    assert "#wswire" not in out["mir"]
+    assert out["wswire"].splitlines()[-1].split().count("#wswire") == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -195,40 +206,42 @@ def test_the_brand_picker_shows_what_was_seen():
     assert FOOTAGE["summary"] in body
 
 
-def test_the_brand_picker_warns_on_a_mismatched_headline():
+def test_the_brand_picker_never_questions_the_headline():
     bad = dict(FOOTAGE, headline_ok=False, headline_note="different man",
                headline_suggestion="Elderly man doesn't notice a bear")
     body = news_bot._brand_prompt_text(_state(vision_task=object(), footage=bad))
-    assert "⚠️" in body and "Elderly man doesn't notice a bear" in body
+    assert "may not match" not in body
+    assert "Elderly man doesn't notice a bear" not in body
 
 
 def test_a_failed_analysis_leaves_the_picker_as_it_always_was():
     body = news_bot._brand_prompt_text(_state(vision_task=object(), footage={}))
-    assert "👁" not in body and "⚠️ headline" not in body
+    assert "👁" not in body
 
 
-def test_the_brand_picker_advertises_the_caption_reply():
-    assert "caption:" in news_bot._brand_prompt_text(_state())
+def test_the_brand_picker_advertises_the_info_reply():
+    body = news_bot._brand_prompt_text(_state())
+    assert "info:" in body and "caption:" not in body
 
 
-def test_a_typed_caption_is_echoed_back_on_every_picker():
-    state = _state(caption=MANUAL, gate_kind="video")
+def test_typed_info_is_echoed_back_on_every_picker():
+    state = _state(info=INFO, gate_kind="video")
     for body in (news_bot._gate_text(state),
                  news_bot._brand_prompt_text(state),
                  news_bot._publish_prompt_text(state)):
-        assert "✍️" in body
-        assert "An elderly man was walking down the street" in body
+        assert "ℹ️" in body
+        assert "Source: WLOS." in body
 
 
 def test_the_publish_picker_only_offers_the_reply_when_instagram_is_there():
     with_ig = _state(platforms=[{"platform": "ig"}])
     without = _state(platforms=[{"platform": "tg"}])
-    assert "caption:" in news_bot._publish_prompt_text(with_ig)
-    assert "caption:" not in news_bot._publish_prompt_text(without)
+    assert "info:" in news_bot._publish_prompt_text(with_ig)
+    assert "info:" not in news_bot._publish_prompt_text(without)
 
 
-def test_a_very_long_caption_is_trimmed_in_the_echo():
-    """Telegram caps a message at 4096 characters and an IG caption runs to
-    2200 — the echo must not be what costs the picker its keyboard."""
-    state = _state(caption="word " * 2000)
-    assert len(news_bot._caption_lines(state)[0]) < 1000
+def test_very_long_info_is_trimmed_in_the_echo():
+    """Telegram caps a message at 4096 characters — the echo must not be what
+    costs the picker its keyboard."""
+    state = _state(info="word " * 2000)
+    assert len(news_bot._info_lines(state)[0]) < 1000

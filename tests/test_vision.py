@@ -30,9 +30,6 @@ GOOD = {
     ],
     "audible": "Bystanders shouting in English, warning the man to turn around.",
     "setting": "A residential street, daytime.",
-    "headline_ok": True,
-    "headline_note": "",
-    "headline_suggestion": "",
 }
 
 
@@ -87,7 +84,7 @@ def test_describe_returns_the_parsed_analysis(on, monkeypatch, photo):
     assert out["summary"] == GOOD["summary"]
     assert out["beats"] == GOOD["beats"]
     assert out["audible"].startswith("Bystanders shouting")
-    assert out["headline_ok"] is True
+    assert set(out) == {"summary", "beats", "audible", "setting"}
 
 
 def test_no_api_key_returns_empty(on, monkeypatch, photo):
@@ -154,8 +151,6 @@ def test_missing_keys_are_defaulted(on, monkeypatch, photo):
     assert out["beats"] == []
     assert out["audible"] == ""
     assert out["setting"] == ""
-    assert out["headline_ok"] is True          # no complaint = no complaint
-    assert out["headline_suggestion"] == ""
 
 
 def test_wrong_types_are_coerced_or_dropped(on, monkeypatch, photo):
@@ -163,24 +158,27 @@ def test_wrong_types_are_coerced_or_dropped(on, monkeypatch, photo):
         "summary": "A bear.",
         "beats": "not a list",
         "audible": 42,
-        "headline_ok": "no",
-        "headline_suggestion": ["a list"],
     }))
     out = vision.describe(photo, "h")
     assert out["beats"] == []
     assert out["audible"] == ""
-    assert out["headline_ok"] is False         # a non-empty non-true value
-    assert out["headline_suggestion"] == ""
 
 
-def test_a_suggestion_without_a_complaint_is_not_a_complaint(on, monkeypatch, photo):
-    """headline_ok is what the picker branches on; a stray suggestion beside
-    an approving verdict must not raise a warning on a fine headline."""
+def test_a_model_still_judging_the_headline_is_ignored(on, monkeypatch, photo):
+    """The headline check is gone: stray verdict fields never reach a caller."""
     _client(monkeypatch, content=json.dumps({
-        "summary": "A bear.", "headline_ok": True,
-        "headline_suggestion": "Another way to say the same thing",
+        "summary": "A bear.", "headline_ok": False,
+        "headline_suggestion": "Another headline",
     }))
-    assert vision.describe(photo, "h")["headline_ok"] is True
+    out = vision.describe(photo, "h")
+    assert "headline_ok" not in out and "headline_suggestion" not in out
+
+
+def test_the_prompt_no_longer_asks_for_a_headline_verdict(on, monkeypatch, photo):
+    fake = _client(monkeypatch, content=json.dumps(GOOD))
+    vision.describe(photo, "Man walks past bear")
+    sent = json.dumps(fake.calls[0]["messages"], ensure_ascii=False)
+    assert "headline_ok" not in sent and "CHECK THE HEADLINE" not in sent
 
 
 # --------------------------------------------------------------------------- #

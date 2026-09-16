@@ -2,7 +2,7 @@
 
 The client is replaced by a scripted fake, so what is exercised here is the
 part that has to hold when the model misbehaves: the never-raises contract
-(every failure returns the bare headline, because the render is already made
+(every failure returns an empty body, because the render is already made
 and the operator has already tapped publish) and the cleanup of the wrappers a
 chat model reaches for after being told not to use them.
 """
@@ -74,28 +74,103 @@ def test_expansion_returns_the_caption(on, monkeypatch):
     assert caption.expand("Released footage shows plane crash") == EXAMPLE
 
 
-def test_no_api_key_returns_the_bare_headline(on, monkeypatch):
+def test_no_api_key_returns_no_body(on, monkeypatch):
+    """No body = the post goes out as the bare headline (compose/with_brand_tag
+    put that together — expand never returns the headline itself)."""
     monkeypatch.setattr(caption, "_client", None)
-    assert caption.expand("Pentagon criticized over benefits") == \
-        "Pentagon criticized over benefits"
+    assert caption.expand("Pentagon criticized over benefits") == ""
 
 
-def test_disabled_returns_the_bare_headline_without_calling(on, monkeypatch):
+def test_disabled_returns_no_body_without_calling(on, monkeypatch):
     """The kill switch has to cut the billed call, not just the output."""
     fake = _client(monkeypatch, content=EXAMPLE)
     monkeypatch.setattr(config, "IG_CAPTION_ENABLED", False)
-    assert caption.expand("Pentagon criticized") == "Pentagon criticized"
+    assert caption.expand("Pentagon criticized") == ""
     assert fake.calls == []
 
 
-def test_api_failure_returns_the_bare_headline(on, monkeypatch):
+def test_api_failure_returns_no_body(on, monkeypatch):
     _client(monkeypatch, exc=RuntimeError("502 from the gateway"))
-    assert caption.expand("Pentagon criticized") == "Pentagon criticized"
+    assert caption.expand("Pentagon criticized") == ""
 
 
-def test_empty_completion_returns_the_bare_headline(on, monkeypatch):
+def test_empty_completion_returns_no_body(on, monkeypatch):
     _client(monkeypatch, content="   \n  ")
-    assert caption.expand("Pentagon criticized") == "Pentagon criticized"
+    assert caption.expand("Pentagon criticized") == ""
+
+
+def test_a_headline_the_model_repeats_anyway_is_dropped(on, monkeypatch):
+    """compose puts the headline on top — a model that writes it too would
+    give the post the same first line twice."""
+    _client(monkeypatch, content="Pentagon Criticized!\n\nA paragraph.\n\n#usa")
+    assert caption.expand("Pentagon criticized") == "A paragraph.\n\n#usa"
+
+
+def test_a_first_paragraph_that_merely_starts_like_the_headline_stays(on, monkeypatch):
+    body = "Pentagon criticized over benefits by veterans.\n\n#usa"
+    _client(monkeypatch, content=body)
+    assert caption.expand("Pentagon criticized") == body
+
+
+def test_both_prompts_say_the_headline_is_not_the_models_to_write(on, monkeypatch):
+    for footage in ({}, {"summary": "A bear."}):
+        fake = _client(monkeypatch, content=EXAMPLE)
+        caption.expand("h", footage=footage)
+        system = fake.calls[0]["messages"][0]["content"]
+        assert "never write the headline" in system
+        assert "reproduced as given" not in system
+
+
+# --------------------------------------------------------------------------- #
+# the operator's info                                                         #
+# --------------------------------------------------------------------------- #
+
+
+INFO = "Filmed in Asheville, North Carolina. Source: WLOS."
+
+
+def test_info_goes_into_the_user_message(on, monkeypatch):
+    """The user message is what :online builds its search query from."""
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Man walks past bear", info=INFO)
+    user = fake.calls[0]["messages"][-1]["content"]
+    assert user.startswith("Man walks past bear")
+    assert "OPERATOR'S INFO:\n" + INFO in user
+
+
+def test_info_goes_in_beside_the_footage_too(on, monkeypatch):
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Man walks past bear", footage={"summary": "A bear."},
+                   info=INFO)
+    user = fake.calls[0]["messages"][-1]["content"]
+    assert "A bear." in user and INFO in user
+    assert user.rstrip().endswith("Write the caption.")
+
+
+def test_info_is_the_source_of_truth_in_both_prompts(on, monkeypatch):
+    for footage in ({}, {"summary": "A bear."}):
+        fake = _client(monkeypatch, content=EXAMPLE)
+        caption.expand("h", footage=footage, info=INFO)
+        system = fake.calls[0]["messages"][0]["content"]
+        assert "SOURCE OF TRUTH" in system
+
+
+def test_the_rewrite_never_writes_a_headline_either(on, monkeypatch):
+    """A rewritten headline is how an account's first line drifted from the
+    headline on its own banner."""
+    fake = _client(monkeypatch, content="A variant.\n\n#usa")
+    caption.rephrase("A paragraph.\n\n#usa", "Open on WHERE it happened.")
+    system = fake.calls[0]["messages"][0]["content"]
+    assert "there is none in what you write" in system
+    assert "line 1 is the headline" not in system
+
+
+def test_blank_info_changes_nothing(on, monkeypatch):
+    a = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Plane crash at Miami International")
+    b = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Plane crash at Miami International", info="   ")
+    assert a.calls[0]["messages"] == b.calls[0]["messages"]
 
 
 def test_empty_headline_stays_empty(on, monkeypatch):
@@ -206,13 +281,40 @@ def test_prose_mentioning_a_tag_is_not_treated_as_the_tag_line(on, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_an_overlong_caption_is_trimmed_on_a_word_boundary(on, monkeypatch):
+def test_an_overlong_caption_is_trimmed_on_a_word_boundary():
     long = " ".join(["word"] * 800)          # ~4000 chars
-    _client(monkeypatch, content=long)
-    out = caption.expand("h")
+    out = caption.compose("Headline", long)
     assert len(out) <= 2200
     assert out.endswith("…")
     assert "wor…" not in out                 # never mid-word
+
+
+def test_an_overlong_caption_keeps_its_headline_and_its_tag_line():
+    long = " ".join(["word"] * 800) + "\n\n#mir #miami #usa"
+    out = caption.compose("Headline", long)
+    assert len(out) <= 2200
+    assert out.startswith("Headline\n\nword")
+    assert out.endswith("…\n\n#mir #miami #usa")
+
+
+# --------------------------------------------------------------------------- #
+# compose: headline, blank line, body                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_is_headline_blank_line_body():
+    assert caption.compose("Man walks past bear", "A paragraph.\n\n#mir #usa") \
+        == "Man walks past bear\n\nA paragraph.\n\n#mir #usa"
+
+
+def test_compose_without_a_body_is_the_headline():
+    assert caption.compose("Man walks past bear", "") == "Man walks past bear"
+
+
+def test_compose_never_doubles_the_headline():
+    assert caption.compose("Man walks past bear",
+                           "Man walks past bear\n\nA paragraph.") == \
+        "Man walks past bear\n\nA paragraph."
 
 
 # --------------------------------------------------------------------------- #
@@ -301,30 +403,58 @@ def test_brand_tag_drops_what_instagram_would_not_index():
     assert caption.brand_tag("  ") == ""
 
 
-def test_the_account_tag_is_last_and_inside_the_five():
+def test_the_account_tag_is_first_and_inside_the_five():
     tags = caption.pick_hashtags(POOL, 0, brand="frontiva24").splitlines()[-1].split()
     assert len(tags) == caption.MAX_HASHTAGS
-    assert tags[-1] == "#frontiva24"
-    # The story still keeps its two most specific tags; the brand tag takes a
-    # slot off the rotating tail, never the head.
-    assert tags[:2] == ["#miami", "#florida"]
+    assert tags[0] == "#frontiva24"
+    # The story still keeps its two most specific tags right after it; the
+    # brand tag takes a slot off the rotating tail, never the head.
+    assert tags[1:3] == ["#miami", "#florida"]
 
 
-def test_every_account_signs_its_own_line():
+def test_every_account_opens_its_own_line():
+    brands = ("altenews", "atlasnews", "frontiva24", "europamonitor",
+              "wswire", "vestra24")
     lines = [caption.pick_hashtags(POOL, i, brand=b).splitlines()[-1]
-             for i, b in enumerate(("altenews", "atlasnews", "frontiva24",
-                                    "europamonitor", "wswire", "vestra24"))]
+             for i, b in enumerate(brands)]
     assert len(set(lines)) == len(lines)
-    for b, line in zip(("altenews", "atlasnews", "frontiva24",
-                        "europamonitor", "wswire", "vestra24"), lines):
-        assert line.endswith(f"#{b}")
+    for b, line in zip(brands, lines):
+        assert line.startswith(f"#{b} ")
 
 
 def test_a_short_line_still_gets_the_account_tag():
     """Nothing to deal is not a reason to publish an unsigned caption."""
     short = "Headline\n\nA paragraph.\n\n#ohio #crime"
     out = caption.pick_hashtags(short, 4, brand="altenews")
-    assert out.splitlines()[-1] == "#ohio #crime #altenews"
+    assert out.splitlines()[-1] == "#altenews #ohio #crime"
+
+
+def test_a_repeated_tag_is_dealt_once():
+    """A model that writes #miami twice must not publish it twice — nor spend
+    two of the account's five slots on it."""
+    dup = "A paragraph.\n\n#miami #Miami #florida #miami #usa"
+    tags = caption.pick_hashtags(dup, 0, brand="wswire").splitlines()[-1].split()
+    assert tags == ["#wswire", "#miami", "#florida", "#usa"]
+
+
+def test_the_pool_is_de_duplicated_before_it_is_capped(on, monkeypatch):
+    _client(monkeypatch, content="A paragraph.\n\n" + " ".join(
+        ["#miami"] * 5 + ["#a", "#b", "#c", "#d", "#e", "#f", "#g", "#h"]))
+    tags = caption.expand("h").splitlines()[-1].split()
+    assert tags == ["#miami", "#a", "#b", "#c", "#d", "#e", "#f", "#g"]
+
+
+def test_a_sibling_brands_tag_is_never_dealt():
+    pool = "A paragraph.\n\n#mirnews #miami #florida #usa #news #wswire"
+    out = caption.pick_hashtags(pool, 0, brand="wswire",
+                                others=["mirnews", "wswire", "frontiva24"])
+    assert out.splitlines()[-1] == "#wswire #miami #florida #usa #news"
+
+
+def test_a_pool_of_only_sibling_tags_still_signs_the_account():
+    out = caption.pick_hashtags("A paragraph.\n\n#mirnews", 0, brand="wswire",
+                                others=["mirnews"])
+    assert out == "A paragraph.\n\n#wswire"
 
 
 def test_a_caption_with_no_hashtag_line_gets_one():
@@ -337,14 +467,14 @@ def test_a_caption_with_no_hashtag_line_gets_one():
 def test_the_account_tag_is_never_doubled():
     line = "Headline\n\nA paragraph.\n\n#miami #frontiva24 #usa"
     out = caption.with_brand_tag(line, "frontiva24").splitlines()[-1]
-    assert out == "#miami #usa #frontiva24"
+    assert out == "#frontiva24 #miami #usa"
 
 
 def test_a_full_line_loses_its_least_specific_tag_not_its_head():
     line = ("Headline\n\nA paragraph.\n\n"
             "#miami #florida #planecrash #aviation #news")
     out = caption.with_brand_tag(line, "wswire").splitlines()[-1].split()
-    assert out == ["#miami", "#florida", "#planecrash", "#aviation", "#wswire"]
+    assert out == ["#wswire", "#miami", "#florida", "#planecrash", "#aviation"]
 
 
 def test_no_brand_leaves_the_line_exactly_as_it_was():
@@ -685,9 +815,6 @@ FOOTAGE = {
     ],
     "audible": "Bystanders shouting, warning the man to turn around.",
     "setting": "A residential street, daytime.",
-    "headline_ok": True,
-    "headline_note": "",
-    "headline_suggestion": "",
 }
 
 
@@ -745,8 +872,7 @@ def test_the_footage_prompt_offers_both_registers(on, monkeypatch):
 
 def test_footage_expansion_still_never_raises(on, monkeypatch):
     _client(monkeypatch, exc=RuntimeError("gateway down"))
-    assert caption.expand("Man walks past bear", footage=FOOTAGE) == \
-        "Man walks past bear"
+    assert caption.expand("Man walks past bear", footage=FOOTAGE) == ""
 
 
 def test_footage_expansion_is_cleaned_like_any_other(on, monkeypatch):
@@ -757,8 +883,7 @@ def test_footage_expansion_is_cleaned_like_any_other(on, monkeypatch):
 def test_disabled_skips_the_call_even_with_footage(on, monkeypatch):
     fake = _client(monkeypatch, content=EXAMPLE)
     monkeypatch.setattr(config, "IG_CAPTION_ENABLED", False)
-    assert caption.expand("Man walks past bear", footage=FOOTAGE) == \
-        "Man walks past bear"
+    assert caption.expand("Man walks past bear", footage=FOOTAGE) == ""
     assert fake.calls == []
 
 

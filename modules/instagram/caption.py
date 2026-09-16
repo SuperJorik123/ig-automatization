@@ -13,6 +13,19 @@ this module makes of it: one OpenRouter call on a web-search-enabled model
 the gateway live search) that looks the story up as it stands today and writes
 those paragraphs out of what it finds.
 
+THE HEADLINE IS NOT THE MODEL'S TO WRITE. Every call here returns the BODY —
+the paragraphs and the tag line — and `compose` puts the brand's own headline
+(the one burned into its render, already translated) on top of it, as
+"{headline}, blank line, {body}". A model asked to "reproduce the headline"
+paraphrased it on the rewrite path, so an account could publish a first line
+that disagreed with its own banner.
+
+The operator can hand the search more to go on with an `info:` reply — the
+source, the names, what is actually known. It goes into the expansion prompt
+as trusted facts that outrank the web search, and its words steer the search
+query (it sits in the user message, which is what `:online` builds the query
+from). It is never published as such.
+
 THE MEDIA GOES IN FIRST. `:online` is a search plugin that runs BEFORE the
 model sees the prompt and builds its query out of that prompt — so a prompt
 that is only a headline searches the headline's WORDS and comes back with the
@@ -33,7 +46,8 @@ Two contracts, both taken from modules/telegram/translator.py, because they are
 what make a model safe to put in a publishing path:
 
   NEVER RAISES — a missing key, a dead gateway, an unknown model id, an empty
-  completion all return the headline unchanged. The render is already made and
+  completion all return an empty body, and the post goes out as the headline
+  with the account's tag. The render is already made and
   the operator has already tapped publish; a caption hiccup must cost the post
   its paragraphs, not its existence.
 
@@ -68,10 +82,9 @@ the wording varies per account:
              `lang` it also translates, so a foreign-language account's variant
              IS its translation — one call, not two.
   `pick_hashtags`
-             pure: each account keeps the pool's two most specific tags,
-             rotates a couple more out of the tail, and signs the line with its
-             OWN tag — #frontiva24 on frontiva24, #europamonitor on
-             europamonitor. No tokens, and no two accounts carry the same tag
+             pure: each account opens the line with its OWN tag, keeps the
+             pool's two most specific tags and draws two more out of the tail
+             (#frontiva24 on frontiva24, #europamonitor on europamonitor). No tokens, and no two accounts carry the same tag
              line.
 
 THE ACCOUNT'S OWN TAG IS MANDATORY (`with_brand_tag`), on every caption it
@@ -79,8 +92,9 @@ publishes and not only on the ones that came back with a pool — a failed
 expansion falls back to the bare headline, and that gets a tag line made for
 it. It is built from the BRAND NAME rather than the Instagram handle, because
 a handle may carry a dot ("vestra.24") and Instagram ends a tag at the first
-character that is not a letter or a digit. It takes the last of the five
-slots rather than adding a sixth.
+character that is not a letter or a digit. It OPENS the tag line and takes
+the first of the five slots rather than adding a sixth; no tag repeats on a
+line, and a sibling brand's tag is never dealt to another account.
 
 The angle rotates by POST as well as by account (`seed_for`), so an account
 does not open every one of its posts the same way.
@@ -124,7 +138,7 @@ if _ROOT not in sys.path:
 from openai import OpenAI  # noqa: E402
 
 from shared import config, vision  # noqa: E402
-from modules.instagram.graph import trim_caption  # noqa: E402
+from modules.instagram.graph import CAPTION_MAX, trim_caption  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -170,15 +184,30 @@ _HASHTAG_RULES = (
     "and public events — never a private individual's name.\n"
 )
 
+# What the operator's `info:` reply is to the model. Shared by both system
+# prompts: it is the same promise whether or not the media was analysed.
+_INFO_RULES = (
+    "OPERATOR'S INFO — when the message carries a block headed OPERATOR'S "
+    "INFO, it was written by the newsroom and is the SOURCE OF TRUTH: the "
+    "outlet or account the story came from, who the people are, where and "
+    "when it happened, what is confirmed. Trust it over the web search and "
+    "over the headline wherever they disagree, and use its names, sources and "
+    "places to find the right story when you search. It may name a person or "
+    "a place nothing else names. Take the facts out of it and write them into "
+    "the caption; never copy it in as a quotation, and never mention that you "
+    "were given it.\n"
+)
+
 _SYSTEM = (
     "You write the Instagram captions for a news account. You are given one "
     "headline. Search the web for that story as it stands today, then write "
     "the account's caption for it.\n\n"
     "SHAPE — exactly this, and nothing else:\n"
-    "  line 1: the headline, reproduced as given.\n"
-    "  a blank line.\n"
     "  two to four paragraphs, one to three sentences each, a blank line "
-    "between them. The first is the news itself: who, what, where, when. The "
+    "between them. The account prints the headline above your caption "
+    "itself, so never write the headline, a title or any first line that "
+    "stands in for one. The first paragraph is the news itself: who, what, "
+    "where, when. The "
     "ones after it carry the supporting facts — the names, the numbers, the "
     "dates, the official response, what happens next. A last paragraph may "
     "place the story in its standing context (\"The controversy comes as …\", "
@@ -186,7 +215,8 @@ _SYSTEM = (
     "  a blank line.\n"
     "  last line: the hashtags.\n\n"
     "FAITHFUL — every fact, name, number, date and quote in the caption must "
-    "come from the headline or from what your search actually returns. Invent "
+    "come from the headline, from the operator's info when there is any, or "
+    "from what your search actually returns. Invent "
     "nothing: no background you did not read, no consequence, no speculation, "
     "no plausible-sounding detail, no quote you cannot source. If the search "
     "returns little, write ONE short paragraph and stop — a thin caption is "
@@ -198,7 +228,7 @@ _SYSTEM = (
     "exclamation marks, no emoji, no rhetorical questions, no first person, "
     "no \"Breaking:\", no call to action, no \"follow us for more\", no links, "
     "no sign-off.\n"
-    + _HASHTAG_RULES +
+    + _INFO_RULES + _HASHTAG_RULES +
     "\nOutput ONLY the caption. No preamble, no explanation, no markdown, no "
     "bold, no bullet points, no surrounding quotation marks, no numbered "
     "citation markers, no source list at the end."
@@ -252,10 +282,10 @@ _SYSTEM_FOOTAGE = (
     "tell somebody what they are about to watch. This is the commoner case and "
     "it is not the lesser caption.\n\n"
     "SHAPE — exactly this, and nothing else:\n"
-    "  line 1: the headline, reproduced as given.\n"
-    "  a blank line.\n"
     "  two to four paragraphs, one to three sentences each, a blank line "
-    "between them.\n"
+    "between them. The account prints the headline above your caption "
+    "itself, so never write the headline, a title or any first line that "
+    "stands in for one.\n"
     "  a blank line.\n"
     "  last line: the hashtags.\n\n"
     "NEVER RESTATE THE HEADLINE. The first paragraph ADVANCES the story: it "
@@ -288,9 +318,10 @@ _SYSTEM_FOOTAGE = (
     "Where the report stops, simply stop — a reader does not need to be told "
     "that what you cannot see, you did not see.\n\n"
     "FAITHFUL — every fact, name, number, date and quote comes from the "
-    "report, from the headline, or from a search result that genuinely matches "
-    "the report. Invent nothing. Do not name a person the report does not "
-    "name, however familiar somebody looks in your search results — that "
+    "report, from the headline, from the operator's info, or from a search "
+    "result that genuinely matches the report. Invent nothing. Do not name a "
+    "person neither the report nor the operator's info names, however "
+    "familiar somebody looks in your search results — that "
     "mistake is the reason you are given the report at all. Do not state a "
     "city, a country or a date the report leaves open: \"a residential "
     "street\" stays a residential street. Never give a death toll, a casualty "
@@ -301,6 +332,10 @@ _SYSTEM_FOOTAGE = (
     "person, no \"Breaking:\", no call to action, no \"follow us for more\", "
     "no links, no sign-off. Narrating a clip is still neutral prose; it is "
     "simply prose about what happens rather than about what was reported.\n"
+    + _INFO_RULES +
+    "  The info tells you WHO and WHICH EVENT; the report tells you WHAT "
+    "HAPPENS on screen. Where the info disagrees with what the report plainly "
+    "shows happening, write what the report shows.\n"
     + _HASHTAG_RULES +
     "  A clip that is the story carries the tags people browse it under — "
     "#caughtoncamera, #viralvideo, #wildlife — beside the ones naming what is "
@@ -308,8 +343,9 @@ _SYSTEM_FOOTAGE = (
     "reported news event.\n\n"
     "Here is the shape a clip-is-the-story caption has. Follow its FORM — how "
     "it opens, how it moves, how plainly it is written — and never its "
-    "content:\n\n"
-    "Elderly man doesn't notice a bear walking right beside him\n\n"
+    "content. Its headline, \"Elderly man doesn't notice a bear walking "
+    "right beside him\", is printed above it by the account and is not part "
+    "of what you write:\n\n"
     "An elderly man was walking down the street when a bear appeared just a "
     "few feet away from him.\n\n"
     "People nearby began shouting and warning him to turn around, but he "
@@ -330,8 +366,15 @@ _SYSTEM_FOOTAGE = (
 _USER_FOOTAGE = (
     "{footage}\n\n"
     "THE OPERATOR'S HEADLINE: {headline}\n\n"
+    "{info}"
     "Write the caption."
 )
+
+# The operator's `info:` reply, labelled so the prompts' OPERATOR'S INFO rule
+# can point at it. Sits in the USER message on purpose: `:online` builds its
+# search query from the prompt, and the names and sources in it are exactly
+# what that query should be built from.
+_USER_INFO = "OPERATOR'S INFO:\n{info}\n\n"
 
 _VARIANT_INTRO = (
     "You are the editor of a news account. Another account in the same group "
@@ -357,13 +400,13 @@ _VARIANT_RULES = (
     "A REWRITE, NOT A PARAPHRASE — a different opening sentence, a different "
     "order of facts, different sentence lengths. Trading words for synonyms is "
     "not enough: the two captions must not line up sentence for sentence.\n"
-    "SHAPE — line 1 is the headline, rewritten as a DIFFERENT phrasing of the "
-    "same headline: same facts, same meaning, other words. Then a blank line, "
-    "then the paragraphs with a blank line between them, then a blank line and "
-    "the hashtag line. THE FIRST PARAGRAPH STILL CARRIES THE NEWS — who, what, "
+    "SHAPE — the paragraphs with a blank line between them, then a blank line "
+    "and the hashtag line. There is no headline in what you were given and "
+    "there is none in what you write: the account prints its headline above "
+    "the caption itself. THE FIRST PARAGRAPH STILL CARRIES THE NEWS — who, what, "
     "where, when — however short or unconventional your house style is. A "
     "caption that opens on a detail and leaves the reader to infer the story "
-    "from the headline is a failed caption, not a terse one.\n"
+    "is a failed caption, not a terse one.\n"
     "HASHTAGS — the last line is copied through character for character: the "
     "same tags in the same order, none added, none dropped, none translated. "
     "They are chosen elsewhere.\n"
@@ -490,19 +533,30 @@ def _tag_line_index(lines: list) -> int:
     return -1
 
 
+def _unique_tags(tags, drop=()) -> list:
+    """`tags` without repeats (case-insensitive, first spelling kept) and
+    without anything in `drop` — which is lower-case tags."""
+    seen, out = set(drop), []
+    for t in tags:
+        key = t.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(t)
+    return out
+
+
 def _cap_hashtags(text: str, limit: int = POOL_HASHTAGS) -> str:
-    """Cut the caption's trailing hashtag line down to `limit` tags.
+    """De-duplicate the caption's trailing hashtag line and cut it to `limit`.
 
     The ceiling here is the POOL, not the post: `pick_hashtags` deals each
     account its five out of what survives. A model that ignores the count
-    entirely must still not hand a twenty-tag line down the chain."""
+    entirely must still not hand a twenty-tag line down the chain — and a
+    repeated tag must go BEFORE the cut, or it spends a pool slot twice."""
     lines = text.split("\n")
     i = _tag_line_index(lines)
     if i < 0:
         return text
-    tags = lines[i].strip().split()
-    if len(tags) > limit:
-        lines[i] = " ".join(tags[:limit])
+    lines[i] = " ".join(_unique_tags(lines[i].strip().split())[:limit])
     return "\n".join(lines)
 
 
@@ -520,17 +574,17 @@ def brand_tag(brand: str) -> str:
 
 
 def with_brand_tag(text: str, brand: str, limit: int = MAX_HASHTAGS) -> str:
-    """`text` with this account's own tag last on its hashtag line.
+    """`text` with this account's own tag FIRST on its hashtag line.
 
     MANDATORY, which is why it is a function of its own and not a branch inside
     `pick_hashtags`: every caption an account publishes carries the account's
     tag, including the ones that never went near the pool — the bare headline
     a failed expansion falls back to gets a tag line made for it.
 
-    The tag is appended rather than prepended (it is a signature, not what the
-    story is about), it is never duplicated if the model already produced it,
-    and it is inside `limit`: a line already at the ceiling loses its LAST
-    story tag, which is its least specific one, never its head.
+    The tag always opens the line, it is never duplicated if the model already
+    produced it (anywhere on the line), no other tag repeats either, and it is
+    inside `limit`: a line already at the ceiling loses its LAST story tag,
+    which is its least specific one, never its head.
     """
     tag = brand_tag(brand)
     if not tag or not (text or "").strip():
@@ -539,26 +593,29 @@ def with_brand_tag(text: str, brand: str, limit: int = MAX_HASHTAGS) -> str:
     i = _tag_line_index(lines)
     if i < 0:
         return text.rstrip() + "\n\n" + tag
-    tags = [t for t in lines[i].split() if t.lower() != tag]
-    if len(tags) >= limit:
-        tags = tags[:max(limit - 1, 0)]
-    lines[i] = " ".join(tags + [tag])
+    tags = _unique_tags(lines[i].split(), drop={tag})
+    lines[i] = " ".join([tag] + tags[:max(limit - 1, 0)])
     return "\n".join(lines)
 
 
 def pick_hashtags(text: str, offset: int, limit: int = MAX_HASHTAGS,
-                  keep: int = KEEP_HASHTAGS, brand: str = "") -> str:
+                  keep: int = KEEP_HASHTAGS, brand: str = "",
+                  others=()) -> str:
     """One account's share of the caption's hashtag pool, plus its own tag.
 
     The first `keep` tags are what the story is about, and every account keeps
     them (the prompt orders the pool most-specific-first); the rest of the line
-    is a window of tags rotated `offset` places into the tail, so consecutive
-    offsets give different tag lines. Pure, deterministic and free — the cheap
-    half of not looking like the same post on six accounts.
+    is a combination drawn out of the tail by `offset`, so consecutive offsets
+    give different tag lines. Pure, deterministic and free — the cheap half of
+    not looking like the same post on six accounts.
 
-    `brand` takes the LAST of the `limit` slots for the account's own tag
+    `brand` takes the FIRST of the `limit` slots for the account's own tag
     (`with_brand_tag`), so the story is dealt one tag fewer rather than the
     post carrying a sixth. Without a brand the line is exactly what it was.
+
+    `others` is every brand name in the group: a sibling account's tag in the
+    pool (the rewrite can pick one up from a style example) is dropped before
+    dealing, so frontiva24 never signs a post #mirnews.
 
     Returns `text` with only the brand tag added when there is no hashtag line,
     or when the line already fits: dealing four out of four could only drop a
@@ -570,16 +627,22 @@ def pick_hashtags(text: str, offset: int, limit: int = MAX_HASHTAGS,
     i = _tag_line_index(lines)
     if i < 0:
         return with_brand_tag(text, brand, limit)
-    tags = [t for t in lines[i].strip().split() if t.lower() != tag]
+    drop = {tag} | {brand_tag(o) for o in others}
+    drop.discard("")
+    tags = _unique_tags(lines[i].strip().split(), drop=drop)
+    if not tags:
+        lines[i] = ""
+        return with_brand_tag("\n".join(lines).rstrip(), brand, limit)
+    lines[i] = " ".join(tags)
     if len(tags) <= room:
-        return with_brand_tag(text, brand, limit)
+        return with_brand_tag("\n".join(lines), brand, limit)
     if room <= keep:
         lines[i] = " ".join(tags[:max(room, 0)])
         return with_brand_tag("\n".join(lines), brand, limit)
     head, tail = tags[:keep], tags[keep:]
     # Every COMBINATION of the tail, not a rotating window: a window of three
     # over a tail of six wraps after six accounts, and there are thirteen
-    # brands. C(6,3) is twenty distinct lines, none of them repeating a tag.
+    # brands. C(6,2) is fifteen distinct lines, none of them repeating a tag.
     combos = list(itertools.combinations(tail, room - len(head)))
     # Neighbouring offsets are neighbouring accounts on the same post, and
     # lexicographic neighbours share two tags out of three — step through the
@@ -644,9 +707,32 @@ def _clean(text: str) -> str:
     return out.strip()
 
 
+def _same_line(a: str, b: str) -> bool:
+    """True when two lines say the same words, ignoring case and punctuation."""
+    norm = lambda t: " ".join(re.sub(r"[^\w\s]", " ", t.lower()).split())
+    return bool(norm(a)) and norm(a) == norm(b)
+
+
+def _drop_headline(body: str, headline: str) -> str:
+    """`body` without a first paragraph that is only the headline again.
+
+    The prompts tell the model the headline is printed above its caption, and
+    `compose` puts it there — so a model that reproduces it anyway would give
+    the post the same line twice. Only an exact repeat (case and punctuation
+    aside) is dropped: a first paragraph that merely starts like the headline
+    is prose, and prose is never cut here."""
+    parts = body.split("\n\n", 1)
+    if len(parts) == 2 and _same_line(parts[0], headline):
+        return parts[1].strip()
+    return body
+
+
 def expand(headline: str, footage: dict | None = None,
-           model: str | None = None) -> str:
-    """Expand `headline` into a full Instagram caption with hashtags.
+           model: str | None = None, info: str = "") -> str:
+    """The caption BODY for `headline`: paragraphs, blank line, hashtag pool.
+
+    Never the headline itself — `compose` puts each brand's own headline on
+    top, so every account's first line is exactly the one on its banner.
 
     `footage` is shared/vision.describe's report of what the media actually
     shows. Given one, the caption is written FROM THE MEDIA and the search is
@@ -654,34 +740,36 @@ def expand(headline: str, footage: dict | None = None,
     its query from this prompt and a headline-only prompt searches the
     headline's words rather than the story in front of it.
 
-    Falsy `footage` — the analysis was off, failed, or was never run — sends
-    the identical request this function sent before any of it existed. Vision
-    is best-effort by construction; a failed analysis must not change the
-    caption that gets written, only how well informed it is.
+    `info` is the operator's `info:` reply — the source and the facts they
+    already have. It goes into the user message as OPERATOR'S INFO, which the
+    system prompts treat as the source of truth and which steers the search.
 
-    Returns `headline` unchanged when expansion isn't wanted or possible:
-      - empty headline,
-      - IG_CAPTION_ENABLED is off,
-      - the API key is missing, the call fails, or it comes back empty.
-    Never raises — see the module docstring. Blocking; async callers go
-    through asyncio.to_thread.
+    Returns "" when expansion isn't wanted or possible — empty headline,
+    IG_CAPTION_ENABLED off, no API key, a failed or empty call — and the post
+    then goes out as the bare headline with its account tag. Never raises —
+    see the module docstring. Blocking; async callers go through
+    asyncio.to_thread.
     """
     headline = (headline or "").strip()
+    info = (info or "").strip()
     if not headline:
-        return headline
+        return ""
     if not config.IG_CAPTION_ENABLED:
-        return headline
+        return ""
     if _client is None:
         log.warning("OPENROUTER_API_KEY not set — posting the bare headline "
                     "as the Instagram caption")
-        return headline
+        return ""
 
+    info_block = _USER_INFO.format(info=info) if info else ""
     if footage:
         system = _SYSTEM_FOOTAGE
         user = _USER_FOOTAGE.format(footage=vision.as_prompt(footage),
-                                    headline=headline)
+                                    headline=headline, info=info_block)
     else:
-        system, user = _SYSTEM, headline
+        system = _SYSTEM
+        # No info: exactly the headline, as this request has always been.
+        user = f"{headline}\n\n{info_block}".strip() if info else headline
 
     try:
         resp = _client.chat.completions.create(
@@ -698,14 +786,42 @@ def expand(headline: str, footage: dict | None = None,
     except Exception as exc:
         log.error("instagram caption for %r failed: %s — posting the bare "
                   "headline", headline[:80], exc)
-        return headline
+        return ""
 
-    out = _clean(resp.choices[0].message.content or "")
+    out = _drop_headline(_clean(resp.choices[0].message.content or ""),
+                         headline)
     if not out:
         log.warning("instagram caption for %r came back empty — posting the "
                     "bare headline", headline[:80])
-        return headline
-    return trim_caption(out)
+        return ""
+    return out
+
+
+def compose(headline: str, body: str) -> str:
+    """The caption Instagram gets: the headline, a blank line, the body.
+
+    `headline` is the brand's own — the text on its render — and is never
+    touched. When the whole thing is over Instagram's cap it is the PROSE that
+    gives way: the hashtag line (which opens with the account's own tag) is
+    kept whole, and the paragraphs are cut on a word boundary to make room."""
+    headline = (headline or "").strip()
+    body = (body or "").strip()
+    if not body:
+        return trim_caption(headline)
+    if not headline:
+        return trim_caption(body)
+    body = _drop_headline(body, headline)
+    full = f"{headline}\n\n{body}"
+    if len(full) <= CAPTION_MAX:
+        return full
+    lines = body.split("\n")
+    i = _tag_line_index(lines)
+    if i < 0:
+        return trim_caption(full)
+    tag_line = lines[i].strip()
+    prose = "\n".join(lines[:i]).strip()
+    room = CAPTION_MAX - len(tag_line) - 2
+    return trim_caption(f"{headline}\n\n{prose}", room) + "\n\n" + tag_line
 
 
 def seed_for(text: str) -> int:
@@ -832,7 +948,7 @@ def rephrase(text: str, angle: str, lang: str = "", style: str = "",
         log.warning("instagram caption variant (%s) came back empty — posting "
                     "the shared caption", (angle or style)[:40])
         return text
-    return trim_caption(out)
+    return out
 
 
 if __name__ == "__main__":
@@ -858,6 +974,9 @@ if __name__ == "__main__":
                     help="the clip or photo this caption is for — analysed "
                          "first, so the search is driven by what it shows "
                          "instead of by the headline's words")
+    ap.add_argument("--info", default="", metavar="TEXT",
+                    help="the operator's info: the source and the facts "
+                         "already known, as an `info:` reply would give it")
     args = ap.parse_args()
 
     headline = " ".join(args.headline)
@@ -865,11 +984,8 @@ if __name__ == "__main__":
     if args.media:
         print("--- what the media shows ---")
         print(vision.as_prompt(footage) or "(no analysis — see the log above)")
-        if footage and not footage["headline_ok"]:
-            print(f"\n!! headline may not match: {footage['headline_note']}")
-            print(f"   suggested: {footage['headline_suggestion']}")
         print()
-    shared = expand(headline, footage, model=args.model)
+    shared = expand(headline, footage, model=args.model, info=args.info)
     if args.brands:
         from shared import branding
         fake = [{"name": n, "lang": args.lang,
@@ -879,6 +995,7 @@ if __name__ == "__main__":
     else:
         fake = [{"name": f"account{i + 1}", "lang": args.lang if i else ""}
                 for i in range(max(1, args.accounts))]
+    names = [b["name"] for b in fake]
     for entry in plan(fake, seed_for(headline)):
         text = (rephrase(shared, entry["angle"], entry["lang"], entry["style"])
                 if (entry["angle"] or entry["style"]) else shared)
@@ -886,5 +1003,8 @@ if __name__ == "__main__":
             print(f"--- {entry['name']}: "
                   f"{'its own voice' if entry['style'] else entry['angle'] or 'the shared caption'}"
                   f" ---")
-        print(pick_hashtags(text, entry["offset"], brand=entry["name"]))
+        body = pick_hashtags(text, entry["offset"], brand=entry["name"],
+                             others=names)
+        print(compose(headline, body) if shared
+              else with_brand_tag(headline, entry["name"]))
         print()

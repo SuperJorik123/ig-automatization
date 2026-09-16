@@ -25,13 +25,14 @@ each fanning out to every rendered brand configured for it.
 IG is the Graph API (modules/instagram/graph.py): the render is exposed at a
 public URL (shared/public_media.py, nginx on the VPS) just long enough for
 Instagram to fetch it — a video render becomes a Reel, a photo card a post.
-IG is also the one platform that does not post the headline: the caption is
-expanded from it by a web-searching model (modules/instagram/caption.py) into
-the account's usual paragraphs plus hashtags, once per publish, then
-translated per brand. Nothing publishes without a selection.
+IG is also the one platform that posts more than the headline: the caption is
+the brand's headline, a blank line, then paragraphs plus hashtags written by a
+web-searching model (modules/instagram/caption.py) once per publish and
+reworded per brand. Nothing publishes without a selection.
 
 Caption edit: reply to any open picker message with new text to replace the
-caption before hitting "Post to selected".
+caption before hitting "Post to selected". On the brand-it flow, a reply
+starting `info:` instead gives the Instagram caption its source and facts.
 
 Big files: posting to Telegram channels has never had a size limit (the bot
 re-sends the file_id, so the bytes never leave Telegram). Branding and the
@@ -212,20 +213,22 @@ def _all_photos(media: list) -> bool:
 
 # Shown wherever the operator can still act on it. Instagram is the only
 # platform that publishes more than the headline, so this is the only platform
-# the reply affects — and it is the one input the pipeline cannot produce for
-# them, which is why it is advertised rather than left as a known incantation.
-_CAPTION_HINT = "↩️ reply `caption: …` to write the Instagram caption yourself"
+# the reply affects — and what the operator already knows about the story (the
+# source, the names) is the one input the web search cannot find for itself,
+# which is why it is advertised rather than left as a known incantation.
+_INFO_HINT = ("↩️ reply `info: …` with the source and facts for the "
+              "Instagram caption")
 
 
-def _caption_lines(state: dict) -> list:
-    """The operator's own Instagram caption, echoed back so it is never
-    invisible. Shown on every picker that has one, whether or not that picker
-    is where it was typed."""
-    text = (state.get("caption") or "").strip()
+def _info_lines(state: dict) -> list:
+    """The operator's info for the Instagram caption, echoed back so it is
+    never invisible. Shown on every picker that has one, whether or not that
+    picker is where it was typed."""
+    text = (state.get("info") or "").strip()
     if not text:
         return []
     preview = text if len(text) <= 900 else text[:900] + "…"
-    return ["✍️ your IG caption:\n" + preview]
+    return ["ℹ️ your IG info:\n" + preview]
 
 
 def _gate_text(state: dict) -> str:
@@ -237,7 +240,7 @@ def _gate_text(state: dict) -> str:
     lines = [head]
     if state["text"]:
         lines.append(f"📝 {state['text']}")
-    lines += _caption_lines(state)
+    lines += _info_lines(state)
     return "\n\n".join(lines)
 
 
@@ -462,14 +465,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     _track(msg)  # the operator's own messages get wiped weekly too
     text = msg.caption or msg.text or ""
 
-    # Reply to an open picker = replace that post's headline, or — behind a
-    # "caption:" prefix — hand over the Instagram caption itself.
+    # Reply to an open picker = replace that post's headline, or — behind an
+    # "info:" prefix — give the Instagram caption its source and facts.
     reply = msg.reply_to_message
     if reply is not None and reply.message_id in _pending and text.strip():
         state = _pending[reply.message_id]
         field, value = branded.parse_reply(text)
-        if field == "caption":
-            state["caption"] = value
+        if field == "info":
+            state["info"] = value
         else:
             state["text"] = value
             state["cap_src"] = "edited"
@@ -482,9 +485,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             markup = _brand_markup(state)
         elif mode == "publish":
             # The headline is burned into the renders and can't be changed
-            # now — but the Instagram caption is written at publish time, so a
-            # caption reply is still worth taking this late.
-            if field != "caption":
+            # now — but the Instagram caption is written at publish time, so an
+            # info reply is still worth taking this late.
+            if field != "info":
                 return
             body = _publish_prompt_text(state)
             markup = branded.platform_keyboard(state["platforms"],
@@ -645,11 +648,7 @@ async def _post_to_twitter(bot, text: str, media: list, dests: list):
 
 def _brand_prompt_text(state: dict) -> str:
     """Brand-picker body: the headline, what the footage analysis saw, and the
-    two things a reply can do.
-
-    The analysis lands here rather than at publish because THIS is the last
-    moment the headline can still be changed — a minute later it is burned into
-    the banner of every render."""
+    two things a reply can do."""
     head = state["text"].strip()
     lines = ["Brand for which brands?"]
     lines.append(f"📝 {head}" if head
@@ -658,20 +657,20 @@ def _brand_prompt_text(state: dict) -> str:
         lines.append("👁 watching the clip…")
     else:
         lines += branded.footage_lines(state.get("footage") or {})
-    lines += _caption_lines(state)
+    lines += _info_lines(state)
     lines.append("↩️ reply to this message to replace the headline\n"
-                 + _CAPTION_HINT)
+                 + _INFO_HINT)
     return "\n\n".join(lines)
 
 
 def _publish_prompt_text(state: dict) -> str:
     """Publish-picker body. The headline is burned into the renders by now, but
     the Instagram caption is still written at publish time — so this is the
-    last place a `caption:` reply can land, and it says so."""
+    last place an `info:` reply can land, and it says so."""
     lines = ["Publish to which platforms?"]
-    lines += _caption_lines(state)
+    lines += _info_lines(state)
     if any(p["platform"] == "ig" for p in state.get("platforms", ())):
-        lines.append(_CAPTION_HINT)
+        lines.append(_INFO_HINT)
     return "\n\n".join(lines)
 
 
@@ -710,11 +709,11 @@ async def _watch_media(bot, state: dict, message) -> None:
     """Analyse this post's media in the background and put what it saw on the
     brand picker.
 
-    Started when the picker opens, because THAT is the last moment the headline
-    can still be corrected — after the render it is burned into the banner. It
-    is also why this does the download itself rather than waiting for the
-    render to: the file has to be fetched anyway, and fetching it here buys the
-    operator the analysis while they are still choosing brands.
+    Started when the picker opens, so what the clip shows is on the picker
+    while the operator is still choosing and headline and info can still be
+    replied to. That is also why this does the download itself rather than
+    waiting for the render to: the file has to be fetched anyway, and fetching
+    it here buys the operator the analysis while they are still choosing brands.
 
     Never raises and never blocks anything: a failure leaves state["footage"]
     empty, which every consumer already treats as "no analysis".
@@ -1169,7 +1168,7 @@ async def _do_render_card(q, context, state: dict) -> None:
 
 
 async def _ig_captions(source_text: str, pairs: list, footage: dict | None = None,
-                       manual: str = "") -> dict[str, str]:
+                       info: str = "") -> dict[str, str]:
     """The Instagram caption for each brand, keyed by brand NAME.
 
     Instagram is the only platform here that posts more than the headline (see
@@ -1196,27 +1195,35 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
     makes the search corroborate the clip instead of chasing the headline's
     words, and an empty one simply expands from the headline as before.
 
-    `manual` is a caption the OPERATOR typed (a `caption:` reply). It is used
-    as the shared caption verbatim and NOTHING IS BOUGHT — no analysis, no
-    search. What still runs is the per-account layer: their text in each
-    brand's voice, with each brand's own hashtags and its own tag. Publishing
-    one operator caption to thirteen accounts character for character would
-    reintroduce the duplicate content that layer exists to prevent.
+    `info` is the operator's `info:` reply — the source and the facts they
+    already have. It goes into the one expansion as the source of truth and
+    steers its search; it is never published as such.
+
+    Each value is the FINISHED caption: that brand's own headline (the one on
+    its render, already translated), a blank line, then the AI-written body
+    with the brand's tag opening its hashtag line (`caption.compose`).
 
     Never raises: an empty dict means every IG pair falls back to its headline,
     which is what shipped before any of this existed, and a single failed
     rewrite falls back to the shared caption on its own.
     """
+    ig_pairs = [p for p in pairs if p["platform"] == "ig"]
     brands = [dict(p["render"]["brand"],
                    style=branding.load_writing_style(
                        os.path.dirname(p["render"]["brand"]["logo"])))
-              for p in pairs if p["platform"] == "ig"]
-    manual = (manual or "").strip()
-    if not brands or not (manual or (source_text or "").strip()):
+              for p in ig_pairs]
+    headlines = {p["render"]["brand"]["name"]: p["render"]["headline"]
+                 for p in ig_pairs}
+    # Every brand the bot knows, so a sibling's tag is never dealt to another
+    # account — not only the ones in this publish.
+    names = {b["name"] for b in config.BRANDS} | set(headlines)
+    if not brands or not (source_text or "").strip():
         return {}
     try:
-        full = manual or await asyncio.to_thread(
-            ig_caption.expand, source_text, footage or {})
+        full = await asyncio.to_thread(
+            ig_caption.expand, source_text, footage or {}, None, info or "")
+        if not full:
+            return {}
         out = {}
         for entry in ig_caption.plan(brands, ig_caption.seed_for(source_text)):
             lang = entry["lang"]
@@ -1232,8 +1239,10 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
                     translator.translate, full, lang, config.SOURCE_LANG)
             else:
                 text = full
-            out[entry["name"]] = ig_caption.pick_hashtags(
-                text, entry["offset"], brand=entry["name"])
+            body = ig_caption.pick_hashtags(
+                text, entry["offset"], brand=entry["name"], others=names)
+            out[entry["name"]] = ig_caption.compose(
+                headlines.get(entry["name"]) or source_text, body)
         return out
     except Exception:
         log.exception("instagram caption expansion failed — posting headlines")
@@ -1249,11 +1258,11 @@ async def _do_publish(q, context, state: dict) -> None:
     await q.edit_message_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
 
-    # Before the loop: one footage-backed expansion shared by every IG pair —
-    # or the operator's own caption, which buys nothing at all.
+    # Before the loop: one footage-backed expansion shared by every IG pair,
+    # informed by the operator's info: reply when there is one.
     ig_caps = await _ig_captions(state.get("text", ""), pairs,
                                  state.get("footage") or {},
-                                 state.get("caption", ""))
+                                 state.get("info", ""))
 
     lines = []
     for p in pairs:
