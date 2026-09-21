@@ -80,6 +80,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
+from telegram.error import BadRequest  # noqa: E402
 from telegram.ext import (  # noqa: E402
     Application,
     CallbackQueryHandler,
@@ -1723,6 +1724,27 @@ async def _on_shutdown(app) -> None:
     await mtproto.close()
 
 
+# Telegram expires a callback query id within about a minute. A tap on a picker
+# left over from before a restart arrives after that window (the update sat in
+# the getUpdates backlog while the bot was down), so the spinner ack raises.
+_STALE_CALLBACK = "query is too old"
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log handler exceptions; the stale-callback ack at WARNING, not ERROR.
+
+    Nothing failed to publish when it fires - only `q.answer()`, the spinner
+    ack - but errmail mails every ERROR, and without an error handler PTB logs
+    each one. Everything else is logged at ERROR exactly as before, so real
+    failures still reach the operator.
+    """
+    err = context.error
+    if isinstance(err, BadRequest) and _STALE_CALLBACK in str(err).lower():
+        log.warning("stale callback query ignored: %s", err)
+        return
+    log.error("unhandled error while processing %s", update, exc_info=err)
+
+
 def main() -> None:
     errmail.install("news_bot")  # every logged ERROR -> one email to the operator
     _sweep_orphans()
@@ -1737,6 +1759,7 @@ def main() -> None:
     # Chat filter limits the bot to the control group; ~COMMAND skips /commands.
     app.add_handler(MessageHandler(control & ~filters.COMMAND, on_message))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_error_handler(on_error)
     log.info(
         "news bot up: listening in chat %s, %d telegram channel(s): %s | %d youtube channel(s): %s",
         CHAT_ID,
