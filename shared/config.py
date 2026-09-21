@@ -325,7 +325,7 @@ PUBLIC_MEDIA_BASE_URL = os.environ.get("PUBLIC_MEDIA_BASE_URL", "").strip()
 def _parse_brands(raw: str, env):
     """Parse BRANDS: comma-separated "name:lang" entries, e.g.
     "mirnews:en,rusnews:ru" (lang optional). Each brand's platform accounts
-    come from BRAND_<NAME>_TG / _YT / _TW / _IG, and its picker group from
+    come from BRAND_<NAME>_TG / _YT / _TW / _IG / _FB, and its picker group from
     BRAND_<NAME>_GROUP (name uppercased, non-alphanumerics
     -> "_", same rule as TWITTER_<ACCOUNT>_*); an unset platform means the
     brand has no pair for it in the publish picker. The logo is always
@@ -349,6 +349,7 @@ def _parse_brands(raw: str, env):
             "yt": (env.get(f"BRAND_{key}_YT") or "").strip(),
             "tw": (env.get(f"BRAND_{key}_TW") or "").strip(),
             "ig": (env.get(f"BRAND_{key}_IG") or "").strip(),
+            "fb": (env.get(f"BRAND_{key}_FB") or "").strip(),
             "logo": os.path.join(ROOT_DIR, "brands", name, "logo.png"),
         })
     return out

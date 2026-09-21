@@ -193,6 +193,47 @@ def test_brand_without_ig_slot_has_no_ig_platform():
     assert "ig" not in [p["platform"] for p in plats]
 
 
+# --- Facebook (Pages API) --------------------------------------------------
+
+def test_platforms_include_fb_for_video_and_photo_renders():
+    """Like Instagram, Facebook takes both render kinds — a video goes out as
+    a Reel, a card as a photo post — so neither the Shorts cap nor the
+    photo-card rule applies to it."""
+    brand = dict(_brand(tg="@mir", yt="mir", tw=""), fb="mirpage")
+    video = _render(brand)
+    photo = dict(_render(brand), kind="photo")
+    assert [p["platform"] for p in branded.platforms_for([video], 60)] == \
+        ["tg", "yt", "fb"]
+    assert [p["platform"] for p in branded.platforms_for([photo], 0)] == \
+        ["tg", "fb"]
+
+
+def test_fb_survives_a_clip_past_the_shorts_cap_that_drops_yt():
+    brand = dict(_brand(tg="@mir", yt="mir", tw=""), fb="mirpage")
+    plats = branded.platforms_for([_render(brand)], 181)
+    assert [p["platform"] for p in plats] == ["tg", "fb"]
+
+
+def test_fb_pair_label_and_expand():
+    brand = dict(_brand(tg="", yt="", tw=""), fb="mirpage")
+    plats = branded.platforms_for([_render(brand)], 60)
+    assert [p["platform"] for p in plats] == ["fb"]
+    assert branded.expand(plats, {0})[0]["label"] == "mir → FB"
+
+
+def test_brand_without_fb_slot_has_no_fb_platform():
+    plats = branded.platforms_for([_render(_brand())], 60)
+    assert "fb" not in [p["platform"] for p in plats]
+
+
+def test_fb_row_appears_in_the_platform_keyboard():
+    brand = dict(_brand(tg="@mir", yt="", tw=""), fb="mirpage")
+    plats = branded.platforms_for([_render(brand)], 60)
+    btns = _buttons(branded.platform_keyboard(plats, {1}))
+    assert [b.text for b in btns[:2]] == ["☐ TG · 1 brand", "☑ FB · 1 brand"]
+    assert [b.callback_data for b in btns[:2]] == ["b:p:0", "b:p:1"]
+
+
 # --- operator replies: headline vs info ------------------------------------
 #
 # A reply to an open picker used to mean one thing: replace the headline. The

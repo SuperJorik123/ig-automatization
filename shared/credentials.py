@@ -78,13 +78,20 @@ INSTAGRAM_FIELDS = {
     "user_id": "USER_ID",
     "token_refreshed": "TOKEN_REFRESHED",
 }
+# Facebook Pages. No token_refreshed twin: a Page token derived from a system
+# user does not expire, so there is nothing for a daily refresh job to do.
+FACEBOOK_FIELDS = {
+    "access_token": "ACCESS_TOKEN",
+    "page_id": "PAGE_ID",
+}
 
 _BRAND_KEYS = {"lang", "group", "notes", "telegram", "youtube", "twitter",
-               "instagram", "$schema", "_comment"}
+               "instagram", "facebook", "$schema", "_comment"}
 _TELEGRAM_KEYS = {"channel"}
 _YOUTUBE_KEYS = {"channel"}
 _TWITTER_KEYS = set(TWITTER_FIELDS) | {"account"}
 _INSTAGRAM_KEYS = set(INSTAGRAM_FIELDS) | {"account"}
+_FACEBOOK_KEYS = set(FACEBOOK_FIELDS) | {"account"}
 
 # Masked in --check output; everything else is a handle, not a secret.
 _SECRET_FIELDS = {"consumer_key", "secret_key", "bearer_token",
@@ -144,7 +151,7 @@ def env_from_brands(brands: dict, existing=None) -> dict:
     supplies the current BRANDS / IG_GRAPH_ACCOUNTS to merge against
     (os.environ in production, a plain dict in tests). No I/O."""
     existing = existing or {}
-    out, specs, ig_accounts = {}, [], []
+    out, specs, ig_accounts, fb_accounts = {}, [], [], []
     for name, brand in brands.items():
         where = f"{name}.json"
         _check_keys(where, brand, _BRAND_KEYS)
@@ -187,12 +194,25 @@ def env_from_brands(brands: dict, existing=None) -> dict:
                 _put(out, prefix + var, instagram.get(field))
             ig_accounts.append(account)
 
+        facebook = brand.get("facebook") or {}
+        _check_keys(f"{where}: facebook", facebook, _FACEBOOK_KEYS)
+        if facebook:
+            account = (facebook.get("account") or name).strip()
+            _put(out, f"BRAND_{key}_FB", account)
+            prefix = f"FACEBOOK_{env_key(account)}_"
+            for field, var in FACEBOOK_FIELDS.items():
+                _put(out, prefix + var, facebook.get(field))
+            fb_accounts.append(account)
+
     if specs:
         out["BRANDS"] = _merge_list(existing.get("BRANDS", ""), specs,
                                     key=lambda s: s.split(":")[0])
     if ig_accounts:
         out["IG_GRAPH_ACCOUNTS"] = _merge_list(
             existing.get("IG_GRAPH_ACCOUNTS", ""), ig_accounts)
+    if fb_accounts:
+        out["FACEBOOK_ACCOUNTS"] = _merge_list(
+            existing.get("FACEBOOK_ACCOUNTS", ""), fb_accounts)
     return out
 
 
@@ -347,7 +367,8 @@ def _print_check(accounts_dir: str) -> int:
         print(f"  {name}.json ({brand.get('lang') or 'raw'}"
               f"{', ' + group if group else ''})")
         slots = []
-        for platform in ("telegram", "youtube", "twitter", "instagram"):
+        for platform in ("telegram", "youtube", "twitter", "instagram",
+                         "facebook"):
             block = brand.get(platform) or {}
             if not block:
                 continue

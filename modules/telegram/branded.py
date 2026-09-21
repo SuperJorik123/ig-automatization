@@ -37,7 +37,8 @@ from modules.telegram import groups
 from modules.youtube.shorts_format import MAX_SHORT_S
 
 # (brand-dict key, picker label) — the order platforms appear in the picker.
-PLATFORMS = (("tg", "TG"), ("yt", "YT"), ("tw", "X"), ("ig", "IG"))
+PLATFORMS = (("tg", "TG"), ("yt", "YT"), ("tw", "X"), ("ig", "IG"),
+             ("fb", "FB"))
 
 # A reply to an open picker used to mean exactly one thing: replace the
 # headline. This prefix is how the operator hands the Instagram caption what
@@ -91,8 +92,8 @@ def _publishable(render: dict, key: str, duration_s: float) -> bool:
     """Can this one render go out on this platform? A brand with no account
     configured for it can't; YouTube additionally can't take a clip past the
     Shorts cap (an upload that can't be a Short shouldn't be offered) or a
-    photo card at all. Instagram takes both — a video render goes out as a
-    Reel, a photo card as a feed post."""
+    photo card at all. Instagram and Facebook take both — a video render
+    goes out as a Reel, a photo card as a feed post."""
     if not render["brand"].get(key):
         return False
     if key == "yt" and (duration_s > MAX_SHORT_S

@@ -104,6 +104,7 @@ from modules.twitter import publisher as tw_publisher  # noqa: E402
 from modules.telegram import branded, groups, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
+from modules.facebook import poster as fb_poster  # noqa: E402
 from shared import branding, photo_card, public_media, vision  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
 
@@ -1314,6 +1315,20 @@ async def _do_publish(q, context, state: dict) -> None:
                         b["ig"])
                 finally:
                     drop()
+                if result.get("status") == "success":
+                    lines.append(f"✅ {p['label']}")
+                else:
+                    lines.append(f"❌ {p['label']}: "
+                                 f"{result.get('error', 'unknown error')}")
+            elif p["platform"] == "fb":
+                # No public_media round trip, unlike the Instagram leg: the
+                # Pages API takes a multipart upload, so the render goes
+                # straight from disk. post_media picks the edge from the
+                # extension — a video render becomes a Reel, a card a photo
+                # post. The caption is the brand's headline, as on TG/YT/X;
+                # the expanded body is Instagram-only.
+                result = await asyncio.to_thread(
+                    fb_poster.post_media, r["path"], r["headline"], b["fb"])
                 if result.get("status") == "success":
                     lines.append(f"✅ {p['label']}")
                 else:
