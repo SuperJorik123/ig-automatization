@@ -21,7 +21,7 @@ is the flat list it always was.
 
 Callback namespace "b:" (the manual picker owns t:/y:/e:, asks own r:):
     b:asis  b:brand              the as-is / brand-it gate (video)
-    b:asis  b:card               the as-is / create-post gate (photos)
+    b:asis  b:card:<layout>      the as-is / create-post gate (photos)
     b:g:<i> b:custom b:groups    brand picker, collapsed (i indexes the groups)
     b:t:<i> b:render b:cancel    brand picker, expanded (i indexes the brands)
     b:p:<i> b:publish            platform picker (i indexes the platforms list)
@@ -135,13 +135,33 @@ def gate_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
-def card_gate_keyboard() -> InlineKeyboardMarkup:
+# The card designs, in picker order: (photo_card layout, button label). Only
+# offered when the post HAS the photos a layout needs — "split" and "insets"
+# are the same picture as "solo" with one photo, so a single-photo post is
+# given one card button rather than three that render identically.
+CARD_LAYOUTS = (("insets", "⚪ Circles"), ("split", "◧ Split"),
+                ("solo", "▭ Photo only"))
+
+
+def card_layouts(n_photos: int) -> list[tuple[str, str]]:
+    """The designs worth offering for a post of `n_photos` photos."""
+    if n_photos <= 1:
+        return [("solo", "🖼 Create post")]
+    return list(CARD_LAYOUTS)
+
+
+def card_gate_keyboard(n_photos: int) -> InlineKeyboardMarkup:
     """Photo post gate: post the photos as they are, or compose a news card
-    (hero + circular insets + logo + headline, shared/photo_card.py)."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("📤 Post as-is", callback_data="b:asis"),
-        InlineKeyboardButton("🖼 Create post", callback_data="b:card"),
-    ]])
+    in one of the designs `n_photos` photos allow (shared/photo_card.py).
+    With one photo that is a single button and the row stays flat; with more,
+    the designs get a row of their own under "Post as-is"."""
+    layouts = card_layouts(n_photos)
+    asis = InlineKeyboardButton("📤 Post as-is", callback_data="b:asis")
+    cards = [InlineKeyboardButton(label, callback_data=f"b:card:{layout}")
+             for layout, label in layouts]
+    if len(cards) == 1:
+        return InlineKeyboardMarkup([[asis] + cards])
+    return InlineKeyboardMarkup([[asis], cards])
 
 
 def toggle_brand_group(brands: list, selected: set, index: int) -> set:

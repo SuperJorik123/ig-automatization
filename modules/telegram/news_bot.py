@@ -269,9 +269,13 @@ def _gate_text(state: dict) -> str:
     return "\n\n".join(lines)
 
 
+def _photo_count(media: list) -> int:
+    return sum(1 for m in media if m["type"] == "photo")
+
+
 def _gate_markup(state: dict) -> InlineKeyboardMarkup:
     if state.get("gate_kind") == "photo":
-        return branded.card_gate_keyboard()
+        return branded.card_gate_keyboard(_photo_count(state["media"]))
     return branded.gate_keyboard()
 
 
@@ -811,10 +815,19 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
                                   reply_markup=_keyboard(state))
         return
 
-    if verb == "card":
+    if verb == "card" or verb.startswith("card:"):
+        # "b:card" without a layout is a keyboard from before the designs
+        # existed — the circles card is what it used to render. Validate
+        # BEFORE answering: a query can only be answered once, so an alert
+        # sent after a bare q.answer() never reaches the operator.
+        layout = verb.split(":", 1)[1] if ":" in verb else "insets"
+        if layout not in photo_card.LAYOUTS:
+            await q.answer("Unknown card design.", show_alert=True)
+            return
         await q.answer()
         state["mode"] = "brand"
         state["card"] = True
+        state["layout"] = layout
         state["brands"] = branded.available_brands(config.BRANDS)
         state["sel_brands"] = {i for i, b in enumerate(state["brands"])
                                if b["has_logo"]}
@@ -1096,10 +1109,11 @@ async def _ensure_local_photos(bot, state: dict) -> list[str]:
 
 
 async def _do_render_card(q, context, state: dict) -> None:
-    """Photo twin of _do_render: first photo = hero, next two = circular
-    insets, headline translated per brand, one card per selected brand via
-    shared/photo_card.py. Each card is sent back as a photo, then the publish
-    picker opens (TG + X pairs only — YouTube can't take a photo)."""
+    """Photo twin of _do_render: first photo = hero, the next two are the
+    other photos the chosen design uses (circular insets, split panels, or
+    nothing at all), headline translated per brand, one card per selected
+    brand via shared/photo_card.py. Each card is sent back as a photo, then
+    the publish picker opens (TG + X + IG — YouTube can't take a photo)."""
     brands = [state["brands"][i] for i in sorted(state["sel_brands"])]
     await q.edit_message_text(
         "⏳ composing " + ", ".join(b["name"] for b in brands) + " …")
@@ -1115,6 +1129,7 @@ async def _do_render_card(q, context, state: dict) -> None:
         _cleanup(state)
         await q.edit_message_text(f"❌ can't fetch the photos: {str(exc)[:300]}")
         return
+    layout = state.get("layout", "insets")
     hero, insets = photos[0], photos[1:3]
 
     media_dir = os.path.join(config.TG_DATA_DIR, "media")
@@ -1130,7 +1145,7 @@ async def _do_render_card(q, context, state: dict) -> None:
             out = os.path.join(
                 media_dir, f"card_{q.message.message_id}_{b['name']}.jpg")
             await asyncio.to_thread(photo_card.render_card, hero, cache[lang],
-                                    b["logo"], out, insets)
+                                    b["logo"], out, insets, layout=layout)
         except Exception as exc:
             log.error("card render failed for %s: %s", b["name"], exc)
             failures.append((b["name"], str(exc)[:200]))

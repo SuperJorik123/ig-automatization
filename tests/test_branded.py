@@ -171,9 +171,14 @@ def test_platforms_hide_youtube_for_photo_cards():
     assert [p["platform"] for p in branded.platforms_for([r], 0)] == ["tg", "tw"]
 
 
-def test_card_gate_keyboard_has_both_choices():
-    data = [b.callback_data for b in _buttons(branded.card_gate_keyboard())]
-    assert data == ["b:asis", "b:card"]
+def test_card_gate_offers_one_layout_for_a_single_photo():
+    data = [b.callback_data for b in _buttons(branded.card_gate_keyboard(1))]
+    assert data == ["b:asis", "b:card:solo"]
+
+
+def test_card_gate_offers_every_layout_for_several_photos():
+    data = [b.callback_data for b in _buttons(branded.card_gate_keyboard(3))]
+    assert data == ["b:asis", "b:card:insets", "b:card:split", "b:card:solo"]
 
 
 # --- Instagram (Graph API) -------------------------------------------------

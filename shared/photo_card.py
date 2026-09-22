@@ -6,9 +6,19 @@ network, no Telegram — the photo twin of `shared/branding.py`.
 Layers, bottom to top (all geometry is a fraction of the canvas so a 4:5 or
 1:1 target renders the same design):
 
-  0  hero photo     cover-fit to the canvas; the crop window is steered by
+  0  photos         `layout` decides this layer and nothing else: "insets"
+                    (the default) is the hero plus circular badges, "solo"
+                    the hero alone, "split" 2-3 full-height panels edge to
+                    edge, each cropped around its own subject. Layers 2-5
+                    below are identical in all three.
+  0a hero photo     cover-fit to the canvas; the crop window is steered by
                     `focus` (0..1 of the source height, where the subject's
                     eyes are) so the eyeline lands in the upper third.
+  0b panels         ("split") each photo scale-to-cover into its equal slice
+                    of the width, the crop window centred on the subject
+                    (`subject_focus`) rather than on the photo's middle — a
+                    540 or 360 px wide slice of a landscape shot decapitates
+                    an off-centre subject otherwise.
   1  insets         circular crops, white stroke + soft drop shadow, top-left
                     and top-right, mirrored about the centre axis, fully
                     inside the frame with a small margin.
@@ -30,6 +40,8 @@ CLI (quick visual test):
 
     py shared/photo_card.py hero.jpg --headline "..." --brand mirnews \
         --inset a.jpg --inset b.jpg -o card.jpg
+    py shared/photo_card.py a.jpg --layout split --inset b.jpg \
+        --inset c.jpg --headline "..." --brand mirnews -o card.jpg
 """
 
 import argparse
@@ -78,6 +90,17 @@ CUTOUT_MODEL = os.environ.get("CARD_CUTOUT_MODEL", "bria-rmbg")
 # alpha by this many px (shaves the contaminated rim) then feather it.
 CUTOUT_ERODE_PX = 2
 CUTOUT_FEATHER_PX = 1.2
+
+# Split layout: 2 or 3 photos as full-height vertical panels, edge to edge,
+# no gutter (examples 3 and 4). The panels run the whole canvas height and the
+# scrim/divider/headline stack sits on top of them unchanged, so the brand look
+# is identical whichever layout an operator picks.
+LAYOUTS = ("solo", "insets", "split")
+MAX_PANELS = 3
+# Where a panel's subject centroid lands, as a fraction of the panel height.
+# A person's matte centroid sits around the chest, so 0.45 puts the head in the
+# upper third the way the references do.
+PANEL_FOCUS_Y = 0.45
 
 # Blur-fill behind a contain-fitted hero (aspect != canvas).
 BLURFILL_RADIUS = 40
@@ -171,6 +194,42 @@ def contain_fit(img: Image.Image, size: tuple[int, int]) -> Image.Image:
     return bg
 
 
+def panel_fit(img: Image.Image, size: tuple[int, int],
+              focus: tuple[float, float] = (0.5, PANEL_FOCUS_Y)) -> Image.Image:
+    """Scale-to-cover and crop into a split panel. Unlike `cover_fit` (which
+    only steers the vertical crop and always centres horizontally), a panel is
+    far narrower than the source, so BOTH axes follow `focus` — the (x, y) the
+    subject sits at in the source, 0..1. The window is clamped to the photo, so
+    a subject near an edge pulls the crop as far as it can go and no further."""
+    W, H = size
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    sw, sh = img.size
+    scale = max(W / sw, H / sh)
+    nw, nh = round(sw * scale), round(sh * scale)
+    img = img.resize((nw, nh), Image.LANCZOS)
+    fx, fy = focus
+    left = max(0, min(round(fx * nw - W / 2), nw - W))
+    top = max(0, min(round(fy * nh - PANEL_FOCUS_Y * H), nh - H))
+    return img.crop((left, top, left + W, top + H))
+
+
+def split_fill(paths: list[str], size: tuple[int, int]) -> Image.Image:
+    """The 2- or 3-photo panel strip: each photo cover-cropped around its own
+    subject into an equal slice of the width, edge to edge. Integer widths are
+    handed out so the slices always sum to W — a rounded-down width would leave
+    a one-pixel seam of empty canvas."""
+    W, H = size
+    n = max(1, len(paths))
+    canvas = Image.new("RGB", size, (0, 0, 0))
+    x = 0
+    for i, path in enumerate(paths):
+        right = round(W * (i + 1) / n)
+        panel = panel_fit(Image.open(path), (right - x, H), subject_focus(path))
+        canvas.paste(panel, (x, 0))
+        x = right
+    return canvas
+
+
 def circle_inset(img: Image.Image, diameter: int) -> Image.Image:
     """Circular crop with a white stroke and drop shadow, RGBA, sized so the
     shadow has room: (diameter + pad) square, circle centred."""
@@ -222,6 +281,62 @@ def subject_cutout(hero: Image.Image):
         log.info("photo_card: matte covers %.1f%%, no subject cut-out", coverage * 100)
         return None
     return cut
+
+
+# (abspath, mtime, size) -> (fx, fy). A card is rendered once per brand off
+# the same handful of photos, so without this the thirteen brands would each
+# pay for the same three rembg passes. Bounded because the news bot is a
+# long-running process and the photos it keys on are swept nightly.
+_FOCUS_CACHE: dict[tuple, tuple[float, float]] = {}
+_FOCUS_CACHE_MAX = 256
+# The focus point is a centroid, not a cut-out: a thumbnail gives the same
+# answer to within a pixel of the panel and rembg costs a fraction as much
+# (the matte for a 4000 px phone photo is seconds of CPU on the VPS, and a
+# 3-panel split would pay it three times before the first brand renders).
+FOCUS_MATTE_PX = 320
+
+
+def subject_focus(path: str) -> tuple[float, float]:
+    """Where the subject sits in the photo at `path`, as (x, y) fractions of
+    its size: the alpha-weighted centroid of the rembg matte. Falls back to
+    (0.5, EYELINE) — the plain centre crop — when there is no usable matte,
+    the same never-fails contract as `subject_cutout`. Memoised per file."""
+    try:
+        st = os.stat(path)
+        key = (os.path.abspath(path), st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and key in _FOCUS_CACHE:
+        return _FOCUS_CACHE[key]
+    focus = _subject_focus(path)
+    if key is not None:
+        if len(_FOCUS_CACHE) >= _FOCUS_CACHE_MAX:
+            _FOCUS_CACHE.clear()
+        _FOCUS_CACHE[key] = focus
+    return focus
+
+
+def _subject_focus(path: str) -> tuple[float, float]:
+    default = (0.5, EYELINE)
+    try:
+        with Image.open(path) as im:
+            small = ImageOps.exif_transpose(im).convert("RGB")
+            small.thumbnail((FOCUS_MATTE_PX, FOCUS_MATTE_PX), Image.LANCZOS)
+            cut = subject_cutout(small)
+    except Exception as exc:
+        log.warning("photo_card: can't read %s for a focus point (%s)", path, exc)
+        return default
+    if cut is None:
+        return default
+    import numpy as np
+    a = np.asarray(cut.getchannel("A"), dtype="float64")
+    total = a.sum()
+    if total <= 0:
+        return default
+    h, w = a.shape
+    fx = float((a.sum(axis=0) * np.arange(w)).sum() / total / w)
+    fy = float((a.sum(axis=1) * np.arange(h)).sum() / total / h)
+    return fx, fy
 
 
 def _restrict_to_circles(subject: Image.Image, circles: list) -> Image.Image:
@@ -299,39 +414,56 @@ def render_card(hero_path: str, headline: str, logo_path: str, out_path: str,
                 insets: list[str] | None = None, size: tuple[int, int] = DEFAULT_SIZE,
                 focus: float = EYELINE, font_path: str | None = None,
                 quality: int = 92, cutout: bool = True,
-                fit: str = "contain") -> str:
+                fit: str = "contain", layout: str = "insets") -> str:
     """Compose the card and write it to `out_path` (JPEG). Returns out_path.
     `cutout=False` skips the rembg subject layer (tests, quick previews).
     `fit`: "contain" (default) shows the whole photo with blur-filled bands;
-    "cover" zooms/crops it to fill the canvas (steered by `focus`)."""
+    "cover" zooms/crops it to fill the canvas (steered by `focus`).
+
+    `layout` picks what happens BELOW the scrim and nothing else; the scrim,
+    divider, logo and headline are the same in all three, which is what keeps
+    the brand look constant whichever design the operator taps:
+
+      "insets"  hero + up to two circular insets + the subject cut back on top
+      "solo"    the hero alone; `insets` is ignored
+      "split"   hero + `insets` as 2 or 3 full-height panels, edge to edge
+
+    `insets` is therefore "the other photos in the post" — circles, panels or
+    nothing, depending on the layout.
+    """
+    if layout not in LAYOUTS:
+        raise ValueError(f"unknown layout {layout!r}, expected one of {LAYOUTS}")
     W, H = size
     font_path = font_path or default_font()
-    insets = [p for p in (insets or []) if p][:2]
+    insets = [p for p in (insets or []) if p][:MAX_PANELS - 1]
 
-    # 0 — hero
-    if fit == "cover":
+    # 0 — the photo layer, the one part `layout` changes
+    if layout == "split":
+        hero = split_fill([hero_path] + insets, size)
+    elif fit == "cover":
         hero = cover_fit(Image.open(hero_path), size, focus)
     else:
         hero = contain_fit(Image.open(hero_path), size)
     canvas = hero.convert("RGBA")
 
     # 1 — insets
-    d = round(INSET_DIAMETER * W)
-    cy = round(INSET_CENTER_Y * H)
     circles = []                                    # (cx, cy, d) for the cut-out mask
-    for i, path in enumerate(insets):
-        badge = circle_inset(Image.open(path), d)
-        pad = (badge.width - d) // 2
-        m = round(INSET_MARGIN * W)
-        if i == 0:                                  # left, fully inside the frame
-            cx = m + d // 2
-        else:                                       # right, mirrored
-            cx = W - m - d // 2
-        canvas.alpha_composite(badge, (cx - d // 2 - pad, cy - d // 2 - pad))
-        circles.append((cx, cy, d))
+    if layout == "insets":
+        d = round(INSET_DIAMETER * W)
+        cy = round(INSET_CENTER_Y * H)
+        for i, path in enumerate(insets[:2]):
+            badge = circle_inset(Image.open(path), d)
+            pad = (badge.width - d) // 2
+            m = round(INSET_MARGIN * W)
+            if i == 0:                              # left, fully inside the frame
+                cx = m + d // 2
+            else:                                   # right, mirrored
+                cx = W - m - d // 2
+            canvas.alpha_composite(badge, (cx - d // 2 - pad, cy - d // 2 - pad))
+            circles.append((cx, cy, d))
 
     # 1b — subject back on top of the insets, ONLY where a circle sits
-    if insets and cutout:
+    if circles and cutout:
         subject = subject_cutout(hero)
         if subject is not None:
             canvas.alpha_composite(_restrict_to_circles(subject, circles))
@@ -388,7 +520,12 @@ def main(argv=None) -> int:
     ap.add_argument("--headline", required=True)
     ap.add_argument("--brand", help="brand name under brands/ (uses its logo.png)")
     ap.add_argument("--logo", help="explicit logo path (overrides --brand)")
-    ap.add_argument("--inset", action="append", default=[], help="inset photo (max 2)")
+    ap.add_argument("--inset", action="append", default=[],
+                    help="the other photos: circles (insets), panels (split), "
+                         "ignored (solo). Max 2.")
+    ap.add_argument("--layout", choices=LAYOUTS, default="insets",
+                    help="insets = hero + circles (default); solo = hero alone; "
+                         "split = 2-3 full-height panels")
     ap.add_argument("--focus", type=float, default=EYELINE,
                     help="0..1: where the eyes are in the source (default %(default)s)")
     ap.add_argument("--square", action="store_true", help="1080x1080 instead of 4:5")
@@ -402,7 +539,8 @@ def main(argv=None) -> int:
     logo = a.logo or brand_logo(a.brand or "mirnews")
     size = (1080, 1080) if a.square else DEFAULT_SIZE
     out = render_card(a.hero, a.headline, logo, a.out, insets=a.inset,
-                      size=size, focus=a.focus, font_path=a.font, fit=a.fit)
+                      size=size, focus=a.focus, font_path=a.font, fit=a.fit,
+                      layout=a.layout)
     print(out)
     return 0
 
