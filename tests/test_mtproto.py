@@ -102,3 +102,49 @@ def test_empty_input_is_rejected():
     import pytest as _pytest
     with _pytest.raises(ValueError):
         mtproto.normalize_phone("   ", "373")
+# --- own-message bookkeeping ----------------------------------------------
+# Past the Bot API's 50 MB cap the branded preview is sent from the USER
+# account, so it lands in the control group as an ordinary member message and
+# the bot's on_message sees it. Recording what we send is how news_bot tells
+# that echo apart from a real news post.
+
+
+class _FakeSent:
+    id = 777
+
+
+class _FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    async def send_file(self, chat_id, path, **kw):
+        self.calls.append((chat_id, path, kw))
+        return _FakeSent()
+
+
+@pytest.fixture
+def ready(monkeypatch, tmp_path):
+    mtproto._sent.clear()
+    fake = _FakeClient()
+    monkeypatch.setattr(mtproto, "_ready", True)
+    monkeypatch.setattr(mtproto, "_client", fake)
+    clip = tmp_path / "brand_x.mp4"
+    clip.write_bytes(b"0" * 1024)
+    return fake, str(clip)
+
+
+def test_send_video_records_what_it_sent(ready):
+    _, clip = ready
+    asyncio.run(mtproto.send_video(-100123, clip, "tag", 1080, 1920, 12))
+    assert mtproto.sent_by_us(-100123, 777)
+
+
+def test_a_message_we_did_not_send_is_not_ours(ready):
+    _, clip = ready
+    asyncio.run(mtproto.send_video(-100123, clip, "tag"))
+    assert not mtproto.sent_by_us(-100123, 778)   # the operator's next post
+    assert not mtproto.sent_by_us(-100999, 777)   # same id, another chat
+
+
+def test_self_id_is_unknown_until_the_client_logs_in():
+    assert mtproto.self_id() is None

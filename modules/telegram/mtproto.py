@@ -31,6 +31,7 @@ API's 20 MB path and says so in the group.
 """
 
 import asyncio
+import collections
 import logging
 import os
 import sys
@@ -55,6 +56,27 @@ SESSION = os.path.join(config.TG_DATA_DIR, "bigfile.session")
 _client = None
 _ready = None
 _lock = asyncio.Lock()
+_self_id = None
+
+# Everything this client has posted, as (chat_id, msg_id). The bot polls the
+# same control group, so a preview sent from the user account arrives at
+# news_bot.on_message like any other post — and would open a second picker for
+# the render we just made. send_video() records here; on_message skips what it
+# finds. Bounded: only the last few sends can still be in flight.
+_sent = collections.deque(maxlen=256)
+
+
+def self_id():
+    """The user client's own account id, or None until ensure_ready() runs.
+
+    Used to recognise our own messages in the race where the bot's getUpdates
+    delivers one before send_file() has returned its id."""
+    return _self_id
+
+
+def sent_by_us(chat_id: int, msg_id: int) -> bool:
+    """True for a message this process sent through the user client."""
+    return (int(chat_id), int(msg_id)) in _sent
 
 
 def human_size(n: int) -> str:
@@ -87,7 +109,7 @@ async def ensure_ready() -> bool:
     """Connect the user client and confirm it's authorised. Cached: the first
     call pays the connection, later ones are free. Never raises — a dead
     network here must only cost the caller its big-file path, not the post."""
-    global _client, _ready
+    global _client, _ready, _self_id
     if _ready is not None:
         return _ready
     async with _lock:
@@ -114,6 +136,7 @@ async def ensure_ready() -> bool:
             await client.get_dialogs()
             _client, _ready = client, True
             me = await client.get_me()
+            _self_id = getattr(me, "id", None)
             log.info("big-file transfer ready as @%s (up to 2 GB)",
                      getattr(me, "username", None) or me.id)
             return True
@@ -189,11 +212,16 @@ async def send_video(chat_id: int, path: str, caption: str,
         attrs = [DocumentAttributeVideo(duration=int(duration), w=int(width),
                                         h=int(height), supports_streaming=True)]
     total = os.path.getsize(path)
-    return await _client.send_file(
+    sent = await _client.send_file(
         chat_id, path, caption=caption, attributes=attrs,
         supports_streaming=True,
         progress_callback=_progress_logger("upload", total),
     )
+    # Remember it here rather than at the call site: a caller that forgets
+    # gets the bot re-picking its own preview as a fresh news post.
+    if getattr(sent, "id", None) is not None:
+        _sent.append((int(chat_id), int(sent.id)))
+    return sent
 
 
 # --------------------------------------------------------------------------- #

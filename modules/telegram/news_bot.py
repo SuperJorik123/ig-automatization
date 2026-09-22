@@ -189,6 +189,29 @@ def _extract_media(msg):
     return None
 
 
+# Caption every branded preview carries. Also the marker that tells a preview
+# sent from the user account apart from a real post by that same account — the
+# operator usually IS the MTProto account, so the sender alone proves nothing.
+_PREVIEW_MARK = "🏷 "
+
+
+def _is_own_preview(msg) -> bool:
+    """True for a branded preview this process sent through the user client.
+
+    Past the Bot API's 50 MB upload cap the preview comes from your own
+    account (see mtproto.send_video), which means it lands in the control
+    group as an ordinary member message: the bot sees it, and without this it
+    opens a fresh picker for the render it just made. The recorded id is the
+    real check; the sender + caption pair covers the race where getUpdates
+    delivers the message before send_file() has returned that id.
+    """
+    if mtproto.sent_by_us(msg.chat.id, msg.message_id):
+        return True
+    sender = msg.from_user.id if msg.from_user else None
+    return (sender is not None and sender == mtproto.self_id()
+            and (msg.caption or "").startswith(_PREVIEW_MARK))
+
+
 def _track(msg):
     """Record a control-group message for the weekly cleanup (incoming AND
     outgoing — the Bot API can't list history, so anything not recorded here
@@ -464,6 +487,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     msg = update.effective_message
     if msg is None:
         return
+    if _is_own_preview(msg):
+        return  # our own big-file preview echoing back — not a news candidate
     _track(msg)  # the operator's own messages get wiped weekly too
     text = msg.caption or msg.text or ""
 
@@ -971,8 +996,10 @@ async def _do_render(q, context, state: dict) -> None:
                 # your own account instead — the clip still lands in the group.
                 # Not _track()ed: it's a Telethon message, and the weekly wipe
                 # deletes through the BOT, which can't remove your own posts.
+                # The caption must keep _PREVIEW_MARK: on_message recognises
+                # this message by it while send_video is still returning.
                 await mtproto.send_video(q.message.chat.id, path,
-                                         f"🏷 {b['name']}",
+                                         _PREVIEW_MARK + b['name'],
                                          branding.OUT_W, branding.OUT_H,
                                          int(duration))
             elif size > _BOT_UPLOAD_LIMIT:
