@@ -194,40 +194,52 @@ def _state(**kw):
     return state
 
 
-def test_the_brand_picker_says_it_is_watching_while_the_call_runs():
-    body = news_bot._brand_prompt_text(_state(vision_task=object()))
+def _card(**kw):
+    """A plan-card state: _state plus what _init_plan adds."""
+    state = _state(gate_kind="video", card=False, layout=None,
+                   plan_platforms=set(), custom_brands=False, editing=False)
+    state.update(kw)
+    return state
+
+
+def test_the_plan_card_says_it_is_watching_while_the_call_runs():
+    body = news_bot._plan_text(_card(watching=True))
     assert "👁 watching the clip…" in body
 
 
-def test_the_brand_picker_shows_what_was_seen():
-    body = news_bot._brand_prompt_text(
-        _state(vision_task=object(), footage=FOOTAGE))
+def test_the_plan_card_shows_what_was_seen():
+    body = news_bot._plan_text(_card(watching=True, footage=FOOTAGE))
     assert "watching" not in body
     assert FOOTAGE["summary"] in body
 
 
-def test_the_brand_picker_never_questions_the_headline():
+def test_the_plan_card_never_questions_the_headline():
     bad = dict(FOOTAGE, headline_ok=False, headline_note="different man",
                headline_suggestion="Elderly man doesn't notice a bear")
-    body = news_bot._brand_prompt_text(_state(vision_task=object(), footage=bad))
+    body = news_bot._plan_text(_card(watching=True, footage=bad))
     assert "may not match" not in body
     assert "Elderly man doesn't notice a bear" not in body
 
 
-def test_a_failed_analysis_leaves_the_picker_as_it_always_was():
-    body = news_bot._brand_prompt_text(_state(vision_task=object(), footage={}))
+def test_a_failed_analysis_leaves_the_card_without_an_eye_line():
+    body = news_bot._plan_text(_card(watching=True, footage={}))
     assert "👁" not in body
 
 
-def test_the_brand_picker_advertises_the_info_reply():
-    body = news_bot._brand_prompt_text(_state())
+def test_the_plan_card_advertises_the_info_reply():
+    body = news_bot._plan_text(_card())
     assert "info:" in body and "caption:" not in body
 
 
+def test_the_plan_card_opens_on_the_headline_and_shows_the_plan():
+    body = news_bot._plan_text(_card())
+    assert body.startswith("📰 Man walks past a bear")
+    assert "Brands: none" in body and "Platforms: none" in body
+
+
 def test_typed_info_is_echoed_back_on_every_picker():
-    state = _state(info=INFO, gate_kind="video")
-    for body in (news_bot._gate_text(state),
-                 news_bot._brand_prompt_text(state),
+    state = _card(info=INFO)
+    for body in (news_bot._plan_text(state),
                  news_bot._publish_prompt_text(state)):
         assert "ℹ️" in body
         assert "Source: WLOS." in body

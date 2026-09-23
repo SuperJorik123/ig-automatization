@@ -84,49 +84,75 @@ def _buttons(markup):
     return [b for row in markup.inline_keyboard for b in row]
 
 
-def test_gate_keyboard_has_both_choices():
-    data = [b.callback_data for b in _buttons(branded.gate_keyboard())]
-    assert data == ["b:asis", "b:brand"]
+def _editor(brands, selected, custom=False, layouts=(), layout=None,
+            available=(), platforms=()):
+    return branded.plan_edit_keyboard(brands, selected, custom, list(layouts),
+                                      layout, list(available), set(platforms))
 
 
-def test_brand_keyboard_marks_selection_and_disables_missing_logo():
+def test_plan_keyboard_is_go_change_asis_cancel():
+    data = [b.callback_data for b in _buttons(branded.plan_keyboard())]
+    assert data == ["b:go", "b:edit", "b:asis", "b:cancel"]
+
+
+def test_editor_marks_selection_and_disables_missing_logo():
     brands = [dict(_brand("a"), has_logo=True), dict(_brand("b"), has_logo=False)]
-    btns = _buttons(branded.brand_keyboard(brands, {0}))
+    btns = _buttons(_editor(brands, {0}))
     assert btns[0].text.startswith("☑") and btns[0].callback_data == "b:t:0"
     assert btns[1].callback_data == "b:noop" and "no logo" in btns[1].text
-    assert [b.callback_data for b in btns[-2:]] == ["b:render", "b:cancel"]
+    assert btns[-1].callback_data == "b:done"
 
 
-def test_brand_keyboard_collapses_to_group_rows():
+def test_editor_brands_collapse_to_group_rows():
     brands = [dict(_brand("a", group="GMN"), has_logo=True),
               dict(_brand("b", group="JNN"), has_logo=True),
               dict(_brand("c", group="JNN"), has_logo=True)]
-    btns = _buttons(branded.brand_keyboard(brands, {1, 2}))
+    btns = _buttons(_editor(brands, {1, 2}))
     assert [b.text for b in btns[:3]] == ["☐ GMN · 1 brand", "☑ JNN · 2 brands",
                                           "⚙ Custom…"]
     assert [b.callback_data for b in btns[:3]] == ["b:g:0", "b:g:1", "b:custom"]
-    assert [b.callback_data for b in btns[-2:]] == ["b:render", "b:cancel"]
 
 
-def test_brand_keyboard_group_row_shows_a_partial_tick():
+def test_editor_group_row_shows_a_partial_tick():
     brands = [dict(_brand("a", group="JNN"), has_logo=True),
               dict(_brand("b", group="JNN"), has_logo=True)]
-    btns = _buttons(branded.brand_keyboard(brands, {0}))
-    assert btns[0].text.startswith("◪")
+    assert _buttons(_editor(brands, {0}))[0].text.startswith("◪")
 
 
-def test_brand_keyboard_custom_lists_every_brand_and_offers_the_way_back():
+def test_editor_custom_lists_every_brand_and_offers_the_way_back():
     brands = [dict(_brand("a", group="GMN"), has_logo=True),
               dict(_brand("b"), has_logo=True)]
-    btns = _buttons(branded.brand_keyboard(brands, {0}, custom=True))
+    btns = _buttons(_editor(brands, {0}, custom=True))
     assert [b.callback_data for b in btns[:3]] == ["b:t:0", "b:t:1", "b:groups"]
 
 
-def test_brand_keyboard_without_groups_stays_the_full_list():
+def test_editor_without_groups_stays_the_full_list():
     # No "group" anywhere: nothing to collapse, and no dead "⬅ Groups" row.
     brands = [dict(_brand("a"), has_logo=True), dict(_brand("b"), has_logo=True)]
-    data = [b.callback_data for b in _buttons(branded.brand_keyboard(brands, set()))]
-    assert data == ["b:t:0", "b:t:1", "b:render", "b:cancel"]
+    data = [b.callback_data for b in _buttons(_editor(brands, set()))]
+    assert data == ["b:t:0", "b:t:1", "b:done"]
+
+
+def test_editor_offers_designs_only_when_there_is_a_choice():
+    brands = [dict(_brand("a"), has_logo=True)]
+    one = [b.callback_data for b in _buttons(
+        _editor(brands, {0}, layouts=branded.card_layouts(1), layout="solo"))]
+    assert not any(d.startswith("b:lay:") for d in one)
+    btns = _buttons(_editor(brands, {0}, layouts=branded.card_layouts(3),
+                            layout="split"))
+    lay = [b for b in btns if b.callback_data.startswith("b:lay:")]
+    assert [b.callback_data for b in lay] == ["b:lay:insets", "b:lay:split",
+                                              "b:lay:solo"]
+    assert [b.text.startswith("● ") for b in lay] == [False, True, False]
+
+
+def test_editor_platform_row_ticks_the_plan():
+    brands = [dict(_brand("a"), has_logo=True)]
+    btns = _buttons(_editor(brands, {0}, available=["tg", "ig"],
+                            platforms={"ig"}))
+    pk = [b for b in btns if b.callback_data.startswith("b:pk:")]
+    assert [(b.text, b.callback_data) for b in pk] == [
+        ("☐ TG", "b:pk:tg"), ("☑ IG", "b:pk:ig")]
 
 
 def test_toggle_group_selects_then_clears_its_members():
@@ -157,6 +183,13 @@ def test_platform_keyboard_rows_and_defaults():
     assert [b.callback_data for b in btns[-2:]] == ["b:publish", "b:cancel"]
 
 
+def test_publish_button_names_the_preticked_platforms():
+    plats = branded.platforms_for([_render(_brand(tg="@mir", yt="mir"))], 60)
+    btns = _buttons(branded.platform_keyboard(plats, {0, 1}))
+    assert btns[-2].text == "🚀 Publish → TG · YT"
+    assert btns[-2].callback_data == "b:publish"
+
+
 def test_platform_keyboard_shows_brand_count():
     a, b = _render(_brand("a", tg="@a", yt="a")), _render(_brand("b", tg="@b", yt=""))
     btns = _buttons(branded.platform_keyboard(branded.platforms_for([a, b], 60), {0}))
@@ -171,14 +204,13 @@ def test_platforms_hide_youtube_for_photo_cards():
     assert [p["platform"] for p in branded.platforms_for([r], 0)] == ["tg", "tw"]
 
 
-def test_card_gate_offers_one_layout_for_a_single_photo():
-    data = [b.callback_data for b in _buttons(branded.card_gate_keyboard(1))]
-    assert data == ["b:asis", "b:card:solo"]
+def test_card_layouts_one_for_a_single_photo():
+    assert [lay for lay, _ in branded.card_layouts(1)] == ["solo"]
 
 
-def test_card_gate_offers_every_layout_for_several_photos():
-    data = [b.callback_data for b in _buttons(branded.card_gate_keyboard(3))]
-    assert data == ["b:asis", "b:card:insets", "b:card:split", "b:card:solo"]
+def test_card_layouts_every_design_for_several_photos():
+    assert [lay for lay, _ in branded.card_layouts(3)] == ["insets", "split",
+                                                          "solo"]
 
 
 # --- Instagram (Graph API) -------------------------------------------------
@@ -311,3 +343,95 @@ def test_a_long_summary_is_trimmed_for_the_picker():
     headline — the analysis is an orientation line, not the report."""
     lines = branded.footage_lines(_footage(summary="word " * 400))
     assert len(lines[0]) < 400
+
+
+# --- the plan card ----------------------------------------------------------
+
+def _plan_brands():
+    return [dict(_brand("a", group="GMN", tg="@a", yt="a", tw="a"), ig="a",
+                 has_logo=True),
+            dict(_brand("b", group="GMN", tg="@b", yt="", tw=""), ig="",
+                 has_logo=True),
+            dict(_brand("c", group="JNN", tg="@c", yt="", tw=""), ig="c",
+                 has_logo=True),
+            dict(_brand("d", group="JNN", tg="", yt="", tw=""), ig="",
+                 has_logo=False)]
+
+
+def test_plan_platforms_are_what_the_selected_brands_have():
+    brands = _plan_brands()
+    assert branded.plan_platform_keys(brands, {1}, "video", True) == ["tg"]
+    assert branded.plan_platform_keys(brands, {0, 2}, "video", True) == [
+        "tg", "yt", "tw", "ig"]
+
+
+def test_plan_never_offers_youtube_for_cards_or_while_uploads_are_off():
+    brands = _plan_brands()
+    assert "yt" not in branded.plan_platform_keys(brands, {0}, "photo", True)
+    assert "yt" not in branded.plan_platform_keys(brands, {0}, "video", False)
+
+
+def test_first_plan_is_every_usable_brand_and_platform():
+    plan = branded.default_plan(_plan_brands(), "video", 0, {}, False)
+    assert plan["sel_brands"] == {0, 1, 2}          # d has no logo
+    assert plan["platforms"] == {"tg", "tw", "ig"}
+    assert plan["layout"] is None
+
+
+def test_plan_reopens_on_the_remembered_choice():
+    saved = {"brands": ["c"], "platforms": ["ig"], "layout": "split"}
+    plan = branded.default_plan(_plan_brands(), "photo", 3, saved, True)
+    assert plan == {"sel_brands": {2}, "layout": "split", "platforms": {"ig"}}
+
+
+def test_a_memory_that_no_longer_resolves_falls_back_to_everything():
+    saved = {"brands": ["renamed"], "platforms": ["fb"], "layout": "gone"}
+    plan = branded.default_plan(_plan_brands(), "photo", 3, saved, True)
+    assert plan["sel_brands"] == {0, 1, 2}
+    assert plan["platforms"] == {"tg", "tw", "ig"}
+    assert plan["layout"] == "insets"
+
+
+def test_a_single_photo_always_opens_on_its_one_design():
+    plan = branded.default_plan(_plan_brands(), "photo", 1,
+                                {"layout": "split"}, True)
+    assert plan["layout"] == "solo"
+
+
+def test_plan_memory_is_by_name_in_picker_order():
+    mem = branded.plan_memory(_plan_brands(), {2, 0}, None, {"ig", "tg"}, 0, {})
+    assert mem == {"brands": ["a", "c"], "platforms": ["tg", "ig"]}
+
+
+def test_a_single_photo_never_overwrites_the_remembered_design():
+    mem = branded.plan_memory(_plan_brands(), {0}, "solo", ["tg"], 1,
+                              {"layout": "split"})
+    assert mem["layout"] == "split"
+    mem = branded.plan_memory(_plan_brands(), {0}, "insets", ["tg"], 2, mem)
+    assert mem["layout"] == "insets"
+
+
+def test_brands_summary_names_whole_groups():
+    brands = _plan_brands()
+    assert branded.brands_summary(brands, {0, 1}) == "GMN (2)"
+    assert branded.brands_summary(brands, {0, 1, 2}) == "GMN + JNN (3)"
+
+
+def test_brands_summary_lists_a_short_hand_pick_and_counts_a_long_one():
+    brands = _plan_brands()
+    assert branded.brands_summary(brands, {0}) == "a"
+    assert branded.brands_summary(brands, set()) == "none"
+    many = [dict(_brand(f"x{i}"), has_logo=True) for i in range(5)]
+    assert branded.brands_summary(many, {0, 1, 2, 3}) == "4 brands"
+
+
+def test_plan_lines_spell_the_platforms_out():
+    lines = branded.plan_lines(_plan_brands(), {0, 1}, ["tg", "tw", "ig"])
+    assert lines == ["Brands: GMN (2)", "Platforms: Telegram · X · Instagram"]
+
+
+def test_plan_lines_show_the_design_only_when_there_was_a_choice():
+    assert "Design: ⚪ Circles" in branded.plan_lines(
+        _plan_brands(), {0}, ["tg"], "insets", 3)
+    assert not any(line.startswith("Design") for line in branded.plan_lines(
+        _plan_brands(), {0}, ["tg"], "solo", 1))

@@ -69,6 +69,7 @@ Run:  py modules/telegram/news_bot.py
 
 import asyncio
 import datetime as dt
+import json
 import logging
 import os
 import sys
@@ -256,27 +257,115 @@ def _info_lines(state: dict) -> list:
     return ["ℹ️ your IG info:\n" + preview]
 
 
-def _gate_text(state: dict) -> str:
-    """Body of the as-is / brand gate, for both the video and the photo kind."""
-    if state.get("gate_kind") == "photo":
-        head = "Create a news card from these photos, or post them as-is?"
-    else:
-        head = "Brand this clip, or post it as-is?"
-    lines = [head]
-    if state["text"]:
-        lines.append(f"📝 {state['text']}")
-    lines += _info_lines(state)
-    return "\n\n".join(lines)
-
-
 def _photo_count(media: list) -> int:
     return sum(1 for m in media if m["type"] == "photo")
 
 
-def _gate_markup(state: dict) -> InlineKeyboardMarkup:
-    if state.get("gate_kind") == "photo":
-        return branded.card_gate_keyboard(_photo_count(state["media"]))
-    return branded.gate_keyboard()
+# --------------------------------------------------------------------------- #
+# The plan card (branded posts)                                               #
+# --------------------------------------------------------------------------- #
+#
+# One message that already holds every answer — brands, design, platforms —
+# taken from what the operator chose last time for this kind of post, with
+# 🚀 Go to accept it and ✏️ Change to edit all of it on one screen. The pure
+# half (defaults, summary lines, keyboards) is in branded.py.
+
+# The last plan per kind of post ("video" / "photo"), by brand NAME. Lost
+# with the data dir, which only costs the operator one ✏️ Change.
+_PLAN_MEMORY = os.path.join(config.TG_DATA_DIR, "plan_defaults.json")
+
+_PLAN_RULE = "━━━━━━━━━━━━━━"
+
+
+def _plan_memory() -> dict:
+    try:
+        with open(_PLAN_MEMORY, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_plan(state: dict, platforms) -> None:
+    """Make this plan the default for the next post of its kind. Best-effort:
+    a failed write costs a default, never the post."""
+    mem = _plan_memory()
+    kind = state["gate_kind"]
+    mem[kind] = branded.plan_memory(
+        state["brands"], state["sel_brands"], state.get("layout"), platforms,
+        _photo_count(state["media"]), mem.get(kind))
+    try:
+        os.makedirs(os.path.dirname(_PLAN_MEMORY), exist_ok=True)
+        tmp = _PLAN_MEMORY + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(mem, fh, indent=1)
+        os.replace(tmp, _PLAN_MEMORY)
+    except OSError as exc:
+        log.warning("couldn't save the plan defaults: %s", exc)
+
+
+def _init_plan(state: dict, kind: str) -> None:
+    """Turn a post's state into an open plan card ("video" = brand the clip,
+    "photo" = compose news cards), pre-filled with the remembered plan."""
+    brands = branded.available_brands(config.BRANDS)
+    plan = branded.default_plan(brands, kind, _photo_count(state["media"]),
+                                _plan_memory().get(kind, {}),
+                                config.YT_UPLOADS_ENABLED)
+    state.update(mode="plan", gate_kind=kind, card=kind == "photo",
+                 brands=brands, sel_brands=plan["sel_brands"],
+                 layout=plan["layout"], plan_platforms=plan["platforms"],
+                 custom_brands=False, editing=False,
+                 # The analysis starts the moment the card is up; until it
+                 # lands the card says so.
+                 watching=config.IG_VISION_ENABLED)
+
+
+def _plan_available(state: dict) -> list:
+    """Platform keys the currently selected brands could publish to."""
+    return branded.plan_platform_keys(state["brands"], state["sel_brands"],
+                                      state["gate_kind"],
+                                      config.YT_UPLOADS_ENABLED)
+
+
+def _plan_keys(state: dict) -> list:
+    """The platforms the plan will actually offer pre-ticked: the chosen ones
+    the selected brands still have (untick every IG brand and IG drops off
+    the card, but comes back with them)."""
+    return [k for k in _plan_available(state) if k in state["plan_platforms"]]
+
+
+def _plan_text(state: dict) -> str:
+    """The card: headline, what the clip shows, the operator's info, the plan,
+    and the two things a reply can do."""
+    head = state["text"].strip()
+    lines = [f"📰 {head}" if head
+             else "⚠️ no headline yet — reply to this message with it"]
+    if state.get("watching") and "footage" not in state:
+        lines.append("👁 watching the clip…")
+    else:
+        lines += branded.footage_lines(state.get("footage") or {})
+    lines += _info_lines(state)
+    lines.append("\n".join([
+        _PLAN_RULE,
+        *branded.plan_lines(state["brands"], state["sel_brands"],
+                            _plan_keys(state), state.get("layout"),
+                            _photo_count(state["media"])),
+        _PLAN_RULE]))
+    lines.append("↩️ reply to this message to replace the headline\n"
+                 + _INFO_HINT)
+    return "\n\n".join(lines)
+
+
+def _plan_markup(state: dict) -> InlineKeyboardMarkup:
+    """🚀 Go / ✏️ Change, or — while editing — every choice on one screen."""
+    if not state.get("editing"):
+        return branded.plan_keyboard()
+    layouts = (branded.card_layouts(_photo_count(state["media"]))
+               if state["gate_kind"] == "photo" else [])
+    return branded.plan_edit_keyboard(
+        state["brands"], state["sel_brands"], state.get("custom_brands", False),
+        layouts, state.get("layout"), _plan_available(state),
+        state["plan_platforms"])
 
 
 # The emoji catalogue and the BulkFollows ordering rules live in
@@ -393,15 +482,16 @@ async def _prompt(msg, text: str, media: list) -> None:
 
 async def _gate(msg, text: str, media: list, files: list | None = None,
                 kind: str = "video") -> None:
-    """Post with brands configured: ask as-is vs brand-it (single video) or
-    as-is vs create-post (photos → news card) before opening any picker.
-    State is the same _pending dict, mode-tagged."""
+    """Post with brands configured (single video, or photos → news card):
+    open the plan card instead of the channel picker — "📤 Post as-is" on it
+    leads there. State is the same _pending dict, mode-tagged."""
     state = {"text": text, "media": media, "files": list(files or ()),
-             "sel_tg": set(), "sel_yt": set(), "sel_tw": set(), "sel_em": set(),
-             "mode": "gate", "gate_kind": kind}
-    prompt = _track(await msg.reply_text(_gate_text(state),
-                                         reply_markup=_gate_markup(state)))
+             "sel_tg": set(), "sel_yt": set(), "sel_tw": set(), "sel_em": set()}
+    _init_plan(state, kind)
+    prompt = _track(await msg.reply_text(_plan_text(state),
+                                         reply_markup=_plan_markup(state)))
     _pending[prompt.message_id] = state
+    _start_watching(msg.get_bot(), state, prompt)
 
 
 def _cleanup(state: dict) -> None:
@@ -465,11 +555,12 @@ async def _handle_url(msg, text: str) -> None:
         "sel_em": set(),
     }
     if config.BRANDS and (is_video or _all_photos(state["media"])):
-        state["mode"] = "gate"
-        state["gate_kind"] = "video" if is_video else "photo"
-        await note.edit_text(_gate_text(state), reply_markup=_gate_markup(state))
-    else:
-        await note.edit_text(_prompt_text(state), reply_markup=_keyboard(state))
+        _init_plan(state, "video" if is_video else "photo")
+        await note.edit_text(_plan_text(state), reply_markup=_plan_markup(state))
+        _pending[note.message_id] = state
+        _start_watching(msg.get_bot(), state, note)
+        return
+    await note.edit_text(_prompt_text(state), reply_markup=_keyboard(state))
     _pending[note.message_id] = state
 
 
@@ -508,12 +599,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             state["text"] = value
             state["cap_src"] = "edited"
         mode = state.get("mode")
-        if mode == "gate":
-            body = _gate_text(state)
-            markup = _gate_markup(state)
-        elif mode == "brand":
-            body = _brand_prompt_text(state)
-            markup = _brand_markup(state)
+        if mode == "rendering":
+            # The headline is being burned in right now; an info reply was
+            # kept above and still reaches the Instagram caption.
+            return
+        if mode == "plan":
+            body = _plan_text(state)
+            markup = _plan_markup(state)
         elif mode == "publish":
             # The headline is burned into the renders and can't be changed
             # now — but the Instagram caption is written at publish time, so an
@@ -673,25 +765,8 @@ async def _post_to_twitter(bot, text: str, media: list, dests: list):
 
 
 # --------------------------------------------------------------------------- #
-# Brand-it flow (gate → brand picker → render → publish picker)               #
+# Brand-it flow (plan card → render → publish picker)                         #
 # --------------------------------------------------------------------------- #
-
-
-def _brand_prompt_text(state: dict) -> str:
-    """Brand-picker body: the headline, what the footage analysis saw, and the
-    two things a reply can do."""
-    head = state["text"].strip()
-    lines = ["Brand for which brands?"]
-    lines.append(f"📝 {head}" if head
-                 else "⚠️ no headline yet — reply to this message with it")
-    if state.get("vision_task") is not None and "footage" not in state:
-        lines.append("👁 watching the clip…")
-    else:
-        lines += branded.footage_lines(state.get("footage") or {})
-    lines += _info_lines(state)
-    lines.append("↩️ reply to this message to replace the headline\n"
-                 + _INFO_HINT)
-    return "\n\n".join(lines)
 
 
 def _publish_prompt_text(state: dict) -> str:
@@ -722,29 +797,35 @@ async def _ensure_local_video(bot, state: dict) -> str:
     return path
 
 
-def _brand_markup(state: dict) -> InlineKeyboardMarkup:
-    """Brand picker keyboard for the current state — collapsed to group rows
-    unless the operator opened Custom."""
-    return branded.brand_keyboard(state["brands"], state["sel_brands"],
-                                  state.get("custom_brands", False))
-
-
 # How long a render will wait for an analysis that is still going. The call
-# starts when the brand picker opens and the operator then has to read it and
-# tick brands, so in practice it has long since landed; this is the ceiling for
+# starts when the plan card opens and the operator then has to read it, so in
+# practice it has long since landed; this is the ceiling for
 # a gateway that has stopped answering, not an expected wait.
 _VISION_WAIT_S = 90
 
 
+async def _video_too_big(state: dict) -> str:
+    """Why this post's video can't be fetched for branding, or "" when it can:
+    past the Bot API's 20 MB get_file cap only the MTProto client can carry
+    it. Checked on Go (fail on the tap, not after a minute of setup) and by
+    the analysis, which would otherwise mail an error for every big clip."""
+    video = next((m for m in state["media"] if m["type"] == "video"), None)
+    size = (video or {}).get("file_size") or 0
+    if video and not video.get("path") and size > _BOT_FILE_LIMIT \
+            and not await mtproto.ensure_ready():
+        return _too_big_error(size)
+    return ""
+
+
 async def _watch_media(bot, state: dict, message) -> None:
     """Analyse this post's media in the background and put what it saw on the
-    brand picker.
+    plan card.
 
-    Started when the picker opens, so what the clip shows is on the picker
-    while the operator is still choosing and headline and info can still be
-    replied to. That is also why this does the download itself rather than
-    waiting for the render to: the file has to be fetched anyway, and fetching
-    it here buys the operator the analysis while they are still choosing brands.
+    Started when the card opens, so what the clip shows is on it while the
+    headline and info can still be replied to. That is also why this does the
+    download itself rather than waiting for the render to: the file has to be
+    fetched anyway, and fetching it here buys the operator the analysis while
+    they are still reading the card.
 
     Never raises and never blocks anything: a failure leaves state["footage"]
     empty, which every consumer already treats as "no analysis".
@@ -753,9 +834,12 @@ async def _watch_media(bot, state: dict, message) -> None:
         if state.get("gate_kind") == "photo" or state.get("card"):
             paths = await _ensure_local_photos(bot, state)
             path = paths[0] if paths else ""
+            footage = await asyncio.to_thread(vision.describe, path, state["text"])
+        elif await _video_too_big(state):
+            footage = {}  # Go will say why; nothing to analyse without the file
         else:
             path = await _ensure_local_video(bot, state)
-        footage = await asyncio.to_thread(vision.describe, path, state["text"])
+            footage = await asyncio.to_thread(vision.describe, path, state["text"])
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -764,22 +848,29 @@ async def _watch_media(bot, state: dict, message) -> None:
 
     state["footage"] = footage
     # The operator may have moved on (rendered, cancelled) while this ran —
-    # only refresh a picker that is still the brand picker.
-    if state.get("mode") != "brand":
+    # only refresh a card that is still open.
+    if state.get("mode") != "plan":
         return
     try:
-        await message.edit_text(_brand_prompt_text(state),
-                                reply_markup=_brand_markup(state))
+        await message.edit_text(_plan_text(state),
+                                reply_markup=_plan_markup(state))
     except Exception:  # message deleted, or unchanged text
         pass
 
 
-def _start_watching(context, state: dict, message) -> None:
+def _start_watching(bot, state: dict, message) -> None:
     """Kick off _watch_media once per post, tracked so the render can wait."""
     if state.get("vision_task") is not None or not config.IG_VISION_ENABLED:
         return
     state["vision_task"] = asyncio.create_task(
-        _watch_media(context.bot, state, message))
+        _watch_media(bot, state, message))
+
+
+def _stop_watching(state: dict) -> None:
+    """Posting as-is renders nothing, so nothing will read the analysis."""
+    task = state.get("vision_task")
+    if task is not None and not task.done():
+        task.cancel()
 
 
 async def _await_footage(state: dict) -> dict:
@@ -802,96 +893,22 @@ async def _await_footage(state: dict) -> dict:
 
 
 async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
-    """Taps on the gate / brand picker / publish picker ("b:<verb>")."""
+    """Taps on the plan card / its editor / the publish picker ("b:<verb>")."""
     if verb == "noop":
         await q.answer("Add brands/<name>/logo.png to enable this brand.",
                        show_alert=True)
         return
 
-    if verb == "asis":
+    if verb == "asis" and state.get("mode") == "plan":
         await q.answer()
+        _stop_watching(state)
         state["mode"] = None
         await q.edit_message_text(_prompt_text(state),
                                   reply_markup=_keyboard(state))
         return
 
-    if verb == "card" or verb.startswith("card:"):
-        # "b:card" without a layout is a keyboard from before the designs
-        # existed — the circles card is what it used to render. Validate
-        # BEFORE answering: a query can only be answered once, so an alert
-        # sent after a bare q.answer() never reaches the operator.
-        layout = verb.split(":", 1)[1] if ":" in verb else "insets"
-        if layout not in photo_card.LAYOUTS:
-            await q.answer("Unknown card design.", show_alert=True)
-            return
-        await q.answer()
-        state["mode"] = "brand"
-        state["card"] = True
-        state["layout"] = layout
-        state["brands"] = branded.available_brands(config.BRANDS)
-        state["sel_brands"] = {i for i, b in enumerate(state["brands"])
-                               if b["has_logo"]}
-        state["custom_brands"] = False
-        _start_watching(context, state, q.message)
-        await q.edit_message_text(_brand_prompt_text(state),
-                                  reply_markup=_brand_markup(state))
-        return
-
-    if verb == "brand":
-        # Fail here, on the tap, rather than after a minute of rendering setup.
-        video = next((m for m in state["media"] if m["type"] == "video"), None)
-        size = (video or {}).get("file_size") or 0
-        if video and not video.get("path") and size > _BOT_FILE_LIMIT \
-                and not await mtproto.ensure_ready():
-            # answerCallbackQuery caps its text at 200 chars.
-            await q.answer(("Too large to brand: " + _too_big_error(size))[:200],
-                           show_alert=True)
-            return
-        await q.answer()
-        state["mode"] = "brand"
-        state["brands"] = branded.available_brands(config.BRANDS)
-        state["sel_brands"] = {i for i, b in enumerate(state["brands"])
-                               if b["has_logo"]}
-        state["custom_brands"] = False
-        _start_watching(context, state, q.message)
-        await q.edit_message_text(_brand_prompt_text(state),
-                                  reply_markup=_brand_markup(state))
-        return
-
-    if verb.startswith("t:") and state.get("mode") == "brand":
-        await q.answer()
-        state["sel_brands"] ^= {int(verb.split(":", 1)[1])}
-        await q.edit_message_reply_markup(_brand_markup(state))
-        return
-
-    if verb.startswith("g:") and state.get("mode") == "brand":
-        await q.answer()
-        i = int(verb.split(":", 1)[1])
-        if i < len(groups.brand_groups(state["brands"])):
-            state["sel_brands"] = branded.toggle_brand_group(
-                state["brands"], state["sel_brands"], i)
-        await q.edit_message_reply_markup(_brand_markup(state))
-        return
-
-    if verb in ("custom", "groups") and state.get("mode") == "brand":
-        await q.answer()
-        state["custom_brands"] = verb == "custom"
-        await q.edit_message_reply_markup(_brand_markup(state))
-        return
-
-    if verb == "render" and state.get("mode") == "brand":
-        if not state["sel_brands"]:
-            await q.answer("Pick at least one brand.", show_alert=True)
-            return
-        if not state["text"].strip():
-            await q.answer("No headline — reply to the picker message with "
-                           "it first.", show_alert=True)
-            return
-        await q.answer()
-        if state.get("card"):
-            await _do_render_card(q, context, state)
-        else:
-            await _do_render(q, context, state)
+    if state.get("mode") == "plan" and verb != "cancel":
+        await _on_plan_callback(q, context, state, verb)
         return
 
     if verb.startswith("p:") and state.get("mode") == "publish":
@@ -907,6 +924,13 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
             await q.answer("Pick at least one platform.", show_alert=True)
             return
         await q.answer()
+        # What was published is next post's default. A platform this post
+        # couldn't offer (YouTube for a long clip) keeps its place in the plan.
+        offered = {p["platform"] for p in state["platforms"]}
+        chosen = {state["platforms"][i]["platform"]
+                  for i in state["sel_platforms"]}
+        _remember_plan(state, (set(state.get("plan_platforms") or ())
+                               - offered) | chosen)
         await _do_publish(q, context, state)
         return
 
@@ -918,6 +942,103 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         return
 
     await q.answer()  # stale/unknown verb for this mode
+
+
+async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
+    """Taps on an open plan card and its editor. Every edit redraws the whole
+    card, so the plan block always shows what Go will do."""
+    async def redraw():
+        try:
+            await q.edit_message_text(_plan_text(state),
+                                      reply_markup=_plan_markup(state))
+        except BadRequest:  # "message is not modified"
+            pass
+
+    if verb in ("edit", "done"):
+        await q.answer()
+        state["editing"] = verb == "edit"
+        await redraw()
+        return
+
+    if verb.startswith("t:"):
+        await q.answer()
+        state["sel_brands"] ^= {int(verb.split(":", 1)[1])}
+        await redraw()
+        return
+
+    if verb.startswith("g:"):
+        await q.answer()
+        i = int(verb.split(":", 1)[1])
+        if i < len(groups.brand_groups(state["brands"])):
+            state["sel_brands"] = branded.toggle_brand_group(
+                state["brands"], state["sel_brands"], i)
+        await redraw()
+        return
+
+    if verb in ("custom", "groups"):
+        await q.answer()
+        state["custom_brands"] = verb == "custom"
+        await redraw()
+        return
+
+    if verb.startswith("lay:"):
+        layout = verb.split(":", 1)[1]
+        if layout not in dict(branded.card_layouts(_photo_count(state["media"]))):
+            await q.answer("Unknown card design.", show_alert=True)
+            return
+        await q.answer()
+        state["layout"] = layout
+        await redraw()
+        return
+
+    if verb.startswith("pk:"):
+        await q.answer()
+        key = verb.split(":", 1)[1]
+        if key in _plan_available(state):
+            state["plan_platforms"] ^= {key}
+        await redraw()
+        return
+
+    if verb == "go":
+        # Validate BEFORE answering: a query can only be answered once, so an
+        # alert sent after a bare q.answer() never reaches the operator.
+        if not state["sel_brands"]:
+            await q.answer("No brands selected — tap ✏️ Change.",
+                           show_alert=True)
+            return
+        if not state["text"].strip():
+            await q.answer("No headline — reply to this message with it "
+                           "first.", show_alert=True)
+            return
+        keys = _plan_keys(state)
+        if not keys:
+            await q.answer("No platforms selected — tap ✏️ Change.",
+                           show_alert=True)
+            return
+        if not state["card"]:
+            too_big = await _video_too_big(state)
+            if too_big:
+                # answerCallbackQuery caps its text at 200 chars.
+                await q.answer(("Too large to brand: " + too_big)[:200],
+                               show_alert=True)
+                return
+        await q.answer()
+        state["mode"] = "rendering"  # a second tap on Go must not render twice
+        state["plan_platforms"] = set(keys)
+        _remember_plan(state, keys)
+        if state["card"]:
+            await _do_render_card(q, context, state)
+        else:
+            await _do_render(q, context, state)
+        return
+
+    await q.answer()  # stale/unknown verb for a plan card
+
+
+def _preselect(state: dict) -> set:
+    """Publish-picker rows to tick up front: the platforms the plan promised."""
+    keys = state.get("plan_platforms") or set()
+    return {i for i, p in enumerate(state["platforms"]) if p["platform"] in keys}
 
 
 async def _do_render(q, context, state: dict) -> None:
@@ -1043,7 +1164,7 @@ async def _do_render(q, context, state: dict) -> None:
     state["mode"] = "publish"
     state["renders"] = renders
     state["platforms"] = branded.platforms_for(renders, duration)
-    state["sel_platforms"] = set()
+    state["sel_platforms"] = _preselect(state)
 
     summary = "🎨 rendered: " + ", ".join(r["brand"]["name"] for r in renders)
     if warnings:
@@ -1071,7 +1192,8 @@ async def _do_render(q, context, state: dict) -> None:
         # intact to clean up, instead of orphaning everything silently.
         prompt = _track(await q.message.chat.send_message(
             _publish_prompt_text(state),
-            reply_markup=branded.platform_keyboard(state["platforms"], set())))
+            reply_markup=branded.platform_keyboard(state["platforms"],
+                                                  state["sel_platforms"])))
     except Exception as exc:
         log.error("brand publish-picker handoff failed: %s", exc)
         _pending.pop(q.message.message_id, None)
@@ -1174,7 +1296,7 @@ async def _do_render_card(q, context, state: dict) -> None:
     state["mode"] = "publish"
     state["renders"] = renders
     state["platforms"] = branded.platforms_for(renders, 0)
-    state["sel_platforms"] = set()
+    state["sel_platforms"] = _preselect(state)
 
     summary = "🖼 composed: " + ", ".join(r["brand"]["name"] for r in renders)
     if warnings:
@@ -1194,7 +1316,8 @@ async def _do_render_card(q, context, state: dict) -> None:
             return
         prompt = _track(await q.message.chat.send_message(
             _publish_prompt_text(state),
-            reply_markup=branded.platform_keyboard(state["platforms"], set())))
+            reply_markup=branded.platform_keyboard(state["platforms"],
+                                                  state["sel_platforms"])))
     except Exception as exc:
         log.error("card publish-picker handoff failed: %s", exc)
         _pending.pop(q.message.message_id, None)
