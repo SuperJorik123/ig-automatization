@@ -257,3 +257,13 @@ def test_very_long_info_is_trimmed_in_the_echo():
     costs the picker its keyboard."""
     state = _state(info="word " * 2000)
     assert len(news_bot._info_lines(state)[0]) < 1000
+
+
+def test_a_youtube_pair_buys_the_caption_too(calls):
+    out = _run("h", [dict(_pair(), platform="yt")], FOOTAGE)
+    assert len(calls["expand"]) == 1 and "mir" in out
+
+
+def test_a_brand_on_ig_and_yt_is_planned_once(calls):
+    out = _run("h", [_pair(), dict(_pair(), platform="yt")], FOOTAGE)
+    assert list(out) == ["mir"]

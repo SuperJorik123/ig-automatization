@@ -824,6 +824,50 @@ def compose(headline: str, body: str) -> str:
     return trim_caption(f"{headline}\n\n{prose}", room) + "\n\n" + tag_line
 
 
+# The YouTube description's prose budget. A Short's description sits behind a
+# "more" tap and YouTube shows only its first line or two, so the Instagram
+# caption's 2-4 paragraphs are trimmed to the lead: whole paragraphs while they
+# fit, at least one. The hard cap (5000) is nowhere near.
+YT_DESC_PROSE = 450
+
+# YouTube rejects the WHOLE upload (invalidDescription) over an angle bracket.
+_YT_BANNED = str.maketrans({"<": "", ">": ""})
+
+
+def youtube_description(caption: str, headline: str = "",
+                        limit: int = YT_DESC_PROSE) -> str:
+    """The YouTube description made from one account's finished IG caption.
+
+    The headline goes (it is the video's title), the prose is cut to the lead
+    — whole paragraphs up to `limit`, the first one trimmed on a word boundary
+    if it alone is over — and the account's hashtag line is kept, with
+    `#shorts` added at the end. YouTube puts the first three tags of the
+    description above the title, which is why the account's own tag, opening
+    the line, stays first. Pure; "" in, "" out."""
+    caption = (caption or "").strip()
+    if not caption:
+        return ""
+    body = _drop_headline(caption, headline) if headline else caption
+    lines = body.split("\n")
+    i = _tag_line_index(lines)
+    tags = lines[i].split() if i >= 0 else []
+    prose = "\n".join(lines[:i] if i >= 0 else lines).strip()
+    if headline and _same_line(prose, headline):
+        prose = ""
+    kept = []
+    for para in (p.strip() for p in prose.split("\n\n")):
+        if not para:
+            continue
+        if kept and len("\n\n".join(kept + [para])) > limit:
+            break
+        kept.append(para)
+    prose = trim_caption("\n\n".join(kept), limit) if kept else ""
+    if "#shorts" not in {t.lower() for t in tags}:
+        tags.append("#shorts")
+    out = f"{prose}\n\n{' '.join(tags)}" if prose else " ".join(tags)
+    return out.translate(_YT_BANNED).strip()
+
+
 def seed_for(text: str) -> int:
     """A stable number to rotate this post's angles and hashtags by.
 

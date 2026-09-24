@@ -896,3 +896,56 @@ def test_the_footage_prompt_bans_video_description(on, monkeypatch):
     system = _system_of(fake)
     assert "TELL THE STORY, DON'T DESCRIBE THE VIDEO" in system
     assert "Past tense" in system
+
+
+# --------------------------------------------------------------------------- #
+# youtube_description                                                         #
+# --------------------------------------------------------------------------- #
+
+
+YT_CAPTION = (
+    "Man walks past a bear\n"
+    "\n"
+    "A bear crossed a residential street a few feet behind a man.\n"
+    "\n"
+    "Neighbours said it had been seen in the area for a week.\n"
+    "\n"
+    "Wildlife officials asked residents to secure their bins.\n"
+    "\n"
+    "#mir #bear #usa #wildlife #viralvideo"
+)
+
+
+def test_youtube_description_drops_the_headline_it_is_the_title():
+    out = caption.youtube_description(YT_CAPTION, "Man walks past a bear")
+    assert not out.startswith("Man walks past a bear")
+    assert out.startswith("A bear crossed")
+
+
+def test_youtube_description_keeps_the_tags_and_adds_shorts():
+    out = caption.youtube_description(YT_CAPTION, "Man walks past a bear")
+    assert out.splitlines()[-1] == "#mir #bear #usa #wildlife #viralvideo #shorts"
+
+
+def test_youtube_description_is_cut_to_whole_lead_paragraphs():
+    out = caption.youtube_description(YT_CAPTION, "Man walks past a bear",
+                                      limit=130)
+    assert "Neighbours said" in out
+    assert "Wildlife officials" not in out
+
+
+def test_youtube_description_trims_one_long_lead_paragraph():
+    long = "Headline\n\n" + "word " * 300 + "\n\n#mir #news"
+    out = caption.youtube_description(long, "Headline")
+    prose = out.split("\n\n")[0]
+    assert len(prose) <= caption.YT_DESC_PROSE and prose.endswith("…")
+
+
+def test_youtube_description_of_a_bare_headline_is_just_the_tags():
+    out = caption.youtube_description("Headline\n\n#mir", "Headline")
+    assert out == "#mir #shorts"
+
+
+def test_youtube_description_never_doubles_shorts_or_keeps_angle_brackets():
+    out = caption.youtube_description("H\n\nA <b> c.\n\n#mir #Shorts", "H")
+    assert out.count("#") == 2 and "<" not in out and ">" not in out

@@ -1298,10 +1298,11 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
                        info: str = "") -> dict[str, str]:
     """The Instagram caption for each brand, keyed by brand NAME.
 
-    Instagram is the only platform here that posts more than the headline (see
-    modules/instagram/caption.py), so this runs only when an IG pair is
-    actually in the set — the web search is billed per publish, not per render,
-    and a post that never goes to IG never pays for it.
+    Instagram and YouTube are the platforms here that post more than the
+    headline (see modules/instagram/caption.py; YouTube gets a shorter cut of
+    the same caption via `caption.youtube_description`), so this runs only
+    when an IG or YT pair is actually in the set — the web search is billed per
+    publish, not per render, and a post that goes to neither never pays for it.
 
     KEYED BY BRAND, NOT BY LANGUAGE. It used to be by language, and twelve of
     the thirteen brands are "en": every English account published the same
@@ -1334,7 +1335,11 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
     which is what shipped before any of this existed, and a single failed
     rewrite falls back to the shared caption on its own.
     """
-    ig_pairs = [p for p in pairs if p["platform"] == "ig"]
+    # YouTube descriptions are cut from these same captions (see the "yt" leg
+    # of _do_publish), so a YouTube pair buys the expansion too. One caption
+    # per BRAND — a brand on both platforms is planned once.
+    ig_pairs = list({p["render"]["brand"]["name"]: p for p in pairs
+                     if p["platform"] in ("ig", "yt")}.values())
     brands = [dict(p["render"]["brand"],
                    style=branding.load_writing_style(
                        os.path.dirname(p["render"]["brand"]["logo"])))
@@ -1385,8 +1390,8 @@ async def _do_publish(q, context, state: dict) -> None:
     await q.edit_message_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
 
-    # Before the loop: one footage-backed expansion shared by every IG pair,
-    # informed by the operator's info: reply when there is one.
+    # Before the loop: one footage-backed expansion shared by every IG and YT
+    # pair, informed by the operator's info: reply when there is one.
     ig_caps = await _ig_captions(state.get("text", ""), pairs,
                                  state.get("footage") or {},
                                  state.get("info", ""))
@@ -1413,7 +1418,14 @@ async def _do_publish(q, context, state: dict) -> None:
             elif p["platform"] == "yt":
                 # Renders are 1080x1920 by construction — upload directly,
                 # no second ensure_short pass.
-                title, description = yt_publisher.split_caption(r["headline"])
+                # Title = the headline; description = this brand's IG caption
+                # cut to its lead paragraph(s) + its hashtags + #shorts, or
+                # just the tags when the expansion didn't come back.
+                title, _ = yt_publisher.split_caption(r["headline"])
+                description = ig_caption.youtube_description(
+                    ig_caps.get(b["name"]) or
+                    ig_caption.with_brand_tag(r["headline"], b["name"]),
+                    r["headline"])
                 result = await asyncio.to_thread(
                     yt_uploader.upload_short, r["path"], title, description,
                     b["yt"])
