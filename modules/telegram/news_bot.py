@@ -69,7 +69,6 @@ Run:  py modules/telegram/news_bot.py
 
 import asyncio
 import datetime as dt
-import json
 import logging
 import os
 import sys
@@ -266,65 +265,32 @@ def _photo_count(media: list) -> int:
 # --------------------------------------------------------------------------- #
 #
 # One message that already holds every answer — brands, design, platforms —
-# taken from what the operator chose last time for this kind of post, with
-# 🚀 Go to accept it and ✏️ Change to edit all of it on one screen. The pure
-# half (defaults, summary lines, keyboards) is in branded.py.
-
-# The last plan per kind of post ("video" / "photo"), by brand NAME. Lost
-# with the data dir, which only costs the operator one ✏️ Change.
-_PLAN_MEMORY = os.path.join(config.TG_DATA_DIR, "plan_defaults.json")
+# from the house default (branded.DEFAULT_GROUP / DEFAULT_PLATFORMS), with
+# 🎬 Render to accept it and ✏️ Change to edit all of it on one screen. The
+# pure half (defaults, summary lines, keyboards) is in branded.py.
 
 _PLAN_RULE = "━━━━━━━━━━━━━━"
 
 
-def _plan_memory() -> dict:
-    try:
-        with open(_PLAN_MEMORY, encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _remember_plan(state: dict, platforms) -> None:
-    """Make this plan the default for the next post of its kind. Best-effort:
-    a failed write costs a default, never the post."""
-    mem = _plan_memory()
-    kind = state["gate_kind"]
-    mem[kind] = branded.plan_memory(
-        state["brands"], state["sel_brands"], state.get("layout"), platforms,
-        _photo_count(state["media"]), mem.get(kind))
-    try:
-        os.makedirs(os.path.dirname(_PLAN_MEMORY), exist_ok=True)
-        tmp = _PLAN_MEMORY + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(mem, fh, indent=1)
-        os.replace(tmp, _PLAN_MEMORY)
-    except OSError as exc:
-        log.warning("couldn't save the plan defaults: %s", exc)
-
-
 def _init_plan(state: dict, kind: str) -> None:
     """Turn a post's state into an open plan card ("video" = brand the clip,
-    "photo" = compose news cards), pre-filled with the remembered plan."""
+    "photo" = compose news cards), pre-filled with the default plan."""
     brands = branded.available_brands(config.BRANDS)
-    plan = branded.default_plan(brands, kind, _photo_count(state["media"]),
-                                _plan_memory().get(kind, {}),
-                                config.YT_UPLOADS_ENABLED)
+    plan = branded.default_plan(brands, kind, _photo_count(state["media"]))
     state.update(mode="plan", gate_kind=kind, card=kind == "photo",
                  brands=brands, sel_brands=plan["sel_brands"],
                  layout=plan["layout"], plan_platforms=plan["platforms"],
                  custom_brands=False, editing=False,
                  # The analysis starts the moment the card is up; until it
-                 # lands the card says so.
-                 watching=config.IG_VISION_ENABLED)
+                 # lands the card says so. Photos are never analysed — see
+                 # _start_watching.
+                 watching=config.IG_VISION_ENABLED and kind != "photo")
 
 
 def _plan_available(state: dict) -> list:
     """Platform keys the currently selected brands could publish to."""
     return branded.plan_platform_keys(state["brands"], state["sel_brands"],
-                                      state["gate_kind"],
-                                      config.YT_UPLOADS_ENABLED)
+                                      state["gate_kind"])
 
 
 def _plan_keys(state: dict) -> list:
@@ -357,11 +323,11 @@ def _plan_text(state: dict) -> str:
 
 
 def _plan_markup(state: dict) -> InlineKeyboardMarkup:
-    """🚀 Go / ✏️ Change, or — while editing — every choice on one screen."""
-    if not state.get("editing"):
-        return branded.plan_keyboard()
+    """🎬 Render / ✏️ Change, or — while editing — every choice on one screen."""
     layouts = (branded.card_layouts(_photo_count(state["media"]))
                if state["gate_kind"] == "photo" else [])
+    if not state.get("editing"):
+        return branded.plan_keyboard(layouts, state.get("layout"))
     return branded.plan_edit_keyboard(
         state["brands"], state["sel_brands"], state.get("custom_brands", False),
         layouts, state.get("layout"), _plan_available(state),
@@ -807,7 +773,7 @@ _VISION_WAIT_S = 90
 async def _video_too_big(state: dict) -> str:
     """Why this post's video can't be fetched for branding, or "" when it can:
     past the Bot API's 20 MB get_file cap only the MTProto client can carry
-    it. Checked on Go (fail on the tap, not after a minute of setup) and by
+    it. Checked on Render (fail on the tap, not after a minute of setup) and by
     the analysis, which would otherwise mail an error for every big clip."""
     video = next((m for m in state["media"] if m["type"] == "video"), None)
     size = (video or {}).get("file_size") or 0
@@ -831,12 +797,8 @@ async def _watch_media(bot, state: dict, message) -> None:
     empty, which every consumer already treats as "no analysis".
     """
     try:
-        if state.get("gate_kind") == "photo" or state.get("card"):
-            paths = await _ensure_local_photos(bot, state)
-            path = paths[0] if paths else ""
-            footage = await asyncio.to_thread(vision.describe, path, state["text"])
-        elif await _video_too_big(state):
-            footage = {}  # Go will say why; nothing to analyse without the file
+        if await _video_too_big(state):
+            footage = {}  # Render will say why; nothing to analyse without the file
         else:
             path = await _ensure_local_video(bot, state)
             footage = await asyncio.to_thread(vision.describe, path, state["text"])
@@ -859,8 +821,13 @@ async def _watch_media(bot, state: dict, message) -> None:
 
 
 def _start_watching(bot, state: dict, message) -> None:
-    """Kick off _watch_media once per post, tracked so the render can wait."""
-    if state.get("vision_task") is not None or not config.IG_VISION_ENABLED:
+    """Kick off _watch_media once per post, tracked so the render can wait.
+
+    Video only. A photo post's caption is written from the headline and the
+    operator's `info:` alone — the search runs on those, exactly as it did
+    before shared/vision existed — so the photos never go to the model."""
+    if (state.get("vision_task") is not None or not config.IG_VISION_ENABLED
+            or state.get("gate_kind") == "photo" or state.get("card")):
         return
     state["vision_task"] = asyncio.create_task(
         _watch_media(bot, state, message))
@@ -924,13 +891,6 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
             await q.answer("Pick at least one platform.", show_alert=True)
             return
         await q.answer()
-        # What was published is next post's default. A platform this post
-        # couldn't offer (YouTube for a long clip) keeps its place in the plan.
-        offered = {p["platform"] for p in state["platforms"]}
-        chosen = {state["platforms"][i]["platform"]
-                  for i in state["sel_platforms"]}
-        _remember_plan(state, (set(state.get("plan_platforms") or ())
-                               - offered) | chosen)
         await _do_publish(q, context, state)
         return
 
@@ -946,7 +906,7 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
 
 async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
     """Taps on an open plan card and its editor. Every edit redraws the whole
-    card, so the plan block always shows what Go will do."""
+    card, so the plan block always shows what Render will do."""
     async def redraw():
         try:
             await q.edit_message_text(_plan_text(state),
@@ -1000,8 +960,9 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
         return
 
     if verb == "go":
-        # Validate BEFORE answering: a query can only be answered once, so an
-        # alert sent after a bare q.answer() never reaches the operator.
+        # "b:go" is the 🎬 Render button. Validate BEFORE answering: a query
+        # can only be answered once, so an alert sent after a bare q.answer()
+        # never reaches the operator.
         if not state["sel_brands"]:
             await q.answer("No brands selected — tap ✏️ Change.",
                            show_alert=True)
@@ -1023,9 +984,8 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
                                show_alert=True)
                 return
         await q.answer()
-        state["mode"] = "rendering"  # a second tap on Go must not render twice
+        state["mode"] = "rendering"  # a second tap on Render must not render twice
         state["plan_platforms"] = set(keys)
-        _remember_plan(state, keys)
         if state["card"]:
             await _do_render_card(q, context, state)
         else:
@@ -1251,8 +1211,8 @@ async def _do_render_card(q, context, state: dict) -> None:
         _cleanup(state)
         await q.edit_message_text(f"❌ can't fetch the photos: {str(exc)[:300]}")
         return
-    layout = state.get("layout", "insets")
-    hero, insets = photos[0], photos[1:3]
+    hero, layout, insets = branded.render_args(state.get("layout", "solo"),
+                                               photos)
 
     media_dir = os.path.join(config.TG_DATA_DIR, "media")
     renders, failures, warnings = [], [], []

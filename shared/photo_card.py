@@ -114,7 +114,8 @@ SCRIM_SOLID = 0.80
 DIVIDER_Y = 0.68
 DIVIDER_MARGIN = 0.05     # left/right inset of the rule, fraction of width
 DIVIDER_THICKNESS = 3
-LOGO_HEIGHT = 0.045       # logo height as a fraction of canvas height
+LOGO_HEIGHT = 0.09        # logo height as a fraction of canvas height (was
+                          # 0.045 — too small to read on a phone)
 LOGO_GAP_PAD = 0.02       # clear space between the rule ends and the logo
 
 # Headline block: sits between HEADLINE_TOP and HEADLINE_BOTTOM.
@@ -493,13 +494,14 @@ def render_card(hero_path: str, headline: str, logo_path: str, out_path: str,
     text = " ".join(headline.split()).upper()
     box_top, box_bot = round(HEADLINE_TOP * H), round(HEADLINE_BOTTOM * H)
     max_w = W - 2 * round(HEADLINE_SIDE * W)
-    font, lines = _fit_font(draw, text, font_path, max_w, box_bot - box_top,
-                            round(FONT_MAX * H), round(FONT_MIN * H))
-    line_h = round(font.size * LINE_SPACING)
     # Top-anchored: the first row sits right under the divider/logo (plus a
     # small gap) and extra rows grow downward — a short headline hugs the
-    # logo, a long one fills the block towards the bottom.
+    # logo, a long one fills the block towards the bottom. The font is fitted
+    # to the room actually left under the logo, not the nominal box.
     y = max(box_top, ly + lh // 2 + round(HEADLINE_GAP * H))
+    font, lines = _fit_font(draw, text, font_path, max_w, box_bot - y,
+                            round(FONT_MAX * H), round(FONT_MIN * H))
+    line_h = round(font.size * LINE_SPACING)
     for line in lines:
         lw_ = draw.textlength(line, font=font)
         x = (W - lw_) / 2

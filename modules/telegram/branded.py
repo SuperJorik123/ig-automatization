@@ -133,19 +133,35 @@ def expand(platforms: list, selected: set) -> list:
     return pairs
 
 
-# The card designs, in picker order: (photo_card layout, button label). Only
-# offered when the post HAS the photos a layout needs — "split" and "insets"
-# are the same picture as "solo" with one photo, so a single-photo post is
-# given one card button rather than three that render identically.
-CARD_LAYOUTS = (("insets", "⚪ Circles"), ("split", "◧ Split"),
-                ("solo", "▭ Photo only"))
+# The four card designs (example1..4 at the repo root), in picker order:
+# (design id, button label). Only offered when the post HAS the photos a design
+# needs — one photo has only "solo" (every other design would render the same
+# picture), two add Circles and the two-panel split, three add the three-panel
+# split. Both splits are photo_card's "split"; the id only decides how many
+# photos go into it (`render_args`).
+CARD_LAYOUTS = (("insets", "⚪ Circles"), ("split2", "◧ Split ×2"),
+                ("split3", "◫ Split ×3"), ("solo", "▭ Photo only"))
+# design id -> (photos it needs, photo_card layout, extra photos it takes)
+_LAYOUT_SPEC = {"solo": (1, "solo", 0), "insets": (2, "insets", 2),
+                "split2": (2, "split", 1), "split3": (3, "split", 2)}
 
 
 def card_layouts(n_photos: int) -> list[tuple[str, str]]:
     """The designs worth offering for a post of `n_photos` photos."""
     if n_photos <= 1:
         return [("solo", "🖼 Create post")]
-    return list(CARD_LAYOUTS)
+    return [(lay, label) for lay, label in CARD_LAYOUTS
+            if _LAYOUT_SPEC[lay][0] <= n_photos]
+
+
+def render_args(layout: str, photos: list) -> tuple[str, str, list]:
+    """A design id + the post's photos -> (hero, photo_card layout, insets).
+    An unknown id (a stale "split" from before the two splits existed) falls
+    back to the split that fits the photos."""
+    if layout == "split":
+        layout = "split3" if len(photos) >= 3 else "split2"
+    _, pc_layout, extra = _LAYOUT_SPEC.get(layout, _LAYOUT_SPEC["solo"])
+    return photos[0], pc_layout, photos[1:1 + extra]
 
 
 def toggle_brand_group(brands: list, selected: set, index: int) -> set:
@@ -213,77 +229,62 @@ def platform_keyboard(platforms: list, selected: set) -> InlineKeyboardMarkup:
 # --------------------------------------------------------------------------- #
 #
 # A branded post used to be a wizard — gate, brand picker, render, platform
-# picker — and every feature added a step. The plan card guesses every answer
-# up front (what the operator picked last time for this kind of post) and asks
-# for one approval: 🚀 Go renders, and the publish picker then opens with the
-# plan's platforms already ticked. ✏️ Change opens one editor holding all the
-# choices at once. A new option becomes a line on the card with a default, not
+# picker — and every feature added a step. The plan card fills every answer
+# in up front (the house default below) and asks for one approval: 🎬 Render
+# renders, and the publish picker then opens with the plan's platforms already
+# ticked. ✏️ Change opens one editor holding all the choices at once, for this
+# post only. A new option becomes a line on the card with a default, not
 # another screen.
 #
 # Callback verbs (all under "b:"):
-#     b:go  b:edit  b:asis  b:cancel      the card
+#     b:go  b:edit  b:asis  b:cancel      the card (b:go is 🎬 Render)
 #     b:g:<i> b:custom b:groups b:t:<i>   editor — brands (as in the picker)
 #     b:lay:<layout>  b:pk:<key>  b:done  editor — design, platforms, back
+
+# What every card opens with — the same plan every time, so the operator never
+# has to check what a card inherited from the post before. JNN is the family
+# most posts go to; Telegram is left off on purpose (channels get their posts
+# from the autopilot). A platform only shows up when a selected brand has an
+# account on it. YouTube here is a human pick of a clip the operator has just
+# looked at, so YT_UPLOADS_ENABLED (the switch for the smart filter's
+# unattended auto-upload) doesn't apply to it.
+DEFAULT_GROUP = "JNN"
+DEFAULT_PLATFORMS = ("yt", "tw", "ig", "fb")
 
 # Platform names on the card, where there is room to spell them out.
 PLATFORM_NAMES = {"tg": "Telegram", "yt": "YouTube", "tw": "X",
                   "ig": "Instagram", "fb": "Facebook"}
 
 
-def plan_platform_keys(brands: list, selected: set, kind: str,
-                       yt_enabled: bool) -> list:
+def plan_platform_keys(brands: list, selected: set, kind: str) -> list:
     """The platforms the selected brands could publish to, in picker order.
     Mirrors `_publishable` as far as it can before anything is rendered: a
-    photo card never goes to YouTube, and YouTube is off entirely while the
-    upload kill switch is. The Shorts length cap is only known after the
-    probe — `platforms_for` still applies it after the render."""
+    photo card never goes to YouTube. The Shorts length cap is only known
+    after the probe — `platforms_for` still applies it after the render."""
     keys = []
     for key, _ in PLATFORMS:
-        if key == "yt" and (kind == "photo" or not yt_enabled):
+        if key == "yt" and kind == "photo":
             continue
         if any(brands[i].get(key) for i in selected):
             keys.append(key)
     return keys
 
 
-def default_plan(brands: list, kind: str, n_photos: int, saved: dict,
-                 yt_enabled: bool) -> dict:
-    """The plan a fresh card opens with: the operator's last choice for this
-    kind of post (`saved`, as `plan_memory` wrote it), resolved against the
-    brands and platforms available NOW. Anything that no longer resolves falls
-    back to everything — a renamed brand must not leave the card with an empty
-    plan that Go refuses.
+def default_plan(brands: list, kind: str, n_photos: int) -> dict:
+    """The plan a fresh card opens with: the DEFAULT_GROUP brands (every
+    usable brand when that group doesn't exist, so the card is never empty),
+    the first design this many photos allow, and the DEFAULT_PLATFORMS those
+    brands can actually publish to.
 
     Returns {"sel_brands": {index}, "layout": str | None, "platforms": {key}}.
     """
-    saved = saved or {}
     usable = {i for i, b in enumerate(brands) if b.get("has_logo", True)}
-    names = set(saved.get("brands") or ())
-    sel = {i for i in usable if brands[i]["name"] in names} or set(usable)
-
-    layout = None
-    if kind == "photo":
-        options = [lay for lay, _ in card_layouts(n_photos)]
-        layout = saved.get("layout") if saved.get("layout") in options \
-            else options[0]
-
-    avail = plan_platform_keys(brands, sel, kind, yt_enabled)
-    keys = set(saved.get("platforms") or ()) & set(avail) or set(avail)
-    return {"sel_brands": sel, "layout": layout, "platforms": keys}
-
-
-def plan_memory(brands: list, selected: set, layout, platforms,
-                n_photos: int, previous: dict) -> dict:
-    """What to remember for next time, by NAME (indexes shift when a brand is
-    added). The layout is only learnt from a post that had a real choice of
-    designs: a single photo is always "solo", and remembering that would
-    silently turn the next album's Circles into Photo only."""
-    out = dict(previous or {})
-    out["brands"] = sorted(brands[i]["name"] for i in selected)
-    out["platforms"] = [k for k, _ in PLATFORMS if k in set(platforms)]
-    if layout and n_photos > 1:
-        out["layout"] = layout
-    return out
+    sel = {i for i in usable
+           if groups.group_of(brands[i]) == DEFAULT_GROUP} or set(usable)
+    layout = card_layouts(n_photos)[0][0] if kind == "photo" else None
+    avail = plan_platform_keys(brands, sel, kind)
+    return {"sel_brands": sel, "layout": layout,
+            "platforms": set(DEFAULT_PLATFORMS) & set(avail)}
 
 
 def brands_summary(brands: list, selected: set) -> str:
@@ -317,13 +318,22 @@ def plan_lines(brands: list, selected: set, platforms: list,
     return lines
 
 
-def plan_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Go", callback_data="b:go"),
-         InlineKeyboardButton("✏️ Change", callback_data="b:edit")],
-        [InlineKeyboardButton("📤 Post as-is", callback_data="b:asis"),
-         InlineKeyboardButton("✕ Cancel", callback_data="b:cancel")],
-    ])
+def _design_row(layouts: list, layout) -> list:
+    return [InlineKeyboardButton(("● " if lay == layout else "") + label,
+                                 callback_data=f"b:lay:{lay}")
+            for lay, label in layouts]
+
+
+def plan_keyboard(layouts: list = (), layout=None) -> InlineKeyboardMarkup:
+    """Render / Change / Post as-is / Cancel, with the design row right on the
+    card when a photo post has more than one design to choose from."""
+    rows = [[InlineKeyboardButton("🎬 Render", callback_data="b:go"),
+             InlineKeyboardButton("✏️ Change", callback_data="b:edit")]]
+    if len(layouts) > 1:
+        rows.insert(0, _design_row(layouts, layout))
+    rows.append([InlineKeyboardButton("📤 Post as-is", callback_data="b:asis"),
+                 InlineKeyboardButton("✕ Cancel", callback_data="b:cancel")])
+    return InlineKeyboardMarkup(rows)
 
 
 def plan_edit_keyboard(brands: list, selected: set, custom: bool,
@@ -334,9 +344,7 @@ def plan_edit_keyboard(brands: list, selected: set, custom: bool,
     card. `layouts` is card_layouts(n) for a photo post, [] for a video."""
     rows = _brand_rows(brands, selected, custom)
     if len(layouts) > 1:
-        rows.append([InlineKeyboardButton(
-            ("● " if lay == layout else "") + label,
-            callback_data=f"b:lay:{lay}") for lay, label in layouts])
+        rows.append(_design_row(layouts, layout))
     if available:
         rows.append([InlineKeyboardButton(
             f"{'☑' if k in platforms else '☐'} {dict(PLATFORMS)[k]}",

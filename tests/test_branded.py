@@ -139,11 +139,11 @@ def test_editor_offers_designs_only_when_there_is_a_choice():
         _editor(brands, {0}, layouts=branded.card_layouts(1), layout="solo"))]
     assert not any(d.startswith("b:lay:") for d in one)
     btns = _buttons(_editor(brands, {0}, layouts=branded.card_layouts(3),
-                            layout="split"))
+                            layout="split2"))
     lay = [b for b in btns if b.callback_data.startswith("b:lay:")]
-    assert [b.callback_data for b in lay] == ["b:lay:insets", "b:lay:split",
-                                              "b:lay:solo"]
-    assert [b.text.startswith("● ") for b in lay] == [False, True, False]
+    assert [b.callback_data for b in lay] == ["b:lay:insets", "b:lay:split2",
+                                              "b:lay:split3", "b:lay:solo"]
+    assert [b.text.startswith("● ") for b in lay] == [False, True, False, False]
 
 
 def test_editor_platform_row_ticks_the_plan():
@@ -208,9 +208,26 @@ def test_card_layouts_one_for_a_single_photo():
     assert [lay for lay, _ in branded.card_layouts(1)] == ["solo"]
 
 
-def test_card_layouts_every_design_for_several_photos():
-    assert [lay for lay, _ in branded.card_layouts(3)] == ["insets", "split",
-                                                          "solo"]
+def test_card_layouts_every_design_for_three_photos():
+    assert [lay for lay, _ in branded.card_layouts(3)] == [
+        "insets", "split2", "split3", "solo"]
+    assert [lay for lay, _ in branded.card_layouts(5)] == [
+        "insets", "split2", "split3", "solo"]
+
+
+def test_card_layouts_two_photos_leave_out_the_three_panel_split():
+    assert [lay for lay, _ in branded.card_layouts(2)] == [
+        "insets", "split2", "solo"]
+
+
+def test_render_args_hands_each_design_its_photos():
+    ph = ["a", "b", "c", "d"]
+    assert branded.render_args("solo", ph) == ("a", "solo", [])
+    assert branded.render_args("insets", ph) == ("a", "insets", ["b", "c"])
+    assert branded.render_args("split2", ph) == ("a", "split", ["b"])
+    assert branded.render_args("split3", ph) == ("a", "split", ["b", "c"])
+    # a pre-upgrade "split" picks the split the photos fill
+    assert branded.render_args("split", ph[:2]) == ("a", "split", ["b"])
 
 
 # --- Instagram (Graph API) -------------------------------------------------
@@ -360,55 +377,65 @@ def _plan_brands():
 
 def test_plan_platforms_are_what_the_selected_brands_have():
     brands = _plan_brands()
-    assert branded.plan_platform_keys(brands, {1}, "video", True) == ["tg"]
-    assert branded.plan_platform_keys(brands, {0, 2}, "video", True) == [
+    assert branded.plan_platform_keys(brands, {1}, "video") == ["tg"]
+    assert branded.plan_platform_keys(brands, {0, 2}, "video") == [
         "tg", "yt", "tw", "ig"]
 
 
-def test_plan_never_offers_youtube_for_cards_or_while_uploads_are_off():
+def test_plan_never_offers_youtube_for_a_photo_card():
     brands = _plan_brands()
-    assert "yt" not in branded.plan_platform_keys(brands, {0}, "photo", True)
-    assert "yt" not in branded.plan_platform_keys(brands, {0}, "video", False)
+    assert "yt" not in branded.plan_platform_keys(brands, {0}, "photo")
+    assert "yt" in branded.plan_platform_keys(brands, {0}, "video")
 
 
-def test_first_plan_is_every_usable_brand_and_platform():
-    plan = branded.default_plan(_plan_brands(), "video", 0, {}, False)
-    assert plan["sel_brands"] == {0, 1, 2}          # d has no logo
-    assert plan["platforms"] == {"tg", "tw", "ig"}
+def test_the_default_plan_is_jnn_on_yt_x_ig_fb():
+    brands = [dict(_brand("a", group="JNN", tg="@a", yt="a", tw="a"), ig="a",
+                   fb="a", has_logo=True),
+              dict(_brand("b", group="GMN", tg="@b", yt="b", tw="b"), ig="b",
+                   has_logo=True),
+              dict(_brand("c", group="JNN", tg="@c", yt="", tw=""), ig="",
+                   has_logo=True)]
+    plan = branded.default_plan(brands, "video", 0)
+    assert plan["sel_brands"] == {0, 2}
+    assert plan["platforms"] == {"yt", "tw", "ig", "fb"}     # never Telegram
     assert plan["layout"] is None
 
 
-def test_plan_reopens_on_the_remembered_choice():
-    saved = {"brands": ["c"], "platforms": ["ig"], "layout": "split"}
-    plan = branded.default_plan(_plan_brands(), "photo", 3, saved, True)
-    assert plan == {"sel_brands": {2}, "layout": "split", "platforms": {"ig"}}
+def test_default_platforms_are_only_those_the_brands_have():
+    # _plan_brands: JNN is only "c" (tg + ig).
+    plan = branded.default_plan(_plan_brands(), "video", 0)
+    assert plan["sel_brands"] == {2}
+    assert plan["platforms"] == {"ig"}
 
 
-def test_a_memory_that_no_longer_resolves_falls_back_to_everything():
-    saved = {"brands": ["renamed"], "platforms": ["fb"], "layout": "gone"}
-    plan = branded.default_plan(_plan_brands(), "photo", 3, saved, True)
-    assert plan["sel_brands"] == {0, 1, 2}
-    assert plan["platforms"] == {"tg", "tw", "ig"}
-    assert plan["layout"] == "insets"
+def test_default_is_every_usable_brand_when_there_is_no_jnn():
+    brands = [dict(_brand("a", group="GMN"), has_logo=True),
+              dict(_brand("b"), has_logo=True),
+              dict(_brand("c"), has_logo=False)]
+    assert branded.default_plan(brands, "video", 0)["sel_brands"] == {0, 1}
 
 
-def test_a_single_photo_always_opens_on_its_one_design():
-    plan = branded.default_plan(_plan_brands(), "photo", 1,
-                                {"layout": "split"}, True)
-    assert plan["layout"] == "solo"
+def test_default_design_is_circles_for_an_album_and_solo_for_one_photo():
+    assert branded.default_plan(_plan_brands(), "photo", 3)["layout"] == "insets"
+    assert branded.default_plan(_plan_brands(), "photo", 1)["layout"] == "solo"
 
 
-def test_plan_memory_is_by_name_in_picker_order():
-    mem = branded.plan_memory(_plan_brands(), {2, 0}, None, {"ig", "tg"}, 0, {})
-    assert mem == {"brands": ["a", "c"], "platforms": ["tg", "ig"]}
+def test_render_is_the_first_button_on_the_card():
+    btn = branded.plan_keyboard().inline_keyboard[0][0]
+    assert (btn.text, btn.callback_data) == ("🎬 Render", "b:go")
 
 
-def test_a_single_photo_never_overwrites_the_remembered_design():
-    mem = branded.plan_memory(_plan_brands(), {0}, "solo", ["tg"], 1,
-                              {"layout": "split"})
-    assert mem["layout"] == "split"
-    mem = branded.plan_memory(_plan_brands(), {0}, "insets", ["tg"], 2, mem)
-    assert mem["layout"] == "insets"
+def test_card_shows_the_designs_on_top_for_an_album():
+    kb = branded.plan_keyboard(branded.card_layouts(3), "split3").inline_keyboard
+    assert [b.callback_data for b in kb[0]] == [
+        "b:lay:insets", "b:lay:split2", "b:lay:split3", "b:lay:solo"]
+    assert kb[0][2].text.startswith("● ")
+    assert kb[1][0].callback_data == "b:go"
+
+
+def test_card_has_no_design_row_for_one_photo():
+    kb = branded.plan_keyboard(branded.card_layouts(1), "solo").inline_keyboard
+    assert kb[0][0].callback_data == "b:go"
 
 
 def test_brands_summary_names_whole_groups():

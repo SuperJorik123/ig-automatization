@@ -6,6 +6,35 @@
 **Frontend** (terminal 2): `cd ui && npm start` — open http://localhost:4200.
 **Telegram bot** (terminal 3, optional): `py modules/telegram/telegram_bot.py` — needs `.env` with `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`. Pastes IG reel URLs into the configured group → bot downloads, strips `#mirnews`, posts to IG.
 
+## News bot (full stack)
+
+The news bot (branding, photo cards, plan card, autopilot) is three processes,
+each in its own terminal. All three are needed: the collector supplies stories,
+the dispatcher scores them, the news bot posts them and runs the picker.
+
+```
+py modules/telegram/collector.py     # terminal A — source channels -> SQLite queue
+py modules/telegram/dispatcher.py    # terminal B — scores the queue (smart filter)
+py modules/telegram/news_bot.py      # terminal C — control-group bot + autopilot
+```
+
+**First time only:** the collector asks for a phone-code login on its first
+run, and big videos (branding / YouTube past 20 MB) need one login for the
+news bot's own MTProto session: `py modules/telegram/mtproto.py --login`.
+
+**Only the manual broadcaster** (send media in the control group → plan card →
+render → publish) needs just `py modules/telegram/news_bot.py`.
+
+**On the VPS** they run as systemd services (see `docs/DEPLOY.md`):
+
+```
+systemctl restart news-collector news-dispatcher news-bot   # start / restart all three
+systemctl status  news-collector news-dispatcher news-bot
+journalctl -u news-bot -f                                   # live log
+```
+
+A running bot keeps the old code in memory — restart it after pulling changes.
+
 **Phone:** Galaxy S23 (ADB ID `R5CX235CF9A`) plugged in via USB with USB debugging enabled.
 
 **Post manually** (skip the UI, takes next image in `posts/`): `py modules/instagram/upload_post.py`
