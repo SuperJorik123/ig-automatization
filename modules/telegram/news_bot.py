@@ -1901,7 +1901,12 @@ def main() -> None:
     errmail.install("news_bot")  # every logged ERROR -> one email to the operator
     _sweep_orphans()
     queue_store.init()  # the autopilot reads/writes the same DB as the collector
+    # PTB's 5 s read timeout is too tight for the VPS: Telegram delivered a
+    # "⏳ downloading …" reply but answered after 5 s, the send raised
+    # TimedOut and the handler died before the download started — leaving a
+    # note that never updates (2026-09-28).
     app = (Application.builder().token(config.NEWS_BOT_TOKEN)
+           .connect_timeout(15).read_timeout(30).write_timeout(60)
            .post_init(_on_start).post_shutdown(_on_shutdown).build())
     control = filters.Chat(CHAT_ID)
     app.add_handler(CommandHandler("queue", cmd_queue, filters=control))
