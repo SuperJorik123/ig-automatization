@@ -203,8 +203,10 @@ their `.env` line rewritten instead.
 ### Privacy policy page
 
 The Meta app needs a Privacy Policy URL and a User data deletion URL. Both
-point at one static page, `deploy/site/privacy.html`, served by the same vhost
-(the only path besides `/m/` that isn't a 404):
+point at one static page, `deploy/site/privacy.html`, served by the same vhost.
+The live vhost also serves `/var/www/legal` at `/` (hand-made 2026-09-14): its
+`/privacy.html` is the older YouTube-only "Newsbot" page Google's OAuth consent
+screen was verified against — leave that URL alone; `/privacy` is the new one.
 
 | | |
 | --- | --- |

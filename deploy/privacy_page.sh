@@ -36,18 +36,21 @@ location = /privacy {
     add_header Cache-Control "public, max-age=300";
     add_header X-Content-Type-Options nosniff;
 }
-location = /privacy/     { return 301 /privacy; }
-location = /privacy.html { return 301 /privacy; }
+location = /privacy/ { return 301 /privacy; }
 EOF
+# /privacy.html is NOT touched: on the VPS `location /` serves /var/www/legal,
+# whose privacy.html is the older YouTube-only page Google's OAuth consent
+# screen was verified against.
 if ! grep -q 'snippets/igsite.conf' "$CONF"; then
-    # Goes next to the catch-all 404, i.e. inside the https server block that
-    # certbot left the original locations in.
-    if ! grep -q 'location / { return 404; }' "$CONF"; then
-        echo "no 'location / { return 404; }' line in $CONF — add 'include $SNIP;' by hand" >&2
+    # Goes next to the catch-all `location /` (a 404 as ig_media_hosting.sh
+    # writes it, a root on the live box), i.e. inside the https server block
+    # that certbot left the original locations in.
+    if [ "$(grep -c '^\s*location / ' "$CONF")" != 1 ]; then
+        echo "expected exactly one 'location / ' line in $CONF — add 'include $SNIP;' by hand" >&2
         exit 1
     fi
     cp "$CONF" "$CONF.bak.$(date +%Y%m%d-%H%M%S)"
-    sed -i 's|^\(\s*\)location / { return 404; }|\1include snippets/igsite.conf;\n&|' "$CONF"
+    sed -i 's|^\(\s*\)location / .*|\1include snippets/igsite.conf;\n&|' "$CONF"
 fi
 nginx -t
 systemctl reload nginx
