@@ -55,6 +55,7 @@ fi
 nginx -t
 systemctl reload nginx
 
+sleep 1   # reload is async: old workers still answer for a moment
 echo "== 3/3 probe"
 curl -s -o /dev/null -w "   /privacy -> HTTP %{http_code}\n" "https://${HOST}/privacy"
 curl -s -o /dev/null -w "   /m/      -> HTTP %{http_code} (must not be 200)\n" "https://${HOST}/m/"
