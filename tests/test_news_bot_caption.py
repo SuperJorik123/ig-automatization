@@ -264,6 +264,23 @@ def test_a_youtube_pair_buys_the_caption_too(calls):
     assert len(calls["expand"]) == 1 and "mir" in out
 
 
+def test_a_facebook_pair_buys_the_caption_too(calls):
+    """Facebook posts the same full caption Instagram does, not the headline."""
+    out = _run("Man walks past a bear", [dict(_pair(), platform="fb")], FOOTAGE)
+    assert len(calls["expand"]) == 1
+    assert out["mir"].startswith("Man walks past a bear\n\nA bear crossed")
+
+
+def test_the_publish_picker_offers_the_reply_for_facebook():
+    state = _state(platforms=[{"platform": "fb"}])
+    assert "info:" in news_bot._publish_prompt_text(state)
+
+
+def test_a_brand_on_ig_and_fb_is_planned_once(calls):
+    out = _run("h", [_pair(), dict(_pair(), platform="fb")], FOOTAGE)
+    assert list(out) == ["mir"] and len(calls["expand"]) == 1
+
+
 def test_a_brand_on_ig_and_yt_is_planned_once(calls):
     out = _run("h", [_pair(), dict(_pair(), platform="yt")], FOOTAGE)
     assert list(out) == ["mir"]
