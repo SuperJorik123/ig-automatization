@@ -65,10 +65,28 @@ def test_parse_brands_names_langs_and_env_pointers():
 def test_parse_brands_logo_path_and_empty_input():
     brands = config._parse_brands("mirnews:en", {})
     assert brands[0]["logo"] == config.os.path.join(
-        config.ROOT_DIR, "brands", "mirnews", "logo.png"
+        config.ROOT_DIR, "brands", "GMN", "mirnews", "logo.png"
     )
+    # no BRAND_MIRNEWS_GROUP -> the folder it sits in decides
+    assert brands[0]["group"] == "GMN"
     assert config._parse_brands("", {}) == []
     assert config._parse_brands("  ,  ", {}) == []
+
+
+def test_parse_brands_configured_group_wins_over_the_folder():
+    # wswire sits under brands/JNN/; a credentials "group" still decides the
+    # picker family, and the logo is found wherever the folder actually is.
+    brands = config._parse_brands("wswire:en", {"BRAND_WSWIRE_GROUP": "GMN"})
+    assert brands[0]["group"] == "GMN"
+    assert brands[0]["logo"] == config.os.path.join(
+        config.ROOT_DIR, "brands", "JNN", "wswire", "logo.png")
+
+
+def test_parse_brands_unknown_brand_points_under_its_group():
+    brands = config._parse_brands("nobody:en", {"BRAND_NOBODY_GROUP": "GMN"})
+    assert brands[0]["logo"] == config.os.path.join(
+        config.ROOT_DIR, "brands", "GMN", "nobody", "logo.png")
+    assert config._parse_brands("nobody", {})[0]["group"] == ""
 
 
 def test_parse_brands_lang_optional():

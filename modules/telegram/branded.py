@@ -224,8 +224,14 @@ def platform_keyboard(platforms: list, selected: set) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def countdown_keyboard() -> InlineKeyboardMarkup:
+    """The only button while a publish counts down: stop all of it."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✕ Cancel", callback_data="b:cancel")]])
+
+
 # --------------------------------------------------------------------------- #
-# The plan card                                                               #
+# The plan card                                                              #
 # --------------------------------------------------------------------------- #
 #
 # A branded post used to be a wizard — gate, brand picker, render, platform

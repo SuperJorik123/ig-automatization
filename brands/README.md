@@ -1,11 +1,17 @@
 # brands/
 
-One folder per brand, named exactly as its credentials file
-(`credentials/brands/<name>.json`):
+One folder per account group (`GMN/`, `JNN/`), and inside it one folder per
+brand, named exactly as its credentials file (`credentials/brands/<name>.json`):
 
-    brands/<name>/logo.png    transparent PNG, any size (the renderer scales
-                              it to 180 px wide)
-    brands/<name>/style.json  optional headline colors / font (see below)
+    brands/<group>/<name>/logo.png    transparent PNG, any size (the renderer
+                                      scales it to 180 px wide)
+    brands/<group>/<name>/style.json  optional headline colors / font (see below)
+
+Code never builds these paths by hand — `shared/config.brand_dir(name)` finds
+the folder (the brand's configured group first, then every group folder, then
+the old flat `brands/<name>/`). The folder a brand sits in is also its picker
+group when its credentials file has no `"group"`; when both are set, the
+credentials file wins, so keep the two in step when moving a brand.
 
 A brand without a logo.png shows up disabled in the news bot's brand picker.
 

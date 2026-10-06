@@ -322,15 +322,49 @@ PUBLIC_MEDIA_BASE_URL = os.environ.get("PUBLIC_MEDIA_BASE_URL", "").strip()
 # --------------------------------------------------------------------------- #
 
 
+BRANDS_DIR = os.path.join(ROOT_DIR, "brands")
+
+
+def _brand_folder(name: str, group: str = "") -> tuple[str, str]:
+    """(folder, group it sits under) for a brand's assets. Brands live one
+    level down, in a folder per account group — brands/GMN/mirnews,
+    brands/JNN/wswire — with the flat brands/<name> still accepted. The
+    configured group's folder is tried first; otherwise every group folder is
+    searched, so a brand whose credentials carry no "group" is still found.
+    Nothing found -> where it SHOULD be (under its group when it has one), so
+    the "no logo.png" message points at a sensible path."""
+    if group and os.path.isdir(os.path.join(BRANDS_DIR, group, name)):
+        return os.path.join(BRANDS_DIR, group, name), group
+    try:
+        entries = sorted(os.listdir(BRANDS_DIR))
+    except OSError:
+        entries = []
+    for g in entries:
+        if g == name:
+            continue
+        folder = os.path.join(BRANDS_DIR, g, name)
+        if os.path.isdir(folder):
+            return folder, g
+    if os.path.isdir(os.path.join(BRANDS_DIR, name)):
+        return os.path.join(BRANDS_DIR, name), ""
+    return os.path.join(BRANDS_DIR, *([group] if group else []), name), ""
+
+
+def brand_dir(name: str, group: str = "") -> str:
+    """The folder holding a brand's logo.png and style.json."""
+    return _brand_folder(name, group)[0]
+
+
 def _parse_brands(raw: str, env):
     """Parse BRANDS: comma-separated "name:lang" entries, e.g.
     "mirnews:en,rusnews:ru" (lang optional). Each brand's platform accounts
     come from BRAND_<NAME>_TG / _YT / _TW / _IG / _FB, and its picker group from
     BRAND_<NAME>_GROUP (name uppercased, non-alphanumerics
     -> "_", same rule as TWITTER_<ACCOUNT>_*); an unset platform means the
-    brand has no pair for it in the publish picker. The logo is always
-    brands/<name>/logo.png — a missing file disables the brand in the picker
-    (checked at use time, not here, so config import never touches disk)."""
+    brand has no pair for it in the publish picker. The logo is
+    brands/<group>/<name>/logo.png (see `_brand_folder`); a brand with no
+    configured group takes the group of the folder it sits in. A missing logo
+    disables the brand in the picker (checked at use time, not here)."""
     out = []
     for item in (raw or "").split(","):
         item = item.strip()
@@ -339,18 +373,21 @@ def _parse_brands(raw: str, env):
         parts = [p.strip() for p in item.split(":")]
         name = parts[0]
         key = "".join(c if c.isalnum() else "_" for c in name).upper()
+        group = (env.get(f"BRAND_{key}_GROUP") or "").strip()
+        folder, folder_group = _brand_folder(name, group)
         out.append({
             "name": name,
             "lang": parts[1] if len(parts) > 1 else "",
             # Account family (GMN / JNN) both news-bot pickers group by; blank
             # means the brand is only reachable through their "Custom" list.
-            "group": (env.get(f"BRAND_{key}_GROUP") or "").strip(),
+            # The credentials file wins; the brands/<group>/ folder fills in.
+            "group": group or folder_group,
             "tg": (env.get(f"BRAND_{key}_TG") or "").strip(),
             "yt": (env.get(f"BRAND_{key}_YT") or "").strip(),
             "tw": (env.get(f"BRAND_{key}_TW") or "").strip(),
             "ig": (env.get(f"BRAND_{key}_IG") or "").strip(),
             "fb": (env.get(f"BRAND_{key}_FB") or "").strip(),
-            "logo": os.path.join(ROOT_DIR, "brands", name, "logo.png"),
+            "logo": os.path.join(folder, "logo.png"),
         })
     return out
 

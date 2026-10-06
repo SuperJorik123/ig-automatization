@@ -75,7 +75,7 @@ the wording varies per account:
              shared caption — that call is already paid for.
   `rephrase` one cheap, SEARCHLESS call per remaining account
              (IG_CAPTION_VARIANT_MODEL): same facts, in THIS ACCOUNT'S VOICE —
-             the `writing_style` out of brands/<name>/style.json, which is the
+             the `writing_style` out of brands/<group>/<name>/style.json, which is the
              same on every post it publishes. An account with no voice gets a
              rotating ANGLES directive instead, never both: two structural
              instructions fight and the caption comes back in neither. Given a
@@ -419,7 +419,7 @@ _VARIANT_RULES = (
 )
 
 # Appended when the account has a voice of its own — `writing_style` in
-# brands/<name>/style.json (shared/branding.load_writing_style). The angle says
+# brands/<group>/<name>/style.json (shared/branding.load_writing_style). The angle says
 # how this post differs from the one next door; the STYLE says how this account
 # always writes, and it is the same string on every post it publishes, which is
 # what makes an account recognisable rather than merely different.
@@ -938,7 +938,7 @@ def rephrase(text: str, angle: str, lang: str = "", style: str = "",
     """One account's variant of a caption another account is publishing.
 
     Takes an `angle` OR a `style`, never both (see `plan`): `style` is the
-    account's permanent voice (`writing_style` in brands/<name>/style.json),
+    account's permanent voice (`writing_style` in brands/<group>/<name>/style.json),
     the same on every post it publishes and what makes it recognisable;
     `angle` is a per-post structural directive out of ANGLES, which is what a
     voiceless account gets instead so it at least differs from its neighbour.
@@ -1013,7 +1013,7 @@ if __name__ == "__main__":
                          "source language)")
     ap.add_argument("--brands", default="", metavar="A,B,C",
                     help="real brand names instead of --accounts, each writing "
-                         "in its own brands/<name>/style.json voice")
+                         "in its own brands/<group>/<name>/style.json voice")
     ap.add_argument("--media", default="", metavar="PATH",
                     help="the clip or photo this caption is for — analysed "
                          "first, so the search is driven by what it shows "
@@ -1033,8 +1033,7 @@ if __name__ == "__main__":
     if args.brands:
         from shared import branding
         fake = [{"name": n, "lang": args.lang,
-                 "style": branding.load_writing_style(os.path.join(
-                     _ROOT, "brands", n))}
+                 "style": branding.load_writing_style(config.brand_dir(n))}
                 for n in args.brands.split(",") if n.strip()]
     else:
         fake = [{"name": f"account{i + 1}", "lang": args.lang if i else ""}

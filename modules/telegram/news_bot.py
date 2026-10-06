@@ -18,7 +18,7 @@ can check before posting. The file is local, so nothing has to be fetched.
 
 Brand-it: a single-video post (uploaded or URL) with BRANDS configured first
 asks "Post as-is / Brand it". Brand-it renders one variant per selected brand
-— brands/<name>/logo.png top-right, the caption as a translated lower-third
+— brands/<group>/<name>/logo.png top-right, the caption as a translated lower-third
 headline (shared/branding.py) — sends each back here, then offers a publish
 picker of PLATFORMS (TG/YT/X/IG, all off; YouTube hidden over 3 minutes),
 each fanning out to every rendered brand configured for it.
@@ -470,6 +470,7 @@ def _cleanup(state: dict) -> None:
     task = state.get("vision_task")
     if task is not None and not task.done():
         task.cancel()
+    _disarm_auto_publish(state)
     for path in state.get("files", ()):
         try:
             os.remove(path)
@@ -565,9 +566,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             state["text"] = value
             state["cap_src"] = "edited"
         mode = state.get("mode")
-        if mode == "rendering":
-            # The headline is being burned in right now; an info reply was
-            # kept above and still reaches the Instagram caption.
+        if mode in ("rendering", "countdown"):
+            # The headline is being burned in, or the publish is counting
+            # down; an info reply was kept above and still reaches the
+            # Instagram caption, and the message keeps showing what it shows.
             return
         if mode == "plan":
             body = _plan_text(state)
@@ -576,6 +578,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             # The headline is burned into the renders and can't be changed
             # now — but the Instagram caption is written at publish time, so an
             # info reply is still worth taking this late.
+            # Any reply means the operator is here — restart the idle clock.
+            _arm_auto_publish(msg.get_bot(), state, reply)
             if field != "info":
                 return
             body = _publish_prompt_text(state)
@@ -743,7 +747,105 @@ def _publish_prompt_text(state: dict) -> str:
     lines += _info_lines(state)
     if any(p["platform"] == "ig" for p in state.get("platforms", ())):
         lines.append(_INFO_HINT)
+    if _AUTO_PUBLISH_S:
+        lines.append(f"⏱ publishes the ticked platforms by itself after "
+                     f"{_AUTO_PUBLISH_S // 60} min untouched — any tap or "
+                     "reply restarts the clock")
     return "\n\n".join(lines)
+
+
+# The publish picker ships what it has ticked once it has sat this long with
+# nobody touching it — the renders are made and the plan is already approved,
+# so a post must not die in the group because the operator walked away.
+# 0 turns it off.
+_AUTO_PUBLISH_S = 5 * 60
+
+
+def _arm_auto_publish(bot, state: dict, message) -> None:
+    """(Re)start the idle clock on an open publish picker. Called when the
+    picker opens and on every tap or reply it takes, so it measures idleness,
+    not age."""
+    _disarm_auto_publish(state)
+    if _AUTO_PUBLISH_S:
+        state["auto_task"] = asyncio.create_task(
+            _auto_publish(bot, state, message))
+
+
+def _disarm_auto_publish(state: dict) -> None:
+    """Stop the idle clock — never the task running this very call, which is
+    the auto-publish itself on its way through _do_publish."""
+    task = state.pop("auto_task", None)
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+async def _auto_publish(bot, state: dict, message) -> None:
+    try:
+        await asyncio.sleep(_AUTO_PUBLISH_S)
+    except asyncio.CancelledError:
+        return  # touched, published or cancelled in the meantime
+    # Same guards as the button: still this picker's state, still publishing,
+    # and something to publish to.
+    if _pending.get(message.message_id) is not state or state.get("mode") != "publish":
+        return
+    if not state["sel_platforms"]:
+        log.info("auto-publish skipped: no platform ticked")
+        return
+    log.info("publish picker idle for %ss — publishing", _AUTO_PUBLISH_S)
+    state["auto_published"] = True
+    _start_countdown(bot, state, message)
+
+
+# Publishing never starts on the tap itself: the picker turns into a countdown
+# with a ✕ Cancel button for this long first, and Cancel stops every post.
+# It is the last chance to catch a wrong headline or a wrong clip before it
+# lands on a dozen accounts at once. 0 publishes straight away.
+_PUBLISH_GRACE_S = 60
+# How often the countdown message is redrawn — often enough to read as a
+# timer, rarely enough to stay far under Telegram's edit rate limit.
+_COUNTDOWN_TICK_S = 10
+
+
+def _countdown_text(state: dict, left: int) -> str:
+    ticked = [p["label"] for i, p in enumerate(state["platforms"])
+              if i in state["sel_platforms"]]
+    lines = []
+    if state.get("auto_published"):
+        lines.append(f"⏱ picker untouched for {_AUTO_PUBLISH_S // 60} min")
+    lines.append(f"🚀 publishing to {' · '.join(ticked)} in {int(left)} s")
+    lines.append("✕ Cancel stops every post — nothing has gone out yet")
+    return "\n\n".join(lines)
+
+
+def _start_countdown(bot, state: dict, message) -> None:
+    """Publish (the 🚀 tap or the idle clock) lands here: the picker becomes a
+    countdown, and _do_publish runs only if nobody cancels it. The task sits
+    in the same slot as the idle clock, so ✕ Cancel → _cleanup stops it."""
+    _disarm_auto_publish(state)
+    state["mode"] = "countdown"
+    state["auto_task"] = asyncio.create_task(_countdown(bot, state, message))
+
+
+async def _countdown(bot, state: dict, message) -> None:
+    try:
+        left = _PUBLISH_GRACE_S
+        while left > 0:
+            try:
+                await message.edit_text(_countdown_text(state, left),
+                                        reply_markup=branded.countdown_keyboard())
+            except Exception:  # "not modified", a network blip — the clock runs on
+                pass
+            step = min(_COUNTDOWN_TICK_S, left)
+            await asyncio.sleep(step)
+            left -= step
+    except asyncio.CancelledError:
+        return  # ✕ Cancel
+    if _pending.get(message.message_id) is not state or state.get("mode") != "countdown":
+        return
+    try:
+        await _do_publish(message, bot, state)
+    except Exception:
+        log.exception("publish failed")
 
 
 async def _ensure_local_video(bot, state: dict) -> str:
@@ -862,7 +964,7 @@ async def _await_footage(state: dict) -> dict:
 async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
     """Taps on the plan card / its editor / the publish picker ("b:<verb>")."""
     if verb == "noop":
-        await q.answer("Add brands/<name>/logo.png to enable this brand.",
+        await q.answer("Add brands/<group>/<name>/logo.png to enable this brand.",
                        show_alert=True)
         return
 
@@ -881,6 +983,7 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
     if verb.startswith("p:") and state.get("mode") == "publish":
         await q.answer()
         state["sel_platforms"] ^= {int(verb.split(":", 1)[1])}
+        _arm_auto_publish(context.bot, state, q.message)
         await q.edit_message_reply_markup(
             branded.platform_keyboard(state["platforms"],
                                       state["sel_platforms"]))
@@ -891,14 +994,16 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
             await q.answer("Pick at least one platform.", show_alert=True)
             return
         await q.answer()
-        await _do_publish(q, context, state)
+        _start_countdown(context.bot, state, q.message)
         return
 
     if verb == "cancel":
         await q.answer()
+        counting = state.get("mode") == "countdown"
         _pending.pop(q.message.message_id, None)
-        _cleanup(state)
-        await q.edit_message_text("✕ cancelled")
+        _cleanup(state)  # also stops a running publish countdown
+        await q.edit_message_text("✕ cancelled — nothing was published"
+                                  if counting else "✕ cancelled")
         return
 
     await q.answer()  # stale/unknown verb for this mode
@@ -971,11 +1076,9 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
             await q.answer("No headline — reply to this message with it "
                            "first.", show_alert=True)
             return
-        keys = _plan_keys(state)
-        if not keys:
-            await q.answer("No platforms selected — tap ✏️ Change.",
-                           show_alert=True)
-            return
+        # No platform check: Render renders the selected brands, whatever
+        # accounts they have. Platforms only matter at publish, and a brand
+        # with none still gets its render back in the group.
         if not state["card"]:
             too_big = await _video_too_big(state)
             if too_big:
@@ -985,7 +1088,7 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
                 return
         await q.answer()
         state["mode"] = "rendering"  # a second tap on Render must not render twice
-        state["plan_platforms"] = set(keys)
+        state["plan_platforms"] = set(_plan_keys(state))
         if state["card"]:
             await _do_render_card(q, context, state)
         else:
@@ -1141,8 +1244,9 @@ async def _do_render(q, context, state: dict) -> None:
         await q.edit_message_text(summary)
         if not state["platforms"]:
             _track(await q.message.chat.send_message(
-                "no destinations configured for the rendered brands "
-                "(BRAND_<NAME>_TG/YT/TW/IG) — files above are yours, nothing to publish"))
+                "✅ rendered — these brands have no accounts set up "
+                "(credentials/brands/<name>.json), so there is nothing to "
+                "publish to; the files above are yours"))
             _pending.pop(q.message.message_id, None)
             _cleanup(state)
             return
@@ -1168,6 +1272,7 @@ async def _do_render(q, context, state: dict) -> None:
 
     _pending.pop(q.message.message_id, None)
     _pending[prompt.message_id] = state
+    _arm_auto_publish(context.bot, state, prompt)
 
 
 async def _ensure_local_photos(bot, state: dict) -> list[str]:
@@ -1270,7 +1375,7 @@ async def _do_render_card(q, context, state: dict) -> None:
         if not state["platforms"]:
             _track(await q.message.chat.send_message(
                 "no destinations configured for the composed brands "
-                "(BRAND_<NAME>_TG/TW/IG) — cards above are yours, nothing to publish"))
+                "(credentials/brands/<name>.json) — cards above are yours, nothing to publish"))
             _pending.pop(q.message.message_id, None)
             _cleanup(state)
             return
@@ -1292,6 +1397,7 @@ async def _do_render_card(q, context, state: dict) -> None:
 
     _pending.pop(q.message.message_id, None)
     _pending[prompt.message_id] = state
+    _arm_auto_publish(context.bot, state, prompt)
 
 
 async def _ig_captions(source_text: str, pairs: list, footage: dict | None = None,
@@ -1313,7 +1419,7 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
     (~$0.05, nearly all of it the web search) plus a rewrite each at $0.0004.
 
     EACH ACCOUNT WRITES IN ITS OWN VOICE: `writing_style` out of
-    brands/<name>/style.json, which is why the brand dicts are copied with a
+    brands/<group>/<name>/style.json, which is why the brand dicts are copied with a
     `style` attached before planning. The angle keeps two accounts apart on one
     post; the style is the same on every post an account publishes, which is
     what makes it recognisable rather than merely different. A brand with no
@@ -1381,13 +1487,17 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
         return {}
 
 
-async def _do_publish(q, context, state: dict) -> None:
+async def _do_publish(message, bot, state: dict) -> None:
     """Push each selected pair through its platform publisher. The headline is
     already translated per brand — Telegram destinations get lang "" so
-    publisher.publish doesn't translate again."""
+    publisher.publish doesn't translate again.
+
+    Takes the picker message rather than a callback query: the 🚀 Publish tap
+    and the idle auto-publish (`_auto_publish`) both end up here."""
     pairs = branded.expand(state["platforms"], state["sel_platforms"])
-    _pending.pop(q.message.message_id, None)
-    await q.edit_message_text(
+    _pending.pop(message.message_id, None)
+    _disarm_auto_publish(state)
+    await message.edit_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
 
     # Before the loop: one footage-backed expansion shared by every IG and YT
@@ -1402,7 +1512,7 @@ async def _do_publish(q, context, state: dict) -> None:
         try:
             if p["platform"] == "tg":
                 posted, errors, links = await publisher.publish(
-                    context.bot, r["headline"],
+                    bot, r["headline"],
                     [{"path": r["path"], "type": r.get("kind", "video")}],
                     [{"chat_id": b["tg"], "lang": ""}])
                 if posted:
@@ -1484,8 +1594,10 @@ async def _do_publish(q, context, state: dict) -> None:
             log.error("brand publish failed for %s: %s", p["label"], exc)
             lines.append(f"❌ {p['label']}: {str(exc)[:200]}")
 
+    if state.get("auto_published"):
+        lines.insert(0, f"⏱ auto-published after {_AUTO_PUBLISH_S // 60} min idle")
     _cleanup(state)
-    await q.edit_message_text("\n".join(lines))
+    await message.edit_text("\n".join(lines))
 
 
 # --------------------------------------------------------------------------- #

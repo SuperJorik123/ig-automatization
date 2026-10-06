@@ -29,7 +29,7 @@ Layers, bottom to top (all geometry is a fraction of the canvas so a 4:5 or
                     empty — the card is still valid, just flat.
   2  scrim          black->transparent gradient anchored at the bottom.
   3  divider        thin white rule near 68 % height, split around a gap.
-  4  logo           `brands/<name>/logo.png` centred in the gap.
+  4  logo           `brands/<group>/<name>/logo.png` centred in the gap.
   5  headline       upper-case, centred, auto-fitted (font size shrinks until
                     the text fits in MAX_LINES lines), top-anchored just
                     under the divider/logo and growing downward.
@@ -151,7 +151,8 @@ def default_font() -> str:
 
 
 def brand_logo(brand: str) -> str:
-    p = os.path.join(_ROOT, "brands", brand, "logo.png")
+    from shared.config import brand_dir  # brands/<group>/<name>
+    p = os.path.join(brand_dir(brand), "logo.png")
     if not os.path.isfile(p):
         raise FileNotFoundError(f"no logo for brand {brand!r}: {p}")
     return p

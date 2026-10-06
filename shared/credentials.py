@@ -5,7 +5,7 @@ owns.
 `credentials/brands/<name>.json` (git-ignored) replaces the per-brand sprawl in
 .env: adding a brand used to mean a `BRANDS` entry + four `BRAND_<NAME>_*`
 lines + five `TWITTER_<NAME>_*` + three `IG_GRAPH_<NAME>_*`, spread over the
-file. Now it is one file named after the brand, plus `brands/<name>/logo.png`:
+file. Now it is one file named after the brand, plus `brands/<group>/<name>/logo.png`:
 
     credentials/brands/wswire.json
     {
@@ -24,7 +24,7 @@ file. Now it is one file named after the brand, plus `brands/<name>/logo.png`:
 modules/telegram/groups.py); a brand without one is only reachable through
 the picker's "Custom" list.
 
-The FILENAME is the brand name — the same name as `brands/<name>/logo.png`, so
+The FILENAME is the brand name — the same name as `brands/<group>/<name>/logo.png`, so
 a brand is two paths and nothing else. Deleting a brand is deleting its file;
 handing one brand's credentials to someone is sending one file, with no way to
 leak a sibling's keys by accident.

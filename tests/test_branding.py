@@ -168,10 +168,13 @@ def test_load_style_unknown_font_raises(tmp_path):
 def test_shipped_brand_styles_are_valid():
     root = os.path.dirname(os.path.dirname(os.path.abspath(branding.__file__)))
     brands = os.path.join(root, "brands")
-    for name in sorted(os.listdir(brands)):
-        folder = os.path.join(brands, name)
-        if os.path.isfile(os.path.join(folder, branding.STYLE_FILE)):
-            branding.load_style(folder)      # raises if malformed
+    for group in sorted(os.listdir(brands)):
+        if not os.path.isdir(os.path.join(brands, group)):
+            continue
+        for name in sorted(os.listdir(os.path.join(brands, group))):
+            folder = os.path.join(brands, group, name)
+            if os.path.isfile(os.path.join(folder, branding.STYLE_FILE)):
+                branding.load_style(folder)      # raises if malformed
 
 
 def test_render_raises_on_missing_logo(tmp_path):
