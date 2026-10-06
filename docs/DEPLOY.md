@@ -17,6 +17,12 @@ there is nothing for it to talk to on a server.
 
 ## Services
 
+> **PROHIBITED since 2026-10-06:** `news-collector` and `news-dispatcher` are
+> stopped and disabled, and `TG_AUTOPILOT=0` is in `.env` (the autopilot drip is
+> off). Do not start, enable or restart them, and leave them out of the deploy
+> restart below, until the owner lifts this. Only `news-bot` (manual posting)
+> and `newsroom-bot` run. Pre-change `.env` backup: `.env.bak-2026-10-06`.
+
 ```
 systemctl status  news-collector news-dispatcher news-bot
 journalctl -u news-bot -f            # live log
@@ -212,7 +218,7 @@ VPS on the next push. Send the files deliberately, and restart the services
 
 ```
 scp credentials/brands/wswire.json     root@193.36.38.133:/opt/ig-automatization2/credentials/brands/
-ssh root@193.36.38.133 'chmod 600 /opt/ig-automatization2/credentials/brands/*.json     && systemctl restart news-collector news-dispatcher news-bot'
+ssh root@193.36.38.133 'chmod 600 /opt/ig-automatization2/credentials/brands/*.json     && systemctl restart news-bot'
 ```
 
 Careful in the other direction too: the VPS copy is the live one for IG
@@ -234,7 +240,7 @@ tar czf app.tar.gz --exclude=.git --exclude=__pycache__ --exclude=node_modules \
 scp app.tar.gz root@193.36.38.133:/tmp/
 ssh root@193.36.38.133 'cd /opt/ig-automatization2 && tar xzf /tmp/app.tar.gz \
     && .venv/bin/pip install -q -r requirements.txt \
-    && systemctl restart news-collector news-dispatcher news-bot'
+    && systemctl restart news-bot newsroom-bot'   # collector/dispatcher: PROHIBITED, see Services
 ```
 
 Excluding `modules/telegram/data/` is the important part — it holds the live

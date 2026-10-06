@@ -153,6 +153,15 @@ On modern Samsung / OneUI, `d.set_clipboard(text)` raises `java.lang.SecurityExc
 
 ### Side notes / TODOs
 
+- **PROHIBITED: unattended posting (since 2026-10-06, owner's decision).** The
+  collector (`modules/telegram/collector.py`), the dispatcher
+  (`modules/telegram/dispatcher.py`) and the Telegram autopilot drip must NOT
+  run — locally or on the VPS. On the VPS `news-collector` and
+  `news-dispatcher` are stopped + `systemctl disable`d, and `TG_AUTOPILOT=0` is
+  set in both `.env` files. Don't start, enable or restart those two units,
+  don't run `/autopilot on` or `/next` in the control group, and don't
+  include them in a deploy's `systemctl restart` — until the owner lifts this.
+  Only manual posting through `news_bot.py` (and `newsroom-bot`) is allowed.
 - **YouTube policy pre-check (BLOCKER for re-enabling uploads).** Three YouTube
   accounts were terminated (2026-08) over community-guideline strikes on
   auto-uploaded news clips. ALL YouTube uploading is now behind
