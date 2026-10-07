@@ -212,10 +212,12 @@ IG_VISION_ENABLED = os.environ.get("IG_VISION_ENABLED", "1").strip().lower() not
 # A local clip has to travel as a base64 data URL (OpenRouter takes a plain
 # https video URL only for YouTube links, and Gemini reads public YouTube
 # videos only), so the bytes ride in the request body and base64 adds a third
-# on top. IG_VISION_MAX_S caps how much of a long clip is analysed; the ffmpeg
-# pre-pass then has to land under IG_VISION_MAX_MB or the analysis is skipped
-# rather than posting a 60 MB request.
-IG_VISION_MAX_S = _int_env("IG_VISION_MAX_S", 120)
+# on top. IG_VISION_MAX_S caps how much of a long clip is analysed — 0 (the
+# default since 2026-10-07) sends the WHOLE clip, so an event late in the video
+# is in the report too; the ffmpeg pre-pass then has to land under
+# IG_VISION_MAX_MB or the analysis is skipped rather than posting a 60 MB
+# request. Cost scales with length: ~$0.01 a minute on gemini-2.5-flash.
+IG_VISION_MAX_S = _int_env("IG_VISION_MAX_S", 0)
 IG_VISION_MAX_MB = _float_env("IG_VISION_MAX_MB", 18.0)
 
 # Collector's working dir: SQLite queue + downloaded media + login session.

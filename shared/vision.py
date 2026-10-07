@@ -152,7 +152,10 @@ def _mime(path: str, video: bool) -> str:
 # the second is only reached when the first still lands over IG_VISION_MAX_MB,
 # which on a two-minute clip means something pathological (a screen recording
 # of noise, say) rather than an ordinary phone video.
-_PASSES = ((480, 30), (360, 34))
+# The third pass exists for the whole-clip default: a ten-minute video can
+# outgrow the ceiling at 360p, and a smaller picture of all of it beats a
+# skipped analysis.
+_PASSES = ((480, 30), (360, 34), (240, 38))
 
 
 def _analysis_copy(path: str):
@@ -160,7 +163,8 @@ def _analysis_copy(path: str):
 
     Scaled to `short edge` pixels, low-bitrate H.264, 64 kbps MONO audio KEPT —
     the shouting in the clip is half of what the caption is written from — and
-    trimmed to the first IG_VISION_MAX_S seconds.
+    the WHOLE clip by default; trimmed to the first IG_VISION_MAX_S seconds
+    only when that is set above 0.
 
     `-t` before `-i` would seek the input; it goes AFTER, so the trim is on the
     output and the clip starts where the clip starts. Raises RuntimeError with
@@ -186,9 +190,11 @@ def _analysis_copy(path: str):
     made = False
     try:
         for edge, crf in _PASSES:
+            # IG_VISION_MAX_S = 0 sends the whole clip; a positive value trims.
+            trim = (["-t", str(int(config.IG_VISION_MAX_S))]
+                    if int(config.IG_VISION_MAX_S) > 0 else [])
             proc = subprocess.run(
-                ["ffmpeg", "-y", "-v", "error", "-i", path,
-                 "-t", str(int(config.IG_VISION_MAX_S)),
+                ["ffmpeg", "-y", "-v", "error", "-i", path, *trim,
                  # -2 keeps the long edge even (x264 needs it) whatever the
                  # source aspect is, and `min(iw,edge)` never upscales a clip
                  # that is already smaller than the target.

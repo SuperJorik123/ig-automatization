@@ -346,6 +346,27 @@ def test_the_pre_pass_trims_to_the_cap(clip, monkeypatch):
 
 
 @needs_ffmpeg
+def test_a_zero_cap_sends_the_whole_clip(clip, monkeypatch):
+    """The default: nothing is trimmed, so the end of the clip is analysed."""
+    monkeypatch.setattr(config, "IG_VISION_MAX_S", 0)
+    small, drop = vision._analysis_copy(clip)
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", small],
+            capture_output=True, text=True)
+        assert float(proc.stdout.strip()) >= 1.9      # all two seconds
+    finally:
+        drop()
+
+
+def test_the_whole_clip_is_the_default():
+    assert config._int_env("IG_VISION_MAX_S_UNSET_FOR_TEST", 0) == 0
+    import inspect
+    assert '_int_env("IG_VISION_MAX_S", 0)' in inspect.getsource(config)
+
+
+@needs_ffmpeg
 def test_describe_end_to_end_against_a_real_encode(on, monkeypatch, clip):
     """Everything but the model: a real clip, a real pre-pass, a real base64."""
     fake = _client(monkeypatch, content=json.dumps(GOOD))
