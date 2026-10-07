@@ -206,6 +206,30 @@ Accounts still configured the old way in `.env`
 (`IG_GRAPH_<ACCOUNT>_ACCESS_TOKEN` + `_TOKEN_REFRESHED`) keep working and get
 their `.env` line rewritten instead.
 
+### Privacy policy page
+
+The Meta app needs a Privacy Policy URL and a User data deletion URL. Both
+point at one static page, `deploy/site/privacy.html`, served by the same vhost.
+The live vhost also serves `/var/www/legal` at `/` (hand-made 2026-09-14): its
+`/privacy.html` is the older YouTube-only "Newsbot" page Google's OAuth consent
+screen was verified against — leave that URL alone; `/privacy` is the new one.
+
+| | |
+| --- | --- |
+| Privacy Policy URL | `https://news-automation.duckdns.org/privacy` |
+| User data deletion URL | `https://news-automation.duckdns.org/privacy#data-deletion` |
+
+`deploy/privacy_page.sh` copies the page to `/var/www/igsite/`, writes
+`/etc/nginx/snippets/igsite.conf` and includes it in the vhost next to the
+catch-all 404 (backing the vhost up first). Run it from the checkout after the
+code is deployed, and again whenever the page changes:
+
+```
+ssh root@193.36.38.133 'bash /opt/ig-automatization2/deploy/privacy_page.sh'
+```
+
+Keep the `id="data-deletion"` anchor: Meta has the URL with that fragment.
+
 ### credentials/brands/ holds SECRETS the deploy does not carry
 
 Per-brand accounts (Telegram channel, Twitter keys, Instagram token, YouTube

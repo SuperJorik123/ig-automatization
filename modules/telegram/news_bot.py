@@ -746,7 +746,7 @@ def _publish_prompt_text(state: dict) -> str:
     last place an `info:` reply can land, and it says so."""
     lines = ["Publish to which platforms?"]
     lines += _info_lines(state)
-    if any(p["platform"] == "ig" for p in state.get("platforms", ())):
+    if any(p["platform"] in ("ig", "fb") for p in state.get("platforms", ())):
         lines.append(_INFO_HINT)
     if _AUTO_PUBLISH_S:
         lines.append(f"⏱ publishes the ticked platforms by itself after "
@@ -1461,6 +1461,11 @@ def _start_manual_captions(chat, state: dict, renders: list) -> None:
             _send_manual_captions(chat, state, renders))
 
 
+# Platforms whose post carries the expanded caption rather than the bare
+# headline: Instagram and Facebook post it whole, YouTube a cut of it.
+CAPTION_PLATFORMS = ("ig", "fb", "yt")
+
+
 async def _ig_captions(source_text: str, pairs: list, footage: dict | None = None,
                        info: str = "", cache: dict | None = None) -> dict[str, str]:
     """The Instagram caption for each brand, keyed by brand NAME.
@@ -1507,11 +1512,12 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
     which is what shipped before any of this existed, and a single failed
     rewrite falls back to the shared caption on its own.
     """
-    # YouTube descriptions are cut from these same captions (see the "yt" leg
-    # of _do_publish), so a YouTube pair buys the expansion too. One caption
-    # per BRAND — a brand on both platforms is planned once.
+    # Facebook posts these same captions verbatim and YouTube descriptions are
+    # cut from them (see the "fb"/"yt" legs of _do_publish), so an FB or YT
+    # pair buys the expansion too. One caption per BRAND — a brand on several
+    # platforms is planned once.
     ig_pairs = list({p["render"]["brand"]["name"]: p for p in pairs
-                     if p["platform"] in ("ig", "yt")}.values())
+                     if p["platform"] in CAPTION_PLATFORMS}.values())
     brands = [dict(p["render"]["brand"],
                    style=branding.load_writing_style(
                        os.path.dirname(p["render"]["brand"]["logo"])))
@@ -1658,10 +1664,13 @@ async def _do_publish(message, bot, state: dict) -> None:
                 # Pages API takes a multipart upload, so the render goes
                 # straight from disk. post_media picks the edge from the
                 # extension — a video render becomes a Reel, a card a photo
-                # post. The caption is the brand's headline, as on TG/YT/X;
-                # the expanded body is Instagram-only.
+                # post. The caption is the same one Instagram gets — this
+                # brand's headline, the AI-written body and its hashtags — or
+                # the tagged headline when the expansion didn't come back.
+                fb_caption_text = ig_caps.get(b["name"]) or \
+                    ig_caption.with_brand_tag(r["headline"], b["name"])
                 result = await asyncio.to_thread(
-                    fb_poster.post_media, r["path"], r["headline"], b["fb"])
+                    fb_poster.post_media, r["path"], fb_caption_text, b["fb"])
                 if result.get("status") == "success":
                     lines.append(f"✅ {p['label']}")
                 else:
@@ -2099,7 +2108,12 @@ def main() -> None:
     errmail.install("news_bot")  # every logged ERROR -> one email to the operator
     _sweep_orphans()
     queue_store.init()  # the autopilot reads/writes the same DB as the collector
+    # PTB's 5 s read timeout is too tight for the VPS: Telegram delivered a
+    # "⏳ downloading …" reply but answered after 5 s, the send raised
+    # TimedOut and the handler died before the download started — leaving a
+    # note that never updates (2026-09-28).
     app = (Application.builder().token(config.NEWS_BOT_TOKEN)
+           .connect_timeout(15).read_timeout(30).write_timeout(60)
            .post_init(_on_start).post_shutdown(_on_shutdown).build())
     control = filters.Chat(CHAT_ID)
     app.add_handler(CommandHandler("queue", cmd_queue, filters=control))
