@@ -117,7 +117,10 @@ def _check_keys(where: str, block, allowed: set) -> None:
     if not isinstance(block, dict):
         raise CredentialsError(f"{where}: expected an object, got "
                                f"{type(block).__name__}")
-    unknown = sorted(set(block) - allowed)
+    # A leading "_" comments a key out: JSON has no comments, so renaming
+    # "instagram" to "_instagram" is how a brand file parks a block without
+    # deleting it. Never read, never expanded into the environment.
+    unknown = sorted(k for k in set(block) - allowed if not k.startswith("_"))
     if unknown:
         raise CredentialsError(
             f"{where}: unknown key(s) {', '.join(unknown)} - expected one of "
