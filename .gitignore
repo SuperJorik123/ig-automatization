@@ -46,3 +46,4 @@ Thumbs.db
 
 # Client newsroom bot runtime state (SQLite store)
 modules/newsroom/data/
+.gstack/
