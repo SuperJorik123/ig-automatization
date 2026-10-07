@@ -152,10 +152,13 @@ def _mime(path: str, video: bool) -> str:
 # the second is only reached when the first still lands over IG_VISION_MAX_MB,
 # which on a two-minute clip means something pathological (a screen recording
 # of noise, say) rather than an ordinary phone video.
-# The third pass exists for the whole-clip default: a ten-minute video can
-# outgrow the ceiling at 360p, and a smaller picture of all of it beats a
-# skipped analysis.
-_PASSES = ((480, 30), (360, 34), (240, 38))
+# 720p first (2026-10-07): Gemini bills per FRAME, not per pixel, and squeezes
+# each frame into roughly a 768-px budget — a 720x1280 frame fills it, a
+# 480p one at CRF 30 left faces, plates and on-screen text blurred for nothing.
+# So 720p costs the same tokens and only a bigger upload (~2-4 MB a minute,
+# under the ceiling up to ~4-5 min). The smaller passes are for longer clips:
+# a smaller picture of all of it beats a skipped analysis.
+_PASSES = ((720, 28), (480, 30), (360, 34), (240, 38))
 
 
 def _analysis_copy(path: str):
@@ -195,10 +198,12 @@ def _analysis_copy(path: str):
                     if int(config.IG_VISION_MAX_S) > 0 else [])
             proc = subprocess.run(
                 ["ffmpeg", "-y", "-v", "error", "-i", path, *trim,
-                 # -2 keeps the long edge even (x264 needs it) whatever the
-                 # source aspect is, and `min(iw,edge)` never upscales a clip
-                 # that is already smaller than the target.
-                 "-vf", f"scale='min(iw,{edge})':-2",
+                 # The SHORT edge goes to `edge`, whichever way round the clip
+                 # is (scaling the width alone made a 1920x1080 clip 480x270);
+                 # -2 keeps the long edge even (x264 needs it), and min()
+                 # never upscales a clip that is already smaller.
+                 "-vf", (f"scale='if(gt(iw,ih),-2,min(iw,{edge}))'"
+                         f":'if(gt(iw,ih),min(ih,{edge}),-2)'"),
                  "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
                  "-pix_fmt", "yuv420p",
                  "-c:a", "aac", "-ac", "1", "-b:a", "64k",

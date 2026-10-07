@@ -376,3 +376,24 @@ def test_describe_end_to_end_against_a_real_encode(on, monkeypatch, clip):
     url = next(p["video_url"]["url"] for p in parts if p["type"] == "video_url")
     assert url.startswith("data:video/mp4;base64,")
     assert len(url) > 1000
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("size,want", [("1920x1080", "1280,720"),
+                                       ("1080x1920", "720,1280"),
+                                       ("640x360", "640,360")])
+def test_the_analysis_copy_is_720p_on_the_short_edge(tmp_path, size, want):
+    """Landscape and portrait alike reach 720p; a smaller clip is never
+    upscaled. (Scaling the width alone once made a 1080p landscape 480x270.)"""
+    src = str(tmp_path / "src.mp4")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                    f"testsrc=size={size}:rate=30:duration=1",
+                    "-pix_fmt", "yuv420p", src], check=True)
+    small, drop = vision._analysis_copy(src)
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=width,height",
+             "-of", "csv=p=0", small], capture_output=True, text=True)
+        assert proc.stdout.strip() == want
+    finally:
+        drop()
