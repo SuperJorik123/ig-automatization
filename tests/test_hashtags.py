@@ -148,7 +148,8 @@ def test_refine_gives_up_after_the_last_round(apify):
         return [f"made{len(rounds)}"]                     # always 0 posts
 
     out = hashtags.refine("x", ["valencia"], suggest)
-    assert out == [] and len(apify) == 3 and len(rounds) == 2
+    # three rounds, nothing in the band -> the only tag with posts stands in
+    assert out == ["valencia"] and len(apify) == 3 and len(rounds) == 2
 
 
 def test_refine_is_none_when_the_first_lookup_fails(apify, monkeypatch):
@@ -189,9 +190,17 @@ def test_verify_replaces_the_line_with_the_measured_pool(apify, monkeypatch):
     assert out.startswith("Search line\n\nA paragraph.")
 
 
-def test_verify_with_nothing_in_band_leaves_no_tag_line(apify, monkeypatch):
+def test_verify_with_nothing_in_band_uses_the_nearest_to_the_top(apify, monkeypatch):
     monkeypatch.setattr(caption, "suggest_hashtags", lambda *a: [])
-    out = caption.verify_hashtags("Line\n\nText.\n\n#valencia #flooding")
+    out = caption.verify_hashtags(
+        "Line\n\nText.\n\n#valencia #spainweather #flooding")
+    # 1.29M (6.5x over) before 32M (161x over); #spainweather has no posts
+    assert out.splitlines()[-1] == "#flooding #valencia"
+
+
+def test_verify_with_no_posts_anywhere_leaves_no_tag_line(apify, monkeypatch):
+    monkeypatch.setattr(caption, "suggest_hashtags", lambda *a: [])
+    out = caption.verify_hashtags("Line\n\nText.\n\n#spainweather #madeupthing")
     assert out == "Line\n\nText."
     # ...and the account's own tag still signs it.
     assert caption.with_brand_tag(out, "eur24news").endswith("\n\n#eur24news")
@@ -228,3 +237,35 @@ def test_suggestions_are_parsed_and_normalised(monkeypatch):
     assert "#valencia — 32,290,000 posts (too big)" in user
     assert "#flooded — 60,720 posts" in user
     assert ":online" not in _Fake.kw["model"]
+
+
+# --------------------------------------------------------------------------- #
+# nothing in the band: the measured tags nearest its TOP                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_nearest_ranks_by_ratio_to_the_top():
+    measured = {"tiny": 3_000, "over": 725_000, "huge": 32_290_000,
+                "under": 4_900, "unused": 0, "close": 240_000}
+    # 240k 1.2x, 725k 3.6x, 4.9k 41x, 3k 67x, 32M 161x; 0 never
+    assert hashtags.nearest(measured, 10) == ["close", "over", "under",
+                                              "tiny", "huge"]
+    assert hashtags.nearest(measured, 2) == ["close", "over"]
+
+
+def test_refine_falls_back_to_the_nearest_when_nothing_passes(apify):
+    out = hashtags.refine("x", ["valencia", "flooding", "spainweather"],
+                          lambda *a: [])
+    assert out == ["flooding", "valencia"]
+
+
+def test_the_fallback_never_takes_unvetted_related_tags(apify):
+    """#flooded (60k, in band) came from Apify's related list, not the model:
+    it was never checked for relevance, so it is not a fallback."""
+    assert hashtags.refine("x", ["flooding"], lambda *a: []) == ["flooding"]
+
+
+def test_a_partial_band_is_not_topped_up(apify):
+    """The fallback is for NOTHING in the band; found tags go out as found."""
+    out = hashtags.refine("x", ["ntsb", "valencia", "flooding"], lambda *a: [])
+    assert out == ["ntsb"]

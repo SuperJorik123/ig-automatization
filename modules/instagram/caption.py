@@ -983,9 +983,10 @@ def verify_hashtags(body: str) -> str:
     The line `expand` writes is up to CANDIDATE_HASHTAGS guesses; this keeps
     the ones Apify measures between HASHTAG_MIN_POSTS and HASHTAG_MAX_POSTS,
     after up to HASHTAG_ROUNDS rounds of measured feedback (hashtags.refine),
-    in the model's relevance order. None in the band after the last round
-    means the line goes and the post carries only the account's own tag,
-    which `pick_hashtags`/`with_brand_tag` add.
+    in the model's relevance order. None in the band after the last round:
+    the measured tags nearest the band's TOP stand in (hashtags.nearest);
+    only when every candidate had no posts at all does the line go, and the
+    post carries just the account's own tag (`pick_hashtags`/`with_brand_tag`).
 
     No APIFY_TOKEN, or Apify unreachable on the first round: the model's own
     tags are kept unmeasured (capped to the pool), exactly the behaviour
@@ -1008,8 +1009,7 @@ def verify_hashtags(body: str) -> str:
         log.error("hashtag counts unavailable — publishing unchecked tags")
         return _cap_hashtags(body)
     if not found:
-        log.warning("no hashtag landed in the band after %d rounds — "
-                    "account tag only", config.HASHTAG_ROUNDS)
+        log.warning("no candidate hashtag had any posts — account tag only")
         return prose
     return f"{prose}\n\n" + " ".join(f"#{t}" for t in found[:POOL_HASHTAGS])
 

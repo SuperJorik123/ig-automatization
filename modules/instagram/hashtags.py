@@ -21,8 +21,11 @@ for a batch of twenty).
      never does.
 
 It stops at HASHTAG_TARGET or after the last round, and returns whatever is in
-the band — possibly nothing, in which case the post carries only the account's
-own tag (exempt from the band: it is the account's signature).
+the band. When NOTHING landed in it, the pool is the measured candidates
+nearest the TOP of the band instead (`nearest` — by ratio, so 725k beats 3k,
+and never a tag with no posts): a post is better off in a tag slightly too big
+than in ten tags nobody browses. The account's own tag is exempt either way —
+it is the account's signature.
 
 APIFY ACTOR BUG: the actor's numeric `postsCount` is 100x too big for every
 count it formats with "K" ("161.1 K" -> 16,110,000; seen on #sagunto, #faa,
@@ -226,7 +229,9 @@ def refine(text: str, candidates, suggest) -> list[str] | None:
     measured, related, need)` is the model call that proposes the next round
     from the measured numbers (caption.suggest_hashtags); it returns a list of
     tags, empty to give up. Returns the in-band tags in order (at most
-    HASHTAG_TARGET, possibly none), or None when the FIRST lookup failed —
+    HASHTAG_TARGET) — or, when none landed in the band, the measured ones
+    nearest its top (`nearest`); empty only when every candidate had no
+    posts at all. None when the FIRST lookup failed —
     the caller then publishes the unchecked tags. A later round failing keeps
     what earlier rounds found.
     """
@@ -258,7 +263,31 @@ def refine(text: str, candidates, suggest) -> list[str] | None:
             log.error("hashtag suggestion failed: %s", exc)
             break
         batch = [t for t in dict.fromkeys(norm(c) for c in batch) if t]
+    if not found:
+        found = nearest(measured, target)
+        if found:
+            log.warning("no hashtag in the band after the last round — "
+                        "using the %d measured tags nearest %s posts",
+                        len(found), f"{config.HASHTAG_MAX_POSTS:,}")
     return found[:target]
+
+
+def nearest(measured: dict, limit: int) -> list:
+    """The fallback when nothing landed in the band: the measured candidates
+    CLOSEST TO THE TOP of it, nearest first.
+
+    Closeness is a RATIO, not a difference — 725k is 3.6x over, 3k is 67x
+    under — so a tag just over the ceiling always beats a tiny one, and the
+    pool never fills with tags of a few dozen posts. A tag with no posts is
+    never used. Only the model's own candidates are in `measured` (Apify's
+    related tags were never checked for relevance, so they stay out). The
+    order matters: `pick_hashtags` keeps the first two on every account and
+    rotates the rest.
+    """
+    top = float(config.HASHTAG_MAX_POSTS)
+    used = [(t, n) for t, n in measured.items() if n and n > 0]
+    used.sort(key=lambda tn: max(tn[1] / top, top / tn[1]))
+    return [t for t, _ in used[:max(int(limit), 0)]]
 
 
 if __name__ == "__main__":
