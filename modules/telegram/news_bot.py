@@ -1429,14 +1429,24 @@ async def _send_manual_captions(chat, state: dict, renders: list) -> None:
             state.get("text", ""), [{"platform": "ig", "render": r} for r in manual],
             state.get("footage") or {}, state.get("info", ""),
             cache=state.setdefault("caption_cache", {}))
+        texts = {r["brand"]["name"]: caps.get(r["brand"]["name"]) or
+                 ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
+                 for r in manual}
+        # One cheap searchless call per account, all at once: the comment to
+        # pin under the post, written from that account's own caption.
+        comments = dict(zip(texts, await asyncio.gather(
+            *(asyncio.to_thread(ig_caption.pinned_comment, t)
+              for t in texts.values()))))
         for r in manual:
             name = r["brand"]["name"]
-            text = caps.get(name) or ig_caption.with_brand_tag(r["headline"], name)
-            # <pre>: one tap copies the whole caption in Telegram.
+            comment = comments.get(name) or ""
+            pin = (f"\n\n📌 Comment to pin:\n<pre>{html.escape(comment)}</pre>"
+                   if comment else "")
+            # <pre>: one tap copies the whole block in Telegram.
             _track(await chat.send_message(
                 f"📋 <b>{html.escape(name)}</b> — Instagram caption "
                 f"(no IG account connected, post by hand):\n\n"
-                f"<pre>{html.escape(text)}</pre>",
+                f"<pre>{html.escape(texts[name])}</pre>{pin}",
                 parse_mode="HTML",
                 reply_to_message_id=r.get("preview_id"),
                 allow_sending_without_reply=True))

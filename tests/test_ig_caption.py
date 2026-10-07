@@ -984,3 +984,34 @@ def test_youtube_description_of_a_bare_headline_is_just_the_tags():
 def test_youtube_description_never_doubles_shorts_or_keeps_angle_brackets():
     out = caption.youtube_description("H\n\nA <b> c.\n\n#mir #Shorts", "H")
     assert out.count("#") == 2 and "<" not in out and ">" not in out
+
+
+# --------------------------------------------------------------------------- #
+# the comment to pin                                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_pinned_comment_is_one_cleaned_line(on, monkeypatch):
+    fake = _client(monkeypatch, content='"Would you have noticed the bear?"')
+    assert caption.pinned_comment("A caption.\n\n#mir") == \
+        "Would you have noticed the bear?"
+    assert fake.calls[0]["messages"][-1]["content"] == "A caption.\n\n#mir"
+    assert "QUESTION" in fake.calls[0]["messages"][0]["content"]
+    assert ":online" not in fake.calls[0]["model"]          # no search
+
+
+def test_pinned_comment_drops_a_paragraph(on, monkeypatch):
+    _client(monkeypatch, content="word " * 60)
+    assert caption.pinned_comment("A caption.") == ""
+
+
+def test_pinned_comment_never_raises(on, monkeypatch):
+    class _Boom:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    raise RuntimeError("gateway down")
+    monkeypatch.setattr(caption, "_client", _Boom)
+    assert caption.pinned_comment("A caption.") == ""
+    assert caption.pinned_comment("") == ""

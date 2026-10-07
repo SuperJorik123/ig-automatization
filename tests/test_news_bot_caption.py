@@ -80,6 +80,12 @@ def calls(monkeypatch):
     monkeypatch.setattr(news_bot.ig_caption, "rephrase", _rephrase)
     monkeypatch.setattr(news_bot.translator, "translate",
                         lambda text, lang, src=None: text)
+
+    def _comment(text, model=None):
+        seen.setdefault("comment", []).append(text)
+        return "Would you have noticed the bear?"
+
+    monkeypatch.setattr(news_bot.ig_caption, "pinned_comment", _comment)
     return seen
 
 
@@ -346,3 +352,21 @@ def test_a_new_info_reply_buys_a_fresh_search(calls):
     _run("h", [_pair()], FOOTAGE, cache=cache)
     _run("h", [_pair()], FOOTAGE, "Source: WLOS.", cache=cache)
     assert len(calls["expand"]) == 2
+
+
+def test_hand_posted_brands_get_a_comment_to_pin(calls):
+    """Written from that account's own caption, sent in the same message."""
+    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
+    asyncio.run(news_bot._send_manual_captions(
+        chat, state, [_render("eur24news"), _render("pioneerwire")]))
+    assert len(chat.sent) == 2
+    for text, _ in chat.sent:
+        assert "📌 Comment to pin:\n<pre>Would you have noticed the bear?</pre>" in text
+    assert all("#" in c for c in calls["comment"])     # the finished captions
+
+
+def test_no_comment_block_when_the_comment_fails(monkeypatch, calls):
+    monkeypatch.setattr(news_bot.ig_caption, "pinned_comment", lambda t, model=None: "")
+    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
+    asyncio.run(news_bot._send_manual_captions(chat, state, [_render("eur24news")]))
+    assert "📌" not in chat.sent[0][0] and "<pre>" in chat.sent[0][0]

@@ -1113,6 +1113,66 @@ def rephrase(text: str, angle: str, lang: str = "", style: str = "",
     return out
 
 
+# The comment an account pins under its own post. Instagram weighs replies, and
+# a question right under the caption is what gets the first ones. Written from
+# the account's FINISHED caption — no search, the facts are all in it — by the
+# cheap rewrite model, so it costs a fraction of a cent and comes out in that
+# account's language and wording.
+COMMENT_MAX = 100
+
+_COMMENT_SYSTEM = (
+    "You run a news account on Instagram. Below is the caption of a post it "
+    "is publishing. Write the ONE comment the account will pin under its own "
+    "post, to get readers replying.\n\n"
+    "It is a QUESTION that invites a reply about this specific story — what "
+    "readers think should happen next, what they would have done, whether "
+    "they have seen the same where they live — or a \"which one?\" choice "
+    "between two concrete options from the story. Under "
+    f"{COMMENT_MAX} characters, one sentence, written in the same language as "
+    "the caption.\n"
+    "Everything it mentions comes from the caption: no new fact, no name or "
+    "place the caption does not give. No hashtags, no links, no emoji, no "
+    "\"like\", \"follow\" or \"share\". On a story with deaths, violence or "
+    "disaster ask something respectful and useful (what should be done, how "
+    "people can stay safe) — never a joke, never bait, never a question that "
+    "invites mocking the people in it.\n\n"
+    "Output ONLY the comment, without quotation marks."
+)
+
+
+def pinned_comment(text: str, model: str | None = None) -> str:
+    """A pinned-comment suggestion for one account's finished caption `text`.
+
+    One searchless call (`IG_CAPTION_VARIANT_MODEL`). Returns "" when it isn't
+    wanted or possible — no text, the kill switch off, no API key, a failed or
+    empty call, or an answer far over the length a pinned comment should have.
+    Never raises; blocking, async callers go through asyncio.to_thread.
+    """
+    text = (text or "").strip()
+    if not text or not config.IG_CAPTION_ENABLED or _client is None:
+        return ""
+    try:
+        resp = _client.chat.completions.create(
+            model=model or config.IG_CAPTION_VARIANT_MODEL,
+            max_tokens=MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": _COMMENT_SYSTEM},
+                {"role": "user", "content": text},
+            ],
+        )
+    except Exception as exc:
+        log.error("pinned comment failed: %s", exc)
+        return ""
+    out = " ".join(_clean(resp.choices[0].message.content or "").split())
+    if len(out) > 1 and out[0] in "\"'“«" and out[-1] in "\"'”»":
+        out = out[1:-1].strip()
+    # A little over the target is still a usable comment; a paragraph is not.
+    if len(out) > COMMENT_MAX * 1.5:
+        log.warning("pinned comment came back %d chars — dropped", len(out))
+        return ""
+    return out
+
+
 if __name__ == "__main__":
     import argparse
 
