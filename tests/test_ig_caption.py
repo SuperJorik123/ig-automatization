@@ -112,13 +112,16 @@ def test_a_first_paragraph_that_merely_starts_like_the_headline_stays(on, monkey
     assert caption.expand("Pentagon criticized") == body
 
 
-def test_both_prompts_say_the_headline_is_not_the_models_to_write(on, monkeypatch):
+def test_both_prompts_ask_for_the_growth_shape(on, monkeypatch):
+    """Search line first, share line last, mid-size tags — in both prompts."""
     for footage in ({}, {"summary": "A bear."}):
         fake = _client(monkeypatch, content=EXAMPLE)
         caption.expand("h", footage=footage)
         system = fake.calls[0]["messages"][0]["content"]
-        assert "never write the headline" in system
-        assert "reproduced as given" not in system
+        assert "THE SEARCH LINE" in system and "125 characters" in system
+        assert "THE SHARE LINE" in system
+        assert "10,000 to 200,000" in system
+        assert "other than the one share line" in system
 
 
 # --------------------------------------------------------------------------- #
@@ -161,8 +164,18 @@ def test_the_rewrite_never_writes_a_headline_either(on, monkeypatch):
     fake = _client(monkeypatch, content="A variant.\n\n#usa")
     caption.rephrase("A paragraph.\n\n#usa", "Open on WHERE it happened.")
     system = fake.calls[0]["messages"][0]["content"]
-    assert "there is none in what you write" in system
-    assert "line 1 is the headline" not in system
+    assert "THE SEARCH LINE" in system and "THE SHARE LINE" in system
+    assert "Keep its main keyword phrase" in system
+    assert "must NOT be the one you were given" in system
+
+
+def test_a_house_style_cannot_rewrite_the_growth_lines_away(on, monkeypatch):
+    """A "two paragraphs, never more" voice must not drop the share line."""
+    fake = _client(monkeypatch, content="A variant.\n\n#usa")
+    caption.rephrase("A paragraph.\n\n#usa", "", style="Two paragraphs, never more.")
+    system = fake.calls[0]["messages"][0]["content"]
+    house = system.index("HOUSE STYLE")
+    assert "never removes, merges or moves the search line" in system[house:]
 
 
 def test_blank_info_changes_nothing(on, monkeypatch):
@@ -298,13 +311,35 @@ def test_an_overlong_caption_keeps_its_headline_and_its_tag_line():
 
 
 # --------------------------------------------------------------------------- #
-# compose: headline, blank line, body                                         #
+# compose: search line (or headline), blank line, body                         #
 # --------------------------------------------------------------------------- #
 
 
-def test_compose_is_headline_blank_line_body():
-    assert caption.compose("Man walks past bear", "A paragraph.\n\n#mir #usa") \
-        == "Man walks past bear\n\nA paragraph.\n\n#mir #usa"
+PROSE = ("A bear crossed a residential street a few feet behind an elderly "
+         "man who did not see it, while people nearby shouted warnings until "
+         "he turned around and walked away.")
+
+
+def test_compose_opens_on_the_search_line():
+    """The model's search line replaces the headline as line 1."""
+    body = ("Bear walks behind man in Asheville\n\n" + PROSE +
+            "\n\nSend this to someone in bear country.\n\n#mir #usa")
+    assert caption.compose("Man walks past bear", body) == body
+
+
+def test_compose_without_a_search_line_opens_on_the_headline():
+    """A model that skipped the search line: the headline goes back on top."""
+    assert caption.compose("Man walks past bear", PROSE + "\n\n#mir #usa") \
+        == "Man walks past bear\n\n" + PROSE + "\n\n#mir #usa"
+
+
+def test_an_overlong_caption_keeps_search_share_and_tag_lines():
+    body = ("Bear walks behind man in Asheville\n\n" + " ".join(["word"] * 800)
+            + "\n\nSave this before your next hike.\n\n#mir #usa")
+    out = caption.compose("Headline", body)
+    assert len(out) <= 2200
+    assert out.startswith("Bear walks behind man in Asheville\n\nword")
+    assert out.endswith("…\n\nSave this before your next hike.\n\n#mir #usa")
 
 
 def test_compose_without_a_body_is_the_headline():
@@ -313,8 +348,8 @@ def test_compose_without_a_body_is_the_headline():
 
 def test_compose_never_doubles_the_headline():
     assert caption.compose("Man walks past bear",
-                           "Man walks past bear\n\nA paragraph.") == \
-        "Man walks past bear\n\nA paragraph."
+                           "Man walks past bear\n\n" + PROSE) == \
+        "Man walks past bear\n\n" + PROSE
 
 
 # --------------------------------------------------------------------------- #

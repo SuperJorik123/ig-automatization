@@ -42,10 +42,13 @@ FOOTAGE = {
 
 INFO = "Filmed in Asheville, North Carolina. Source: WLOS."
 
-# The body `expand` returns: no headline, paragraphs, then the pool.
+# The body `expand` returns when the model skips the search line: no
+# headline, a prose paragraph (too long to be a search line), then the pool —
+# so every account's caption still opens on its own render headline.
 EXPANDED = (
     "A bear crossed a residential street a few feet behind a man who did not "
-    "see it.\n"
+    "see it, while people nearby shouted warnings until he finally turned "
+    "around, spotted the animal and walked quickly away from it.\n"
     "\n"
     "#bear #usa #wildlife #caughtoncamera #viralvideo #news #animals #street"
 )
@@ -147,6 +150,22 @@ def test_an_empty_expansion_leaves_every_pair_on_its_headline(monkeypatch):
 def test_the_caption_opens_on_the_headline_then_a_blank_line(calls):
     out = _run("Man walks past a bear", [_pair()], FOOTAGE)
     assert out["mir"].startswith("Man walks past a bear\n\nA bear crossed")
+
+
+def test_a_search_line_replaces_the_headline_as_line_one(monkeypatch, calls):
+    """The growth shape: the model's search line is the caption's first line,
+    and the share line survives the per-account hashtag deal."""
+    monkeypatch.setattr(
+        news_bot.ig_caption, "expand",
+        lambda *a, **k: "Bear walks behind man on Asheville street\n\n"
+                        + EXPANDED.replace("\n\n#", "\n\nSend this to someone "
+                                           "in bear country.\n\n#"))
+    out = _run("Man walks past a bear", [_pair()], FOOTAGE)["mir"]
+    paras = out.split("\n\n")
+    assert paras[0] == "Bear walks behind man on Asheville street"
+    assert "Man walks past a bear" not in out
+    assert paras[-2] == "Send this to someone in bear country."
+    assert paras[-1].split()[0] == "#mir"
 
 
 def test_each_account_opens_on_its_own_render_headline(calls):
@@ -267,3 +286,63 @@ def test_a_youtube_pair_buys_the_caption_too(calls):
 def test_a_brand_on_ig_and_yt_is_planned_once(calls):
     out = _run("h", [_pair(), dict(_pair(), platform="yt")], FOOTAGE)
     assert list(out) == ["mir"]
+
+
+# --------------------------------------------------------------------------- #
+# hand-posted brands: the caption arrives with the render preview             #
+# --------------------------------------------------------------------------- #
+
+
+def test_only_non_gmn_brands_without_ig_are_hand_posted():
+    assert news_bot._manual_ig({"group": "JNN", "ig": ""})
+    assert news_bot._manual_ig({"group": "", "ig": ""})
+    assert not news_bot._manual_ig({"group": "JNN", "ig": "eur24news"})
+    assert not news_bot._manual_ig({"group": "GMN", "ig": ""})
+    assert not news_bot._manual_ig({"group": "gmn", "ig": ""})
+
+
+class _Chat:
+    id = 0  # not the control group, so _track leaves the DB alone
+
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, text, **kw):
+        self.sent.append((text, kw))
+        return type("M", (), {"chat": self, "message_id": len(self.sent)})()
+
+
+def _render(name, group="JNN", ig=""):
+    p = _pair(name)
+    p["render"]["brand"].update(group=group, ig=ig)
+    p["render"]["preview_id"] = 77
+    return p["render"]
+
+
+def test_hand_posted_brands_get_their_caption_as_a_reply(calls):
+    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
+    renders = [_render("eur24news"), _render("wswire", ig="wswire"),
+               _render("mirnews", group="GMN")]
+    asyncio.run(news_bot._send_manual_captions(chat, state, renders))
+    assert len(chat.sent) == 1
+    text, kw = chat.sent[0]
+    assert "eur24news" in text and "<pre>" in text
+    assert "#eur24news" in text
+    assert kw["parse_mode"] == "HTML" and kw["reply_to_message_id"] == 77
+
+
+def test_the_publish_reuses_the_render_time_search(calls):
+    """One web search per post: the hand-posted captions at render time and
+    the IG publish afterwards share the cached expansion."""
+    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
+    asyncio.run(news_bot._send_manual_captions(chat, state, [_render("eur24news")]))
+    _run("Man walks past a bear", [_pair("wswire")], FOOTAGE,
+         cache=state["caption_cache"])
+    assert len(calls["expand"]) == 1
+
+
+def test_a_new_info_reply_buys_a_fresh_search(calls):
+    cache = {}
+    _run("h", [_pair()], FOOTAGE, cache=cache)
+    _run("h", [_pair()], FOOTAGE, "Source: WLOS.", cache=cache)
+    assert len(calls["expand"]) == 2

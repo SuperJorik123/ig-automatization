@@ -69,6 +69,7 @@ Run:  py modules/telegram/news_bot.py
 
 import asyncio
 import datetime as dt
+import html
 import logging
 import os
 import sys
@@ -1208,10 +1209,11 @@ async def _do_render(q, context, state: dict) -> None:
                 with open(path, "rb") as fh:
                     # width/height matter: without them Telegram sizes the
                     # inline player from defaults and plays the clip squashed.
-                    _track(await q.message.chat.send_video(
+                    sent = _track(await q.message.chat.send_video(
                         video=fh, caption=f"🏷 {b['name']}",
                         width=branding.OUT_W, height=branding.OUT_H,
                         duration=int(duration)))
+                    r["preview_id"] = sent.message_id
         except Exception as exc:  # Telegram send only — the render already succeeded
             log.error("brand preview send failed for %s: %s", b["name"], exc)
             warnings.append((b["name"], str(exc)[:200]))
@@ -1223,6 +1225,7 @@ async def _do_render(q, context, state: dict) -> None:
             "❌ all renders failed:\n"
             + "\n".join(f"{n}: {e}" for n, e in failures))
         return
+    _start_manual_captions(q.message.chat, state, renders)
 
     state["mode"] = "publish"
     state["renders"] = renders
@@ -1344,8 +1347,9 @@ async def _do_render_card(q, context, state: dict) -> None:
     for r in renders:
         try:
             with open(r["path"], "rb") as fh:
-                _track(await q.message.chat.send_photo(
+                sent = _track(await q.message.chat.send_photo(
                     photo=fh, caption=f"🖼 {r['brand']['name']}"))
+                r["preview_id"] = sent.message_id
         except Exception as exc:  # Telegram send only — the render succeeded
             log.error("card preview send failed for %s: %s", r["brand"]["name"], exc)
             warnings.append((r["brand"]["name"], str(exc)[:200]))
@@ -1357,6 +1361,7 @@ async def _do_render_card(q, context, state: dict) -> None:
             "❌ all cards failed:\n"
             + "\n".join(f"{n}: {e}" for n, e in failures))
         return
+    _start_manual_captions(q.message.chat, state, renders)
 
     state["mode"] = "publish"
     state["renders"] = renders
@@ -1400,8 +1405,54 @@ async def _do_render_card(q, context, state: dict) -> None:
     _arm_auto_publish(context.bot, state, prompt)
 
 
+def _manual_ig(brand: dict) -> bool:
+    """A brand whose Instagram is posted BY HAND: outside GMN and with no IG
+    account connected (no `instagram` block in its credentials file). Its
+    render preview is followed by the caption it would have published, ready
+    to copy (`_send_manual_captions`)."""
+    return (brand.get("group") or "").upper() != "GMN" and not brand.get("ig")
+
+
+async def _send_manual_captions(chat, state: dict, renders: list) -> None:
+    """The finished Instagram caption for every hand-posted brand in
+    `renders`, one message each, as a reply to that brand's preview.
+
+    Runs as a task after the render (it waits on the caption's web search);
+    the expansion lands in `state["caption_cache"]`, so a publish to IG/YT
+    later on the same post reuses it instead of paying for a second search.
+    Never raises — a missing caption must not touch the renders."""
+    manual = [r for r in renders if _manual_ig(r["brand"])]
+    if not manual:
+        return
+    try:
+        caps = await _ig_captions(
+            state.get("text", ""), [{"platform": "ig", "render": r} for r in manual],
+            state.get("footage") or {}, state.get("info", ""),
+            cache=state.setdefault("caption_cache", {}))
+        for r in manual:
+            name = r["brand"]["name"]
+            text = caps.get(name) or ig_caption.with_brand_tag(r["headline"], name)
+            # <pre>: one tap copies the whole caption in Telegram.
+            _track(await chat.send_message(
+                f"📋 <b>{html.escape(name)}</b> — Instagram caption "
+                f"(no IG account connected, post by hand):\n\n"
+                f"<pre>{html.escape(text)}</pre>",
+                parse_mode="HTML",
+                reply_to_message_id=r.get("preview_id"),
+                allow_sending_without_reply=True))
+    except Exception:
+        log.exception("manual instagram captions failed")
+
+
+def _start_manual_captions(chat, state: dict, renders: list) -> None:
+    """Fire `_send_manual_captions` without holding up the picker."""
+    if any(_manual_ig(r["brand"]) for r in renders):
+        state["manual_task"] = asyncio.create_task(
+            _send_manual_captions(chat, state, renders))
+
+
 async def _ig_captions(source_text: str, pairs: list, footage: dict | None = None,
-                       info: str = "") -> dict[str, str]:
+                       info: str = "", cache: dict | None = None) -> dict[str, str]:
     """The Instagram caption for each brand, keyed by brand NAME.
 
     Instagram and YouTube are the platforms here that post more than the
@@ -1437,6 +1488,11 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
     its render, already translated), a blank line, then the AI-written body
     with the brand's tag opening its hashtag line (`caption.compose`).
 
+    `cache` (the post's `state["caption_cache"]`) holds the one expansion per
+    (text, info), so the hand-posted brands' captions sent at render time and
+    the IG/YT publish afterwards share a single web search. An `info:` reply
+    in between changes the key and buys a fresh one.
+
     Never raises: an empty dict means every IG pair falls back to its headline,
     which is what shipped before any of this existed, and a single failed
     rewrite falls back to the shared caption on its own.
@@ -1458,8 +1514,14 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
     if not brands or not (source_text or "").strip():
         return {}
     try:
-        full = await asyncio.to_thread(
-            ig_caption.expand, source_text, footage or {}, None, info or "")
+        key = (source_text, info or "")
+        if cache is not None and cache.get("key") == key:
+            full = cache["full"]
+        else:
+            full = await asyncio.to_thread(
+                ig_caption.expand, source_text, footage or {}, None, info or "")
+            if full and cache is not None:
+                cache.update(key=key, full=full)
         if not full:
             return {}
         out = {}
@@ -1500,11 +1562,21 @@ async def _do_publish(message, bot, state: dict) -> None:
     await message.edit_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
 
+    # The hand-posted brands' captions may still be searching: let them land
+    # in the cache first, so this publish reuses that search, not a second one.
+    manual = state.get("manual_task")
+    if manual is not None and not manual.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(manual), _VISION_WAIT_S)
+        except Exception:
+            pass
+
     # Before the loop: one footage-backed expansion shared by every IG and YT
     # pair, informed by the operator's info: reply when there is one.
     ig_caps = await _ig_captions(state.get("text", ""), pairs,
                                  state.get("footage") or {},
-                                 state.get("info", ""))
+                                 state.get("info", ""),
+                                 cache=state.setdefault("caption_cache", {}))
 
     lines = []
     for p in pairs:

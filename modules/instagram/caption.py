@@ -172,16 +172,62 @@ _HASHTAG_RULES = (
     "public figure at its centre, its subject, its topic. A tag a reader "
     "could not connect to the caption above it does not go in, however big "
     "that tag is.\n"
-    "  Among the tags that pass that test, prefer the ones people actually "
-    "search and follow — the short, established, high-traffic form over the "
-    "long specific one nobody types (#ohio, not #ohiocourtsystem; #crime, not "
-    "#attemptedmurdercase). Never reach for size alone: a popular tag that is "
-    "not about this story is worse than one tag fewer.\n"
+    "  Among the tags that pass that test, aim for the MID-SIZE band — "
+    "roughly 10,000 to 200,000 posts each, the size where a new post can "
+    "still be seen in the tag rather than buried within seconds. That rules "
+    "out the giant catch-alls (#news, #breakingnews, #viral, #viralvideo, "
+    "#usa, #world, #trending, #instagood) and it rules out the long phrase "
+    "nobody has ever typed (#attemptedmurdercase). You cannot look the counts "
+    "up, so judge: a city or region (#asheville, #hatay), a place plus the "
+    "kind of event (#miamiairport, #texasflood), a named institution or "
+    "public event (#ntsb, #euparliament), a niche topic people follow "
+    "(#aviationsafety, #bearencounter) sit in that band; a bare country or a "
+    "one-word topic usually does not. Never reach for size either way: a tag "
+    "that is not about this story is worse than one tag fewer.\n"
     "  Order them most specific first — place, then the main actors or "
-    "subject, then the topic, then the general ones (#news, #breakingnews) "
-    "last; the first two are the tags every account keeps, so they must be "
-    "the two this story is most about. Tag places, institutions, countries "
-    "and public events — never a private individual's name.\n"
+    "subject, then the topic; the first two are the tags every account "
+    "keeps, so they must be the two this story is most about. Tag places, "
+    "institutions, countries and public events — never a private "
+    "individual's name.\n"
+)
+
+# The growth half of the caption, shared by both system prompts: the search
+# line it opens on and the share line it closes on. Instagram (2026) ranks a
+# caption's TEXT in search, shows only ~125 characters before "more", and
+# weighs sends and saves above likes — so the first line is written for search
+# and the last prose line asks for a send or a save.
+#
+# These two lines are STRUCTURE, not voice: `_VARIANT_RULES` makes every
+# per-account rewrite keep them, and `_VARIANT_STYLE` says a house style
+# never removes them — otherwise a "two paragraphs, never more" brand would
+# rewrite the growth work straight back out.
+_GROWTH_RULES = (
+    "LINE 1 — THE SEARCH LINE. Instagram ranks a caption's words in search "
+    "and shows only about 125 characters before \"more\", so the first line "
+    "is written to be FOUND. One line, at most 125 characters, stating the "
+    "story plainly with its main keyword phrase near the start — the words a "
+    "person would type into Instagram search to find it: the place and the "
+    "kind of event (\"Miami airport plane crash\"), or the named institution "
+    "and what it did. No wordplay, no pun, no question, no teaser that "
+    "withholds the point, no hashtag, no emoji, no \"Breaking\". It is not "
+    "the operator's headline copied out: write it for search. It obeys the "
+    "same FAITHFUL rule as everything else — a place or a name your sources "
+    "do not give stays out of it.\n"
+    "KEYWORDS IN THE PARAGRAPHS — work one or two further phrases people "
+    "search for this story into the paragraphs naturally: the town and the "
+    "region, the event's common name, the institution's full name. Normal "
+    "words in normal sentences, each used once; never a list of keywords, "
+    "never the same phrase repeated to rank.\n"
+    "LAST PROSE LINE — THE SHARE LINE. Sends and saves are what Instagram "
+    "rewards most, so the caption's last line before the hashtags is ONE "
+    "short sentence asking the reader to send the post to someone or to save "
+    "it, tied to who would genuinely want it: \"Send this to someone who "
+    "drives the I-95 every day.\", \"Save this if you are flying through "
+    "Miami this week.\" Never \"like\", \"follow\" or \"comment below\", never "
+    "a link, no emoji, and nothing it implies may go beyond the facts. On a "
+    "story with deaths, violence or disaster keep it sober and useful "
+    "(\"Share this so people in the area know the road is closed.\") — never "
+    "playful.\n"
 )
 
 # What the operator's `info:` reply is to the model. Shared by both system
@@ -203,31 +249,34 @@ _SYSTEM = (
     "headline. Search the web for that story as it stands today, then write "
     "the account's caption for it.\n\n"
     "SHAPE — exactly this, and nothing else:\n"
+    "  first line: the search line (below).\n"
+    "  a blank line.\n"
     "  two to four paragraphs, one to three sentences each, a blank line "
-    "between them. The account prints the headline above your caption "
-    "itself, so never write the headline, a title or any first line that "
-    "stands in for one. The first paragraph is the news itself: who, what, "
+    "between them. The first paragraph is the news itself: who, what, "
     "where, when. The "
     "ones after it carry the supporting facts — the names, the numbers, the "
     "dates, the official response, what happens next. A last paragraph may "
     "place the story in its standing context (\"The controversy comes as …\", "
     "\"The NTSB and FAA are investigating the cause of the crash.\").\n"
     "  a blank line.\n"
+    "  the share line (below), on its own.\n"
+    "  a blank line.\n"
     "  last line: the hashtags.\n\n"
+    + _GROWTH_RULES +
     "FAITHFUL — every fact, name, number, date and quote in the caption must "
     "come from the headline, from the operator's info when there is any, or "
     "from what your search actually returns. Invent "
     "nothing: no background you did not read, no consequence, no speculation, "
     "no plausible-sounding detail, no quote you cannot source. If the search "
-    "returns little, write ONE short paragraph and stop — a thin caption is "
+    "returns little, write ONE short paragraph — a thin caption is "
     "correct, a padded one is a lie on a news account. Never give a death "
     "toll, a casualty count, a suspect's name or a cause as settled when your "
     "sources disagree: attribute it (\"police said\") or leave it out.\n"
     "REGISTER — neutral wire-service prose, the way Reuters or AP writes. No "
     "hype, no editorialising, no adjective doing an opinion's work, no "
     "exclamation marks, no emoji, no rhetorical questions, no first person, "
-    "no \"Breaking:\", no call to action, no \"follow us for more\", no links, "
-    "no sign-off.\n"
+    "no \"Breaking:\", no call to action other than the one share line, no "
+    "\"follow us for more\", no links, no sign-off.\n"
     + _INFO_RULES + _HASHTAG_RULES +
     "\nOutput ONLY the caption. No preamble, no explanation, no markdown, no "
     "bold, no bullet points, no surrounding quotation marks, no numbered "
@@ -282,15 +331,23 @@ _SYSTEM_FOOTAGE = (
     "tell somebody what they are about to watch. This is the commoner case and "
     "it is not the lesser caption.\n\n"
     "SHAPE — exactly this, and nothing else:\n"
+    "  first line: the search line (below).\n"
+    "  a blank line.\n"
     "  two to four paragraphs, one to three sentences each, a blank line "
-    "between them. The account prints the headline above your caption "
-    "itself, so never write the headline, a title or any first line that "
-    "stands in for one.\n"
+    "between them.\n"
+    "  a blank line.\n"
+    "  the share line (below), on its own.\n"
     "  a blank line.\n"
     "  last line: the hashtags.\n\n"
+    + _GROWTH_RULES +
+    "  When the clip is the story and no search confirms where it happened, "
+    "the search line's keyword is what happens in it (\"bear walks behind "
+    "elderly man on residential street\") — never a place you were not "
+    "given.\n\n"
     "NEVER RESTATE THE HEADLINE. The first paragraph ADVANCES the story: it "
     "sets the scene and begins what happens. A first paragraph that says the "
-    "headline again in longer words is a failed caption, and so is one that "
+    "headline or the search line again in longer words is a failed caption, "
+    "and so is one that "
     "hedges behind \"footage shows\" or \"apparently\" instead of telling the "
     "reader what happened. You have watched it, through the report — write "
     "what happened.\n\n"
@@ -329,8 +386,9 @@ _SYSTEM_FOOTAGE = (
     "disagree — attribute it (\"police said\") or leave it out.\n"
     "REGISTER — no hype, no editorialising, no adjective doing an opinion's "
     "work, no exclamation marks, no emoji, no rhetorical questions, no first "
-    "person, no \"Breaking:\", no call to action, no \"follow us for more\", "
-    "no links, no sign-off. Narrating a clip is still neutral prose; it is "
+    "person, no \"Breaking:\", no call to action other than the one share "
+    "line, no \"follow us for more\", no links, no sign-off. Narrating a clip "
+    "is still neutral prose; it is "
     "simply prose about what happens rather than about what was reported.\n"
     + _INFO_RULES +
     "  The info tells you WHO and WHICH EVENT; the report tells you WHAT "
@@ -338,14 +396,14 @@ _SYSTEM_FOOTAGE = (
     "shows happening, write what the report shows.\n"
     + _HASHTAG_RULES +
     "  A clip that is the story carries the tags people browse it under — "
-    "#caughtoncamera, #viralvideo, #wildlife — beside the ones naming what is "
-    "in it. Those are legitimate picks here, and they are not picks for a "
-    "reported news event.\n\n"
+    "#caughtoncamera, #bearencounter, #wildlifeencounter — beside the ones "
+    "naming what is in it. Those are legitimate picks here, and they are not "
+    "picks for a reported news event.\n\n"
     "Here is the shape a clip-is-the-story caption has. Follow its FORM — how "
     "it opens, how it moves, how plainly it is written — and never its "
-    "content. Its headline, \"Elderly man doesn't notice a bear walking "
-    "right beside him\", is printed above it by the account and is not part "
-    "of what you write:\n\n"
+    "content. The operator's headline was \"Elderly man doesn't notice a "
+    "bear walking right beside him\":\n\n"
+    "Bear walks right behind elderly man on a residential street\n\n"
     "An elderly man was walking down the street when a bear appeared just a "
     "few feet away from him.\n\n"
     "People nearby began shouting and warning him to turn around, but he "
@@ -353,7 +411,8 @@ _SYSTEM_FOOTAGE = (
     "turned around and spotted the bear.\n\n"
     "He then quickly moved away from the animal as people continued warning "
     "him.\n\n"
-    "#bear #usa #wildlife #caughtoncamera #viralvideo #news\n\n"
+    "Send this to someone who lives in bear country.\n\n"
+    "#bearencounter #bearsighting #caughtoncamera #wildlifeencounter\n\n"
     "Output ONLY the caption. No preamble, no explanation, no markdown, no "
     "bold, no bullet points, no surrounding quotation marks, no numbered "
     "citation markers, no source list at the end."
@@ -388,7 +447,11 @@ _VARIANT_INTRO = (
 # house style that says "two paragraphs, never more" and an angle that says
 # "write it as four short paragraphs" cancel out, and what comes back is in
 # neither voice. Live proof on 2026-09-11, which is why this is conditional.
-_VARIANT_ANGLE = "HOW YOURS MUST DIFFER: {angle}\n\n"
+_VARIANT_ANGLE = (
+    "HOW YOURS MUST DIFFER: {angle} (Where to open and how many paragraphs "
+    "refer to the paragraphs under the search line; the search line and the "
+    "share line stay where they are.)\n\n"
+)
 
 _VARIANT_RULES = (
     "SAME FACTS, NOTHING ADDED — every name, number, date, place, quote and "
@@ -400,20 +463,34 @@ _VARIANT_RULES = (
     "A REWRITE, NOT A PARAPHRASE — a different opening sentence, a different "
     "order of facts, different sentence lengths. Trading words for synonyms is "
     "not enough: the two captions must not line up sentence for sentence.\n"
-    "SHAPE — the paragraphs with a blank line between them, then a blank line "
-    "and the hashtag line. There is no headline in what you were given and "
-    "there is none in what you write: the account prints its headline above "
-    "the caption itself. THE FIRST PARAGRAPH STILL CARRIES THE NEWS — who, what, "
+    "SHAPE — the search line, a blank line, the paragraphs with a blank line "
+    "between them, a blank line, the share line, a blank line and the "
+    "hashtag line. THE FIRST PARAGRAPH STILL CARRIES THE NEWS — who, what, "
     "where, when — however short or unconventional your house style is. A "
     "caption that opens on a detail and leaves the reader to infer the story "
     "is a failed caption, not a terse one.\n"
+    "THE SEARCH LINE — the caption's first line is written for Instagram "
+    "search. Keep its main keyword phrase (the place, the event, the named "
+    "institution) — those words are what the post is found by — but the "
+    "line itself must NOT be the one you were given: change everything "
+    "around the keywords (the verb, the order, the detail it adds), so the "
+    "two accounts' first lines differ at a glance. One line, at most 125 "
+    "characters, no hashtag, no emoji, no question, no wordplay.\n"
+    "THE SHARE LINE — the last line before the hashtags asks the reader to "
+    "send the post to someone or to save it. Keep exactly one such line, in "
+    "that place, but write a DIFFERENT sentence from the one you were given "
+    "— another reader to send it to, or save instead of send — and never "
+    "turn it into \"like\", \"follow\" or \"comment\".\n"
+    "KEYWORDS — the search phrases in the paragraphs (the town, the region, "
+    "the event's name, the institution's full name) stay in, as normal words "
+    "in your sentences.\n"
     "HASHTAGS — the last line is copied through character for character: the "
     "same tags in the same order, none added, none dropped, none translated. "
     "They are chosen elsewhere.\n"
     "REGISTER — neutral wire-service prose, the way Reuters or AP writes. No "
     "hype, no editorialising, no exclamation marks, no emoji, no rhetorical "
-    "questions, no first person, no \"Breaking:\", no call to action, no "
-    "links, no sign-off.\n\n"
+    "questions, no first person, no \"Breaking:\", no call to action other "
+    "than the share line, no links, no sign-off.\n\n"
     "Output ONLY the caption. No preamble, no explanation, no markdown, no "
     "surrounding quotation marks, and no note about what you changed."
 )
@@ -438,7 +515,14 @@ _VARIANT_STYLE = (
     "— a style that shows you \"The investigation continues.\" is showing you "
     "the shape of a closing line, and putting that sentence on a story with no "
     "investigation in it is a fabrication. Every example you follow gets "
-    "refilled with THIS story's facts.\n{style}"
+    "refilled with THIS story's facts.\n"
+    "The house style governs the PARAGRAPHS. It never removes, merges or "
+    "moves the search line, the share line or the search keywords — those "
+    "are how the post is found and passed on, not a matter of voice. Where "
+    "the style says how to open, that is the first paragraph, under the "
+    "search line; where it says how to close or how many paragraphs to "
+    "write, that is the last paragraph and the paragraph count, and the "
+    "share line still follows them.\n{style}"
 )
 
 # Appended when the account publishes in another language: for it, the variant
@@ -797,31 +881,65 @@ def expand(headline: str, footage: dict | None = None,
     return out
 
 
-def compose(headline: str, body: str) -> str:
-    """The caption Instagram gets: the headline, a blank line, the body.
+# The longest first paragraph still read as the model's SEARCH LINE. The
+# prompt asks for at most 125 characters (what Instagram shows before "more");
+# the slack is for a model that runs a little over. A first paragraph past
+# this, or on more than one line, is prose — the model skipped the search
+# line — and the brand's headline goes back on top as before.
+SEARCH_LINE_MAX = 160
 
-    `headline` is the brand's own — the text on its render — and is never
-    touched. When the whole thing is over Instagram's cap it is the PROSE that
-    gives way: the hashtag line (which opens with the account's own tag) is
-    kept whole, and the paragraphs are cut on a word boundary to make room."""
+# The longest closing paragraph `compose` treats as the share line when it
+# has to cut a caption down: kept whole, with the cut taken out of the
+# paragraphs above it instead.
+SHARE_LINE_MAX = 240
+
+
+def _single_line(par: str, limit: int) -> bool:
+    return bool(par) and "\n" not in par and len(par) <= limit \
+        and not _TAG_LINE.match(par)
+
+
+def compose(headline: str, body: str) -> str:
+    """The caption Instagram gets: the search line, a blank line, the body.
+
+    The body opens on the model's SEARCH LINE (see `_GROWTH_RULES`), which
+    replaces the headline as the caption's first line — the headline is
+    burned into the render already, and the first line's job on Instagram is
+    to be found. When the body opens on prose instead (the model skipped the
+    line), `headline` — the brand's own, the text on its render — goes on top
+    exactly as before, and a body that merely repeats it is not doubled.
+
+    When the whole thing is over Instagram's cap it is the MIDDLE that gives
+    way: the first line, the share line and the hashtag line (which opens
+    with the account's own tag) are kept whole, and the paragraphs between
+    them are cut on a word boundary to make room."""
     headline = (headline or "").strip()
     body = (body or "").strip()
     if not body:
         return trim_caption(headline)
-    if not headline:
-        return trim_caption(body)
-    body = _drop_headline(body, headline)
-    full = f"{headline}\n\n{body}"
-    if len(full) <= CAPTION_MAX:
-        return full
+    if headline:
+        body = _drop_headline(body, headline)
     lines = body.split("\n")
     i = _tag_line_index(lines)
-    if i < 0:
-        return trim_caption(full)
-    tag_line = lines[i].strip()
-    prose = "\n".join(lines[:i]).strip()
-    room = CAPTION_MAX - len(tag_line) - 2
-    return trim_caption(f"{headline}\n\n{prose}", room) + "\n\n" + tag_line
+    tag_line = lines[i].strip() if i >= 0 else ""
+    paras = [p.strip() for p in
+             "\n".join(lines[:i] if i >= 0 else lines).strip().split("\n\n")
+             if p.strip()]
+    if paras and _single_line(paras[0], SEARCH_LINE_MAX):
+        lead, paras = paras[0], paras[1:]
+    else:
+        lead = headline
+    head = [lead] if lead else []
+    full = "\n\n".join(head + paras + ([tag_line] if tag_line else []))
+    if len(full) <= CAPTION_MAX:
+        return full
+    share = []
+    if len(paras) > 1 and _single_line(paras[-1], SHARE_LINE_MAX):
+        share, paras = [paras[-1]], paras[:-1]
+    keep = "\n\n".join(share + ([tag_line] if tag_line else []))
+    room = CAPTION_MAX - (len(keep) + 2 if keep else 0)
+    out = trim_caption("\n\n".join(head + paras), room)
+    return f"{out}\n\n{keep}" if keep else out
 
 
 # The YouTube description's prose budget. A Short's description sits behind a
