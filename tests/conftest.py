@@ -25,3 +25,12 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_store, "_DB", str(tmp_path / "news.db"))
     queue_store.init()
     return queue_store
+
+
+@pytest.fixture(autouse=True)
+def _no_apify(monkeypatch):
+    """No test ever reaches Apify: a developer's .env carries a real token, and
+    a hashtag lookup is billed. Tests that exercise the lookup patch the HTTP
+    call themselves and set a token explicitly."""
+    from shared import config
+    monkeypatch.setattr(config, "APIFY_TOKEN", "")

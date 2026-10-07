@@ -220,6 +220,22 @@ IG_VISION_ENABLED = os.environ.get("IG_VISION_ENABLED", "1").strip().lower() not
 IG_VISION_MAX_S = _int_env("IG_VISION_MAX_S", 0)
 IG_VISION_MAX_MB = _float_env("IG_VISION_MAX_MB", 18.0)
 
+# Hashtag post counts (modules/instagram/hashtags.py) — the AI proposes
+# candidates, Apify's instagram-hashtag-stats actor measures them, and only
+# tags inside [HASHTAG_MIN_POSTS, HASHTAG_MAX_POSTS] are published; up to
+# HASHTAG_ROUNDS rounds of measured feedback until HASHTAG_TARGET are found.
+# Blank APIFY_TOKEN = no lookup, the AI's unchecked tags as before. Counts are
+# cached HASHTAG_CACHE_DAYS (they move slowly) — a repeat tag costs nothing.
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
+HASHTAG_ACTOR = (os.environ.get("HASHTAG_ACTOR", "").strip()
+                 or "apify~instagram-hashtag-stats")
+HASHTAG_MIN_POSTS = _int_env("HASHTAG_MIN_POSTS", 5_000)
+HASHTAG_MAX_POSTS = _int_env("HASHTAG_MAX_POSTS", 200_000)
+HASHTAG_TARGET = _int_env("HASHTAG_TARGET", 10)
+HASHTAG_ROUNDS = _int_env("HASHTAG_ROUNDS", 3)
+HASHTAG_CACHE_DAYS = _int_env("HASHTAG_CACHE_DAYS", 30)
+HASHTAG_LOOKUP_TIMEOUT_S = _int_env("HASHTAG_LOOKUP_TIMEOUT_S", 90)
+
 # Collector's working dir: SQLite queue + downloaded media + login session.
 TG_DATA_DIR = os.path.join(ROOT_DIR, "modules", "telegram", "data")
 

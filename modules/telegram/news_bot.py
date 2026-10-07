@@ -1530,6 +1530,10 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
         else:
             full = await asyncio.to_thread(
                 ig_caption.expand, source_text, footage or {}, None, info or "")
+            # Measure the candidate tags and keep the 5k-200k ones — once per
+            # post, before the per-account rewrites copy the line through.
+            if full:
+                full = await asyncio.to_thread(ig_caption.verify_hashtags, full)
             if full and cache is not None:
                 cache.update(key=key, full=full)
         if not full:

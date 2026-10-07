@@ -138,6 +138,7 @@ if _ROOT not in sys.path:
 from openai import OpenAI  # noqa: E402
 
 from shared import config, vision  # noqa: E402
+from modules.instagram import hashtags  # noqa: E402
 from modules.instagram.graph import CAPTION_MAX, trim_caption  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -156,39 +157,72 @@ _client = (
 # enough that OpenRouter's up-front credit reservation stays under a cent.
 MAX_TOKENS = 8000
 
-# The hashtag rules, shared by both system prompts below. One pool of eight,
-# dealt out per account by `pick_hashtags` — so the two prompts have to ask for
-# the same thing, or the dealing is done over a line never built for it.
+# How to estimate a hashtag's size, shared by the caption prompts and the
+# feedback round (`suggest_hashtags`). Every number in it was MEASURED on
+# Instagram through Apify on 2026-10-07 — a model told only "aim for 5k-200k"
+# put 0 of 10 picks in the band, so it is given the scale itself: the rules
+# are the patterns those measurements show, the table is the calibration.
+# Re-measure with `py modules/instagram/hashtags.py tag1 tag2 …` before
+# changing a figure.
+_HASHTAG_SIZE_GUIDE = (
+    "HOW BIG A HASHTAG IS — estimate before you pick. The band that works is "
+    "5,000 to 200,000 posts: bigger buries the post within seconds, smaller "
+    "is a tag nobody browses. Measured sizes follow these rules:\n"
+    "  1. ONE common word — a city of a million people or more, a country, a "
+    "general subject (rain, flooding, wildfire, firefighters, nato) — is "
+    "almost always 1 million or more: TOO BIG. A small town (under ~100k "
+    "inhabitants) is often inside the band.\n"
+    "  2. Every specific word you add divides the size by roughly 5 to 20: "
+    "#flooding 1.3M -> #flashflood 117k; #weather (huge) -> #extremeweather "
+    "159k -> #weatherwarning 41k. Two generic words together still tend to "
+    "be too big (#heavyrain 725k, #planecrash 396k); a precise two-word "
+    "phrase lands in the band.\n"
+    "  3. City + news: a world city lands in the band (#londonnews 33k, "
+    "#miaminews 62k); a smaller city falls under it (#kyivnews 4.9k, "
+    "#ashevillenews 1.1k).\n"
+    "  4. Place + event is in the band ONLY when people already use that "
+    "exact phrase: an English-speaking place with an English word works "
+    "(#texasflood 37k, #ukweather 175k, #londonfire 6k, #miamiairport 86k); "
+    "a non-English country with an English word is usually EMPTY "
+    "(#spainweather 0, #spainfloods 0), because locals tag in their own "
+    "language. Never coin a compound for this one event (#valenciarain 0, "
+    "#hatayearthquake 0, #valenciafloods 0).\n"
+    "  5. Institutions: the FULL name of a large body sits high in the band "
+    "(#europeanparliament 178k, #europeancommission 103k, #euparliament 23k); "
+    "a famous abbreviation is too big (#nato 1.4M, #faa 406k); a niche "
+    "agency's is small but usable (#ntsb 8.9k).\n"
+    "  6. A niche topic people follow is the sweet spot: #aviationsafety 62k, "
+    "#dashcamvideos 75k, #policechase 139k, #courtcase 80k, #bearsighting "
+    "24k, #wildlifeencounter 16.5k, #floodwarning 37k.\n"
+    "  Too big for certain: #news #breakingnews #viral #viralvideo #usa "
+    "#world #trending #newsupdate (6.6M) #caughtoncamera (517k) #dashcam "
+    "(1M) #wildfire (969k) #roadsafety (1.4M).\n"
+)
+
+# The hashtag rules, shared by both system prompts below. The line the model
+# writes is a list of CANDIDATES: `verify_hashtags` measures them and keeps the
+# in-band ones as the pool `pick_hashtags` deals out per account — so the two
+# prompts have to ask for the same thing.
 _HASHTAG_RULES = (
-    "HASHTAGS — one line, EXACTLY EIGHT, lowercase, space-separated, letters "
-    "and digits only inside each tag. Each tag is a plain ASCII \"#\" with the "
-    "word immediately after it — \"#madrid\", never a keycap emoji, never a "
-    "space after the hash, never a comma between tags. That line is a POOL: the accounts "
-    "publishing this story each draw a few tags from it, so eight genuinely "
-    "relevant ones are wanted here. If the story cannot carry eight, give "
-    "fewer — a tag that is not about this story is worse than a short line.\n"
+    "HASHTAGS — one line of up to TWENTY candidates, lowercase, "
+    "space-separated, letters and digits only inside each tag. Each tag is a "
+    "plain ASCII \"#\" with the word immediately after it — \"#madrid\", "
+    "never a keycap emoji, never a space after the hash, never a comma "
+    "between tags. Every candidate's real post count is then MEASURED and "
+    "only those between 5,000 and 200,000 posts are published, so give "
+    "twenty genuinely relevant candidates spread around that band rather "
+    "than eight safe guesses. If the story cannot carry twenty, give fewer — "
+    "a tag that is not about this story is worse than a short line.\n"
     "  Pick them RELEVANCE FIRST. Every tag must be something this particular "
     "story is actually about — the place it happened, the institution or "
     "public figure at its centre, its subject, its topic. A tag a reader "
-    "could not connect to the caption above it does not go in, however big "
-    "that tag is.\n"
-    "  Among the tags that pass that test, aim for the MID-SIZE band — "
-    "roughly 10,000 to 200,000 posts each, the size where a new post can "
-    "still be seen in the tag rather than buried within seconds. That rules "
-    "out the giant catch-alls (#news, #breakingnews, #viral, #viralvideo, "
-    "#usa, #world, #trending, #instagood) and it rules out the long phrase "
-    "nobody has ever typed (#attemptedmurdercase). You cannot look the counts "
-    "up, so judge: a city or region (#asheville, #hatay), a place plus the "
-    "kind of event (#miamiairport, #texasflood), a named institution or "
-    "public event (#ntsb, #euparliament), a niche topic people follow "
-    "(#aviationsafety, #bearencounter) sit in that band; a bare country or a "
-    "one-word topic usually does not. Never reach for size either way: a tag "
-    "that is not about this story is worse than one tag fewer.\n"
-    "  Order them most specific first — place, then the main actors or "
-    "subject, then the topic; the first two are the tags every account "
-    "keeps, so they must be the two this story is most about. Tag places, "
-    "institutions, countries and public events — never a private "
-    "individual's name.\n"
+    "could not connect to the caption above it does not go in, whatever its "
+    "size.\n"
+    + _HASHTAG_SIZE_GUIDE +
+    "  Order them MOST RELEVANT FIRST — the place and the event, then the "
+    "main actors or subject, then the topic; the first two that pass the "
+    "count are the tags every account keeps. Tag places, institutions, "
+    "countries and public events — never a private individual's name.\n"
 )
 
 # The growth half of the caption, shared by both system prompts: the search
@@ -544,13 +578,17 @@ _CITATION = re.compile(r"[ \t]*\[\d{1,3}\](?=[\s.,;:!?)]|$)")
 # What ONE account puts under ONE post. Five is a ceiling, not a target.
 MAX_HASHTAGS = 5
 
-# What `expand` asks the model for, and what `pick_hashtags` deals five out of.
-# A pool is the cheapest de-duplication there is: eight tags, two kept by every
-# account and three rotated out of the remaining six, gives six accounts six
-# different tag lines for no tokens at all. Bigger buys little — past eight the
-# model is reaching for tags the story is not about, which is the one thing
-# RELEVANCE FIRST in the prompt is there to stop.
-POOL_HASHTAGS = 8
+# What `pick_hashtags` deals five out of: the MEASURED in-band tags
+# (`verify_hashtags`, HASHTAG_TARGET of them at most). A pool is the cheapest
+# de-duplication there is: two tags kept by every account and the rest rotated,
+# so thirteen accounts get different tag lines for no tokens at all. Without
+# an Apify token the model's own first ten stand in, unmeasured.
+POOL_HASHTAGS = 10
+
+# What `expand` asks the model for: candidates, most relevant first, of which
+# only the ones measured inside the band survive into the pool. Twenty, because
+# a first live test put 0 of 10 blind picks in the band.
+CANDIDATE_HASHTAGS = 20
 
 # The head of the pool every account keeps. The prompt orders tags
 # most-specific-first, so these two are what the story is actually about —
@@ -770,8 +808,11 @@ def _normalise_tag_line(text: str) -> str:
     return text
 
 
-def _clean(text: str) -> str:
-    """Undo the wrappers a chat model reaches for when told not to."""
+def _clean(text: str, tag_limit: int = POOL_HASHTAGS) -> str:
+    """Undo the wrappers a chat model reaches for when told not to.
+
+    `tag_limit` caps the hashtag line: the pool for a finished caption, the
+    full CANDIDATE_HASHTAGS for `expand`, whose line is measured next."""
     out = (text or "").strip()
     fenced = _FENCE.match(out)
     if fenced:
@@ -787,7 +828,7 @@ def _clean(text: str) -> str:
     out = "\n".join(line.rstrip() for line in out.split("\n"))
     out = re.sub(r"\n{3,}", "\n\n", out)
     out = _normalise_tag_line(out)
-    out = _cap_hashtags(out)
+    out = _cap_hashtags(out, tag_limit)
     return out.strip()
 
 
@@ -872,13 +913,105 @@ def expand(headline: str, footage: dict | None = None,
                   "headline", headline[:80], exc)
         return ""
 
-    out = _drop_headline(_clean(resp.choices[0].message.content or ""),
-                         headline)
+    out = _drop_headline(_clean(resp.choices[0].message.content or "",
+                                CANDIDATE_HASHTAGS), headline)
     if not out:
         log.warning("instagram caption for %r came back empty — posting the "
                     "bare headline", headline[:80])
         return ""
     return out
+
+
+# The feedback round of the hashtag search (hashtags.refine): the model sees
+# its earlier candidates WITH their measured counts and proposes new ones.
+# Searchless and cheap (IG_CAPTION_VARIANT_MODEL) — the facts are in the
+# caption, and the numbers are what it was missing.
+_SUGGEST_SYSTEM = (
+    "You choose Instagram hashtags for a news post; its caption is below. A "
+    "tag is only used when it has between 5,000 and 200,000 posts. Earlier "
+    "candidates were MEASURED — their real post counts are listed under "
+    "MEASURED. Propose {need} to {more} NEW candidates (none of the measured "
+    "ones), each genuinely about this story, aimed inside the band:\n"
+    "  for a tag that came back TOO BIG, go more specific — add the place, "
+    "the kind of event, or a qualifier;\n"
+    "  for one that came back TOO SMALL or with NO POSTS, go broader, or use "
+    "the form people already type instead of a compound you made up;\n"
+    "  tags under IN-BAND RELATED were measured inside the band already — "
+    "use one when, and only when, it is about this story (most are not: a "
+    "tag for a different city of the same name, a hobby, a brand).\n\n"
+    + _HASHTAG_SIZE_GUIDE +
+    "\nOutput ONLY one line of space-separated hashtags, most relevant first, "
+    "lowercase, letters and digits only. No explanation."
+)
+
+
+def suggest_hashtags(text: str, measured: dict, related: dict, need: int,
+                     model: str | None = None) -> list:
+    """The next round's candidates, from the measured numbers. [] on failure."""
+    if _client is None or not config.IG_CAPTION_ENABLED:
+        return []
+    lines = ["MEASURED:"] + [
+        f"#{t} — {n:,} posts ({hashtags.verdict(n)})"
+        for t, n in sorted(measured.items(), key=lambda kv: kv[1])]
+    if related:
+        lines += ["", "IN-BAND RELATED:"] + [
+            f"#{t} — {n:,} posts" for t, n in sorted(related.items(),
+                                                      key=lambda kv: kv[1])]
+    need = max(int(need), 1)
+    try:
+        resp = _client.chat.completions.create(
+            model=model or config.IG_CAPTION_VARIANT_MODEL,
+            max_tokens=MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": _SUGGEST_SYSTEM.format(
+                    need=need + 5, more=need + 12)},
+                {"role": "user",
+                 "content": f"CAPTION:\n{text}\n\n" + "\n".join(lines)},
+            ],
+        )
+    except Exception as exc:
+        log.error("hashtag suggestions failed: %s", exc)
+        return []
+    raw = resp.choices[0].message.content or ""
+    return [t for t in (hashtags.norm(w) for w in
+                        re.findall(r"#?[^\s#,;]+", raw)) if t]
+
+
+def verify_hashtags(body: str) -> str:
+    """`body` with its hashtag line replaced by the MEASURED in-band pool.
+
+    The line `expand` writes is up to CANDIDATE_HASHTAGS guesses; this keeps
+    the ones Apify measures between HASHTAG_MIN_POSTS and HASHTAG_MAX_POSTS,
+    after up to HASHTAG_ROUNDS rounds of measured feedback (hashtags.refine),
+    in the model's relevance order. None in the band after the last round
+    means the line goes and the post carries only the account's own tag,
+    which `pick_hashtags`/`with_brand_tag` add.
+
+    No APIFY_TOKEN, or Apify unreachable on the first round: the model's own
+    tags are kept unmeasured (capped to the pool), exactly the behaviour
+    before the lookup existed — a post is never blocked on it. Never raises.
+    """
+    body = (body or "").strip()
+    lines = body.split("\n")
+    i = _tag_line_index(lines)
+    if i < 0:
+        return body
+    if not config.APIFY_TOKEN:
+        return _cap_hashtags(body)
+    prose = "\n".join(lines[:i]).strip()
+    try:
+        found = hashtags.refine(prose, lines[i].split(), suggest_hashtags)
+    except Exception:
+        log.exception("hashtag check failed — keeping the unchecked tags")
+        found = None
+    if found is None:
+        log.error("hashtag counts unavailable — publishing unchecked tags")
+        return _cap_hashtags(body)
+    if not found:
+        log.warning("no hashtag landed in the band after %d rounds — "
+                    "account tag only", config.HASHTAG_ROUNDS)
+        return prose
+    return f"{prose}\n\n" + " ".join(f"#{t}" for t in found[:POOL_HASHTAGS])
 
 
 # The longest first paragraph still read as the model's SEARCH LINE. The
@@ -1207,7 +1340,8 @@ if __name__ == "__main__":
         print("--- what the media shows ---")
         print(vision.as_prompt(footage) or "(no analysis — see the log above)")
         print()
-    shared = expand(headline, footage, model=args.model, info=args.info)
+    shared = verify_hashtags(
+        expand(headline, footage, model=args.model, info=args.info))
     if args.brands:
         from shared import branding
         fake = [{"name": n, "lang": args.lang,

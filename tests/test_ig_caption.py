@@ -120,7 +120,8 @@ def test_both_prompts_ask_for_the_growth_shape(on, monkeypatch):
         system = fake.calls[0]["messages"][0]["content"]
         assert "THE SEARCH LINE" in system and "125 characters" in system
         assert "THE SHARE LINE" in system
-        assert "10,000 to 200,000" in system
+        assert "5,000 and 200,000" in system
+        assert "#londonnews 33k" in system          # the measured calibration
         assert "other than the one share line" in system
 
 
@@ -263,14 +264,15 @@ def test_hashtag_line_survives_cleaning(on, monkeypatch):
 
 
 def test_an_overlong_hashtag_line_is_cut_to_the_pool(on, monkeypatch):
-    """expand() returns a POOL — each account draws its own five from it (see
-    pick_hashtags), so what is capped here is the pool, not the post. A model
-    that overshoots even that must not hand down a twenty-tag spam line;
-    most-specific-first ordering means the HEAD is what survives."""
+    """expand() returns CANDIDATES (up to twenty, measured next); with no
+    lookup available verify_hashtags cuts them to the POOL each account draws
+    its five from. Relevance-first ordering means the HEAD is what survives."""
     _client(monkeypatch, content=EXAMPLE_TOO_MANY_TAGS)
-    tags = caption.expand("h").splitlines()[-1].split()
-    assert len(tags) == min(caption.POOL_HASHTAGS,
-                            len(EXAMPLE_TOO_MANY_TAGS.splitlines()[-1].split()))
+    out = caption.expand("h")
+    n = len(EXAMPLE_TOO_MANY_TAGS.splitlines()[-1].split())
+    assert len(out.splitlines()[-1].split()) == min(caption.CANDIDATE_HASHTAGS, n)
+    tags = caption.verify_hashtags(out).splitlines()[-1].split()
+    assert len(tags) == min(caption.POOL_HASHTAGS, n)
     assert tags[:5] == ["#miami", "#florida", "#planecrash", "#aviation",
                         "#amazon"]
 
@@ -476,7 +478,7 @@ def test_the_pool_is_de_duplicated_before_it_is_capped(on, monkeypatch):
     _client(monkeypatch, content="A paragraph.\n\n" + " ".join(
         ["#miami"] * 5 + ["#a", "#b", "#c", "#d", "#e", "#f", "#g", "#h"]))
     tags = caption.expand("h").splitlines()[-1].split()
-    assert tags == ["#miami", "#a", "#b", "#c", "#d", "#e", "#f", "#g"]
+    assert tags == ["#miami", "#a", "#b", "#c", "#d", "#e", "#f", "#g", "#h"]
 
 
 def test_a_sibling_brands_tag_is_never_dealt():
