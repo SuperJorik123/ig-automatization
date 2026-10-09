@@ -388,7 +388,7 @@ def test_plan_never_offers_youtube_for_a_photo_card():
     assert "yt" in branded.plan_platform_keys(brands, {0}, "video")
 
 
-def test_the_default_plan_is_jnn_on_yt_x_ig_fb():
+def test_the_default_plan_is_jnn_on_x_ig_fb():
     brands = [dict(_brand("a", group="JNN", tg="@a", yt="a", tw="a"), ig="a",
                    fb="a", has_logo=True),
               dict(_brand("b", group="GMN", tg="@b", yt="b", tw="b"), ig="b",
@@ -397,7 +397,10 @@ def test_the_default_plan_is_jnn_on_yt_x_ig_fb():
                    has_logo=True)]
     plan = branded.default_plan(brands, "video", 0)
     assert plan["sel_brands"] == {0, 2}
-    assert plan["platforms"] == {"yt", "tw", "ig", "fb"}     # never Telegram
+    # never Telegram, and never YouTube — offered, but the operator ticks it
+    assert plan["platforms"] == {"tw", "ig", "fb"}
+    assert "yt" in branded.plan_platform_keys(brands, plan["sel_brands"],
+                                              "video")
     assert plan["layout"] is None
 
 

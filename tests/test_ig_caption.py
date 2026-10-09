@@ -159,6 +159,27 @@ def test_info_is_the_source_of_truth_in_both_prompts(on, monkeypatch):
         assert "SOURCE OF TRUTH" in system
 
 
+def test_info_outranks_the_footage_report_on_what_happens(on, monkeypatch):
+    """The vision report once read a false assault claim as "a hug as people
+    cheer", and the old prompt told the model the report wins on WHAT HAPPENS
+    — so the operator's correct info: reply was overruled."""
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("h", footage={"summary": "Two women hug."}, info=INFO)
+    system = fake.calls[0]["messages"][0]["content"]
+    assert "write what the report shows" not in system
+    assert "NOT THE OPERATOR" in system
+    assert "write what the INFO says" in system
+    assert "WHAT HAPPENS in the media" in system
+
+
+def test_info_comes_before_the_footage_report(on, monkeypatch):
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("h", footage={"summary": "Two women hug."}, info=INFO)
+    user = fake.calls[0]["messages"][-1]["content"]
+    assert user.startswith("OPERATOR'S INFO:\n" + INFO)
+    assert user.index(INFO) < user.index("Two women hug.")
+
+
 def test_the_rewrite_never_writes_a_headline_either(on, monkeypatch):
     """A rewritten headline is how an account's first line drifted from the
     headline on its own banner."""
@@ -887,7 +908,7 @@ def test_the_footage_prompt_makes_the_media_outrank_the_search(on, monkeypatch):
     fake = _client(monkeypatch, content=EXAMPLE)
     caption.expand("Man walks past bear", footage=FOOTAGE)
     system = _system_of(fake).lower()
-    assert "ground truth" in system
+    assert "the footage outranks the search and the headline" in system
     assert "contradict" in system
 
 

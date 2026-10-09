@@ -22,7 +22,11 @@ that disagreed with its own banner.
 
 The operator can hand the search more to go on with an `info:` reply — the
 source, the names, what is actually known. It goes into the expansion prompt
-as trusted facts that outrank the web search, and its words steer the search
+as trusted facts that outrank the web search, the headline AND the vision
+report — on what happens in the clip too, because the report is an automated
+analysis that can misread it and the info is a person who watched it
+(2026-10-10: a report of "a hug as people cheer" overrode an operator's
+correct account of a false assault claim). Its words steer the search
 query (it sits in the user message, which is what `:online` builds the query
 from). It is never published as such.
 
@@ -270,8 +274,10 @@ _INFO_RULES = (
     "OPERATOR'S INFO — when the message carries a block headed OPERATOR'S "
     "INFO, it was written by the newsroom and is the SOURCE OF TRUTH: the "
     "outlet or account the story came from, who the people are, where and "
-    "when it happened, what is confirmed. Trust it over the web search and "
-    "over the headline wherever they disagree, and use its names, sources and "
+    "when it happened, what is confirmed, and WHAT HAPPENS in the media. It "
+    "outranks everything else you are given — the web search, the headline "
+    "and any report of what the media shows — wherever they disagree, and on "
+    "every kind of fact. Use its names, sources and "
     "places to find the right story when you search. It may name a person or "
     "a place nothing else names. Take the facts out of it and write them into "
     "the caption; never copy it in as a quotation, and never mention that you "
@@ -340,8 +346,11 @@ _SYSTEM_FOOTAGE = (
     "report of what one video or photo ACTUALLY SHOWS — written by someone who "
     "watched it — and the headline its operator typed. Write the account's "
     "caption for that media.\n\n"
-    "THE FOOTAGE IS GROUND TRUTH. The caption describes the media in front of "
-    "you and nothing else. Search the web to find out WHICH event this is and "
+    "THE FOOTAGE OUTRANKS THE SEARCH AND THE HEADLINE — NOT THE OPERATOR. The "
+    "caption describes the media in front of you and nothing else. When the "
+    "message carries OPERATOR'S INFO, that is a human who watched the media "
+    "and it comes first, before the report (see OPERATOR'S INFO below). "
+    "Search the web to find out WHICH event this is and "
     "to put names, places, dates and official responses on it — but the search "
     "serves the footage, never the other way round. Anything it returns that "
     "CONTRADICTS the report, or that belongs to a different event which merely "
@@ -425,9 +434,15 @@ _SYSTEM_FOOTAGE = (
     "is still neutral prose; it is "
     "simply prose about what happens rather than about what was reported.\n"
     + _INFO_RULES +
-    "  The info tells you WHO and WHICH EVENT; the report tells you WHAT "
-    "HAPPENS on screen. Where the info disagrees with what the report plainly "
-    "shows happening, write what the report shows.\n"
+    "  The report was written by an automated analysis, and it can misread a "
+    "clip — mistake a shove for a hug, an argument for a celebration, get "
+    "who did what to whom backwards. The info was written by a person who "
+    "watched it. So where the info and the report disagree about ANYTHING — "
+    "what happens, in what order, who does it, what is said — write what the "
+    "INFO says, and drop every part of the report that contradicts it; never "
+    "blend the two into a version neither of them gave. Use the report only "
+    "for what the info leaves out (the setting, what the people nearby do), "
+    "and only where it fits the info's account.\n"
     + _HASHTAG_RULES +
     "  A clip that is the story carries the tags people browse it under — "
     "#caughtoncamera, #bearencounter, #wildlifeencounter — beside the ones "
@@ -452,14 +467,17 @@ _SYSTEM_FOOTAGE = (
     "citation markers, no source list at the end."
 )
 
-# The footage report and the headline, clearly separated — the report first,
-# because it is what the caption is written from and what the search is run
-# against; the headline after it, labelled as the operator's, so the model is
-# never invited to treat it as the brief.
+# The footage report and the headline, clearly separated. The operator's info,
+# when there is any, comes FIRST: it outranks the report (an automated
+# analysis that can misread a clip — it once turned a staged assault claim
+# into "a hug as people cheer", 2026-10-10), and `:online` builds its query
+# from the top of the prompt. Then the report, which is what the caption is
+# written from when nobody gave info; the headline last, labelled as the
+# operator's, so the model is never invited to treat it as the brief.
 _USER_FOOTAGE = (
+    "{info}"
     "{footage}\n\n"
     "THE OPERATOR'S HEADLINE: {headline}\n\n"
-    "{info}"
     "Write the caption."
 )
 
