@@ -1,0 +1,2 @@
+# Run on the VPS by sh — a CR at the end of each line breaks it.
+deploy/restart_when_idle.sh text eol=lf

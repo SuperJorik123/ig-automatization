@@ -85,3 +85,22 @@ def test_card_lines_star_the_pick_and_mark_the_choice():
     assert "4. One swerve kept this driver alive ⭐" in block
     assert "⚠️ verify the location" in block
     assert headlines.card_lines(None) == []
+
+
+def test_emoji_are_stripped_from_every_option():
+    raw = {"headlines": ["🚨 Truck runs red light 🚗💨", "Driver ✅ survives ⭐",
+                         "Family reunion 👨‍👩‍👧 at the gate", "1️⃣ swerve saved him",
+                         "😂😂"],
+           "pick": 0}
+    out = headlines.parse(json.dumps(raw))
+    assert out["headlines"] == ["Truck runs red light", "Driver survives",
+                                "Family reunion at the gate", "1 swerve saved him"]
+
+
+def test_strip_emoji_keeps_letters_and_punctuation():
+    text = "Café owner’s 3-hour rescue — “unbelievable”… Zürich, 100%?"
+    assert headlines.strip_emoji(text) == text
+
+
+def test_the_prompt_forbids_emoji():
+    assert "ABSOLUTELY NO EMOJI" in headlines._SYSTEM

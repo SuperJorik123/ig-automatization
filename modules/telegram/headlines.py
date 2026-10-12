@@ -78,10 +78,17 @@ _SYSTEM = (
     "  It must work muted: the text alone creates the question.\n"
     "  Front-load the hook: the first three words carry the story.\n"
     f"  Short: 5 to 12 words, at most {MAX_CHARS} characters. Short, common "
-    "words. Correct English. No hashtags, no emoji, no quotation marks "
-    "around the whole line, no ALL CAPS words, no trailing full stop.\n\n"
+    "words. Correct English. No hashtags, no quotation marks around the "
+    "whole line, no ALL CAPS words, no trailing full stop.\n"
+    "  ABSOLUTELY NO EMOJI — not one, in any headline, for any story, "
+    "however playful. No emoji, no emoticons, no pictographs, no symbols "
+    "(★ ✓ → ❗), no keycap digits. Letters, digits and ordinary punctuation "
+    "only. The banner's font cannot draw them, so an emoji prints as an "
+    "empty box on the video. A headline containing one is a failed "
+    "headline.\n\n"
     "TONE SWITCH:\n"
-    "  Funny, wholesome or lucky-escape stories: playful and warm is fine.\n"
+    "  Funny, wholesome or lucky-escape stories: playful and warm is fine — "
+    "in the words, never with emoji.\n"
     "  Anyone seriously hurt or killed, violence, disaster, a crime: a "
     "straight news headline. No teasing hook, no jokes, no curiosity bait — "
     "state what happened, soberly.\n\n"
@@ -117,10 +124,36 @@ def _user_prompt(info: str, footage: dict | None, current: str) -> str:
 _FENCE = re.compile(r"^```[a-zA-Z]*\s*\n?(.*?)\n?```$", re.DOTALL)
 
 
+# Emoji and pictographic symbols, plus what glues them together (ZWJ,
+# variation selectors, skin tones, keycap mark, tag characters). The prompt
+# forbids them; this is the guarantee, because the banner font has no glyph
+# for any of them. Letters and ordinary punctuation are outside every range.
+_EMOJI = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"   # mahjong … symbols & pictographs extended-A
+    "\U0001FC00-\U0001FFFF"
+    "←-⇿"           # arrows
+    "⌀-⏿"           # misc technical (⌚ ⏰ ⏩)
+    "①-⓿"           # enclosed alphanumerics (①)
+    "■-➿"           # shapes, misc symbols, dingbats (★ ✓ ❗)
+    "⤀-⥿"           # supplemental arrows
+    "⬀-⯿"           # misc symbols and arrows (⭐ ⬆)
+    "〰〽㊗㊙"
+    "︀-️"           # variation selectors
+    "‍⃣"            # zero-width joiner, keycap
+    "\U000E0020-\U000E007F"   # tag characters (flag sequences)
+    "]+")
+
+
+def strip_emoji(text: str) -> str:
+    """`text` without any emoji or pictographic symbol, spaces re-collapsed."""
+    return " ".join(_EMOJI.sub(" ", text or "").split())
+
+
 def _tidy(line: str) -> str:
-    """One headline as the banner should get it: one line, no wrapping quotes,
-    no trailing full stop."""
-    line = " ".join(str(line or "").split())
+    """One headline as the banner should get it: one line, no emoji, no
+    wrapping quotes, no trailing full stop."""
+    line = strip_emoji(str(line or ""))
     if len(line) >= 2 and line[0] in "\"'“‘" and line[-1] in "\"'”’":
         line = line[1:-1].strip()
     if line.endswith(".") and not line.endswith("..."):

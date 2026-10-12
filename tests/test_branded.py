@@ -184,16 +184,17 @@ def test_toggle_group_leaves_brands_outside_it_alone():
 def test_platform_keyboard_rows_and_defaults():
     plats = branded.platforms_for([_render(_brand(tg="@mir", yt="mir"))], 60)
     btns = _buttons(branded.platform_keyboard(plats, set()))
-    assert [b.callback_data for b in btns[:-2]] == ["b:p:0", "b:p:1"]
-    assert all(b.text.startswith("☐") for b in btns[:-2])   # all OFF by default
-    assert [b.callback_data for b in btns[-2:]] == ["b:publish", "b:cancel"]
+    assert [b.callback_data for b in btns[:-3]] == ["b:p:0", "b:p:1"]
+    assert all(b.text.startswith("☐") for b in btns[:-3])   # all OFF by default
+    assert [b.callback_data for b in btns[-3:]] == ["b:publish", "b:cancel",
+                                                    "b:sched"]
 
 
 def test_publish_button_names_the_preticked_platforms():
     plats = branded.platforms_for([_render(_brand(tg="@mir", yt="mir"))], 60)
     btns = _buttons(branded.platform_keyboard(plats, {0, 1}))
-    assert btns[-2].text == "🚀 Publish → TG · YT"
-    assert btns[-2].callback_data == "b:publish"
+    assert btns[-3].text == "🚀 Publish → TG · YT"
+    assert btns[-3].callback_data == "b:publish"
 
 
 def test_platform_keyboard_shows_brand_count():

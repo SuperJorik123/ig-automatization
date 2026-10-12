@@ -130,6 +130,20 @@ def init() -> None:
                    recorded_at TEXT NOT NULL,
                    PRIMARY KEY(chat_id, message_id))"""
         )
+        # Scheduled publishes from the news bot's publish picker. In the DB,
+        # not in memory, so a restart (a deploy) doesn't lose them; the
+        # payload is schedule.to_payload's JSON (renders by brand name).
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS scheduled(
+                   id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                   due_at     TEXT NOT NULL, -- UTC ISO
+                   chat_id    TEXT NOT NULL, -- the control group
+                   message_id INTEGER,       -- the picker turned schedule card
+                   payload    TEXT NOT NULL,
+                   status     TEXT NOT NULL, -- pending|running|done|cancelled|failed
+                   created_at TEXT NOT NULL)"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled(status)")
         # Added after the first release — ALTER only when the column is absent
         # so existing news.db files migrate without losing rows.
         cols = {r["name"] for r in c.execute("PRAGMA table_info(items)")}
@@ -431,3 +445,51 @@ def clear_group_messages(chat_id, message_ids: list[int]) -> None:
             "DELETE FROM group_messages WHERE chat_id=? AND message_id=?",
             [(str(chat_id), m) for m in message_ids],
         )
+
+
+# --------------------------------------------------------------------------- #
+# Scheduled publishes (news bot)                                              #
+# --------------------------------------------------------------------------- #
+
+
+def _scheduled(row) -> dict:
+    d = dict(row)
+    d["payload"] = json.loads(d["payload"])
+    d["due_at"] = datetime.fromisoformat(d["due_at"])
+    return d
+
+
+def add_scheduled(due_at: datetime, chat_id, message_id: int,
+                  payload: dict) -> int:
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO scheduled(due_at, chat_id, message_id, payload, status,"
+            " created_at) VALUES(?,?,?,?,'pending',?)",
+            (due_at.astimezone(timezone.utc).isoformat(timespec="seconds"),
+             str(chat_id), message_id, json.dumps(payload), _now()))
+        return cur.lastrowid
+
+
+def get_scheduled(sched_id: int) -> dict | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM scheduled WHERE id=?", (sched_id,)).fetchone()
+        return _scheduled(row) if row else None
+
+
+def scheduled_with_status(*statuses: str) -> list[dict]:
+    """Rows in any of `statuses`, soonest first."""
+    marks = ",".join("?" * len(statuses))
+    with _conn() as c:
+        rows = c.execute(f"SELECT * FROM scheduled WHERE status IN ({marks})"
+                         " ORDER BY due_at", statuses)
+        return [_scheduled(r) for r in rows]
+
+
+def claim_scheduled(sched_id: int, from_status: str, to_status: str) -> bool:
+    """Move a row from one status to another, only if it is still in the
+    first — the one guard against a post firing twice, or firing after a
+    cancel that raced it."""
+    with _conn() as c:
+        cur = c.execute("UPDATE scheduled SET status=? WHERE id=? AND status=?",
+                        (to_status, sched_id, from_status))
+        return cur.rowcount == 1

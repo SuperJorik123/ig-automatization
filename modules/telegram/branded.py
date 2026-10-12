@@ -223,6 +223,8 @@ def platform_keyboard(platforms: list, selected: set) -> InlineKeyboardMarkup:
                              else "▶ Publish", callback_data="b:publish"),
         InlineKeyboardButton("✕ Cancel", callback_data="b:cancel"),
     ])
+    # Same platforms, later: see modules/telegram/schedule.py.
+    rows.append([InlineKeyboardButton("🕒 Schedule", callback_data="b:sched")])
     return InlineKeyboardMarkup(rows)
 
 

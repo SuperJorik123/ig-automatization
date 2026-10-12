@@ -264,8 +264,15 @@ tar czf app.tar.gz --exclude=.git --exclude=__pycache__ --exclude=node_modules \
 scp app.tar.gz root@193.36.38.133:/tmp/
 ssh root@193.36.38.133 'cd /opt/ig-automatization2 && tar xzf /tmp/app.tar.gz \
     && .venv/bin/pip install -q -r requirements.txt \
-    && systemctl restart news-bot newsroom-bot'   # collector/dispatcher: PROHIBITED, see Services
+    && sh deploy/restart_when_idle.sh news-bot newsroom-bot'   # collector/dispatcher: PROHIBITED, see Services
 ```
+
+`restart_when_idle.sh` waits while `modules/telegram/data/busy` exists — the
+news bot keeps that file while it renders, sends a download, counts down to a
+publish or publishes — so a deploy never cuts a post in half. It gives up after
+an hour without restarting (the code is on disk; rerun it). Scheduled posts
+(🕒 on the publish picker, `/scheduled` lists them) are in `news.db` and are
+re-armed on startup; one due during the restart fires right after it.
 
 Excluding `modules/telegram/data/` is the important part — it holds the live
 SQLite queue and the Telethon session. `.env` and `credentials/` are excluded

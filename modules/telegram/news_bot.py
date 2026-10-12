@@ -68,8 +68,10 @@ Run:  py modules/telegram/news_bot.py
 """
 
 import asyncio
+import contextlib
 import datetime as dt
 import html
+import itertools
 import logging
 import os
 import sys
@@ -102,7 +104,7 @@ from modules.telegram import (  # noqa: E402
 )
 from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.twitter import publisher as tw_publisher  # noqa: E402
-from modules.telegram import branded, groups, headlines, translator  # noqa: E402
+from modules.telegram import branded, groups, headlines, schedule, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
@@ -159,6 +161,41 @@ _BOT_UPLOAD_LIMIT = 50 * 1024 * 1024
 # In-memory only; a bot restart expires open pickers (tapping one then says
 # so) — main() sweeps the orphaned downloads on startup.
 _pending = {}
+
+# The busy marker: a file that exists exactly while this process is rendering,
+# sending a download back, or publishing (scheduled posts included). A
+# restart in the middle of any of those loses it — half the platforms posted,
+# the rest never — so a deploy waits for the file to go away before it
+# restarts the unit (deploy/restart_when_idle.sh). Its content names what is
+# running, for the deploy's log. Removed on startup: a crash leaves it behind.
+_BUSY_PATH = os.path.join(config.TG_DATA_DIR, "busy")
+_busy_ops: dict = {}
+_busy_ids = itertools.count()
+
+
+def _write_busy() -> None:
+    try:
+        if _busy_ops:
+            os.makedirs(config.TG_DATA_DIR, exist_ok=True)
+            with open(_BUSY_PATH, "w", encoding="utf-8") as fh:
+                fh.write(", ".join(sorted(_busy_ops.values())) + "\n")
+        elif os.path.exists(_BUSY_PATH):
+            os.remove(_BUSY_PATH)
+    except OSError as exc:
+        log.warning("busy marker not updated: %s", exc)
+
+
+@contextlib.contextmanager
+def _busy(what: str):
+    key = next(_busy_ids)
+    _busy_ops[key] = what
+    _write_busy()
+    try:
+        yield
+    finally:
+        _busy_ops.pop(key, None)
+        _write_busy()
+
 
 # Extensions yt-dlp may hand back for a video; anything else from a URL is
 # treated as a photo.
@@ -581,6 +618,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if reply is not None and reply.message_id in _pending and text.strip():
         state = _pending[reply.message_id]
         field, value = branded.parse_reply(text)
+        # On the publish picker (or its time picker) a reply that reads as a
+        # time schedules the post — before it could be taken as a headline.
+        if field == "text" and state.get("mode") in ("publish", "schedule"):
+            when = schedule.parse_when(value)
+            if when is not None:
+                await _schedule_post(context, state, reply, when, msg)
+                return
+            if state["mode"] == "schedule":
+                _track(await msg.reply_text(
+                    "🕒 couldn't read that as a time — try 18:30, tomorrow "
+                    "9:00, 14.10 18:30 or +2h"))
+                return
         if field == "info":
             state["info"] = value
         else:
@@ -591,7 +640,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if field == "info" and mode == "plan":
             # The headline is still open on the card — write options from it.
             _start_headlines(state, reply)
-        if mode in ("rendering", "countdown"):
+        if mode in ("rendering", "countdown", "schedule"):
             # The headline is being burned in, or the publish is counting
             # down; an info reply was kept above and still reaches the
             # Instagram caption, and the message keeps showing what it shows.
@@ -852,6 +901,13 @@ def _start_countdown(bot, state: dict, message) -> None:
 
 
 async def _countdown(bot, state: dict, message) -> None:
+    # Busy from the first second: a restart during the grace period would
+    # drop a post the operator already sent off.
+    with _busy("publish countdown"):
+        await _countdown_then_publish(bot, state, message)
+
+
+async def _countdown_then_publish(bot, state: dict, message) -> None:
     try:
         left = _PUBLISH_GRACE_S
         while left > 0:
@@ -1058,6 +1114,43 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         _start_countdown(context.bot, state, q.message)
         return
 
+    if verb == "sched" and state.get("mode") == "publish":
+        if not state["sel_platforms"]:
+            await q.answer("Pick at least one platform.", show_alert=True)
+            return
+        await q.answer()
+        # The idle clock would publish from under the time picker; Back
+        # re-arms it.
+        _disarm_auto_publish(state)
+        state["mode"] = "schedule"
+        await q.edit_message_text(
+            schedule.picker_text(schedule.ticked_labels(
+                state["platforms"], state["sel_platforms"])),
+            reply_markup=schedule.picker_keyboard())
+        return
+
+    if verb == "back" and state.get("mode") == "schedule":
+        await q.answer()
+        state["mode"] = "publish"
+        _arm_auto_publish(context.bot, state, q.message)
+        await q.edit_message_text(
+            _publish_prompt_text(state),
+            reply_markup=branded.platform_keyboard(state["platforms"],
+                                                   state["sel_platforms"]))
+        return
+
+    if verb.startswith("at:") and state.get("mode") == "schedule":
+        when = dt.datetime.fromtimestamp(int(verb.split(":", 1)[1]),
+                                         schedule.TZ)
+        why = schedule.check(when)
+        if why:
+            await q.answer(f"Can't schedule: {why}.", show_alert=True)
+            await q.edit_message_reply_markup(schedule.picker_keyboard())
+            return
+        await q.answer()
+        await _schedule_post(context, state, q.message, when)
+        return
+
     if verb == "cancel":
         await q.answer()
         counting = state.get("mode") == "countdown"
@@ -1141,7 +1234,8 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
         return
 
     if verb == "dl":
-        await _do_download(q, context, state)
+        with _busy("sending a download"):
+            await _do_download(q, context, state)
         return
 
     if verb == "go":
@@ -1169,10 +1263,11 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
         await q.answer()
         state["mode"] = "rendering"  # a second tap on Render must not render twice
         state["plan_platforms"] = set(_plan_keys(state))
-        if state["card"]:
-            await _do_render_card(q, context, state)
-        else:
-            await _do_render(q, context, state)
+        with _busy("rendering"):
+            if state["card"]:
+                await _do_render_card(q, context, state)
+            else:
+                await _do_render(q, context, state)
         return
 
     await q.answer()  # stale/unknown verb for a plan card
@@ -1717,6 +1812,12 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
 
 
 async def _do_publish(message, bot, state: dict) -> None:
+    """_publish_pairs under the busy marker — a deploy waits for it."""
+    with _busy("publishing"):
+        await _publish_pairs(message, bot, state)
+
+
+async def _publish_pairs(message, bot, state: dict) -> None:
     """Push each selected pair through its platform publisher. The headline is
     already translated per brand — Telegram destinations get lang "" so
     publisher.publish doesn't translate again.
@@ -1838,8 +1939,197 @@ async def _do_publish(message, bot, state: dict) -> None:
 
     if state.get("auto_published"):
         lines.insert(0, f"⏱ auto-published after {_AUTO_PUBLISH_S // 60} min idle")
+    if state.get("note"):
+        lines.insert(0, state["note"])
     _cleanup(state)
     await message.edit_text("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# Scheduled publishing (modules/telegram/schedule.py)                         #
+# --------------------------------------------------------------------------- #
+#
+# 🕒 Schedule on the publish picker stores the post in queue_store's
+# `scheduled` table and arms a JobQueue job for it; startup re-arms whatever is
+# still pending, so a deploy doesn't lose a schedule. The renders move into
+# media/scheduled/ — the nightly sweep and the startup sweep only look at the
+# flat media/ directory, and either would delete a render that has to wait
+# longer than a day. A post that was mid-publish when the process died is NOT
+# fired again (some platforms may already have it): it is marked failed and
+# the operator is told to check.
+
+_SCHED_DIR = os.path.join(config.TG_DATA_DIR, "media", "scheduled")
+
+
+def _sched_job_name(sched_id: int) -> str:
+    return f"sched-{sched_id}"
+
+
+def _arm_scheduled(job_queue, sched_id: int, when: dt.datetime) -> None:
+    delay = (when - dt.datetime.now(dt.timezone.utc)).total_seconds()
+    job_queue.run_once(_fire_scheduled, when=max(1.0, delay), data=sched_id,
+                       name=_sched_job_name(sched_id))
+
+
+def _remove_files(paths) -> None:
+    for path in paths:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+async def _schedule_post(context, state: dict, message, when: dt.datetime,
+                         reply_msg=None) -> None:
+    """Turn an open publish picker into a scheduled post. `message` is the
+    picker; `reply_msg` is the operator's time reply, when that's how the time
+    came in (errors are answered there)."""
+    async def refuse(why: str) -> None:
+        if reply_msg is not None:
+            _track(await reply_msg.reply_text(f"🕒 can't schedule: {why}"))
+
+    why = schedule.check(when)
+    if why:
+        await refuse(why)
+        return
+    if context.job_queue is None:
+        await refuse("the bot has no job queue (python-telegram-bot[job-queue])")
+        return
+    if not state["sel_platforms"]:
+        await refuse("no platform is ticked")
+        return
+
+    state["mode"] = "scheduled"  # nothing else may act on this picker now
+    _pending.pop(message.message_id, None)
+    renders = {r["path"] for r in state["renders"]}
+    try:
+        os.makedirs(_SCHED_DIR, exist_ok=True)
+        for r in state["renders"]:
+            new = os.path.join(_SCHED_DIR, os.path.basename(r["path"]))
+            os.replace(r["path"], new)
+            r["path"] = new
+    except OSError as exc:
+        log.error("scheduling failed moving the renders: %s", exc)
+        state["files"] += [r["path"] for r in state["renders"]]
+        _cleanup(state)
+        await message.edit_text(f"❌ couldn't schedule: {exc}")
+        return
+    # Everything else this post downloaded (the source clip) can go now.
+    state["files"] = [p for p in state["files"] if p not in renders]
+    _cleanup(state)
+
+    sched_id = queue_store.add_scheduled(when, CHAT_ID, message.message_id,
+                                         schedule.to_payload(state))
+    _arm_scheduled(context.job_queue, sched_id, when)
+    ticked = schedule.ticked_labels(state["platforms"], state["sel_platforms"])
+    log.info("scheduled #%d for %s → %s", sched_id, when.isoformat(),
+             ", ".join(ticked))
+    await message.edit_text(
+        schedule.scheduled_text(sched_id, when, ticked, state.get("text", "")),
+        reply_markup=schedule.cancel_keyboard(sched_id))
+
+
+async def _fire_scheduled(context) -> None:
+    await _run_scheduled(context.bot, context.job.data)
+
+
+async def _run_scheduled(bot, sched_id: int) -> None:
+    """Publish one scheduled post, exactly once."""
+    if not queue_store.claim_scheduled(sched_id, "pending", "running"):
+        return  # cancelled, or already fired
+    row = queue_store.get_scheduled(sched_id)
+    brands = branded.available_brands(config.BRANDS)
+    state, missing = schedule.from_payload(row["payload"], brands)
+    state["note"] = f"🕒 scheduled #{sched_id}"
+    if missing:
+        state["note"] += "\n⚠️ no longer configured, skipped: " + ", ".join(missing)
+    try:
+        msg = _track(await bot.send_message(
+            CHAT_ID, f"⏳ scheduled #{sched_id} is going out …",
+            reply_to_message_id=row["message_id"],
+            allow_sending_without_reply=True))
+        if not state["sel_platforms"]:
+            _remove_files(state["files"])
+            await msg.edit_text(state["note"] + "\n❌ nothing left to publish")
+            queue_store.claim_scheduled(sched_id, "running", "failed")
+        else:
+            await _do_publish(msg, bot, state)
+            queue_store.claim_scheduled(sched_id, "running", "done")
+    except Exception:
+        log.exception("scheduled #%d failed", sched_id)
+        queue_store.claim_scheduled(sched_id, "running", "failed")
+        _remove_files(state["files"])
+    try:
+        await bot.edit_message_text(
+            f"🕒 scheduled #{sched_id} went out {schedule.fmt(schedule.now())} "
+            "— results below",
+            chat_id=CHAT_ID, message_id=row["message_id"])
+    except Exception:  # card deleted (weekly wipe) — the results still landed
+        pass
+
+
+async def _on_schedule_cancel(q, context) -> None:
+    """✕ Cancel schedule ("s:<id>:x") — DB-routed, so it works after a restart."""
+    try:
+        sched_id = int(q.data.split(":")[1])
+    except (IndexError, ValueError):
+        await q.answer()
+        return
+    if not queue_store.claim_scheduled(sched_id, "pending", "cancelled"):
+        row = queue_store.get_scheduled(sched_id)
+        status = row["status"] if row else "gone"
+        await q.answer(f"Too late — this post is {status}.", show_alert=True)
+        return
+    await q.answer()
+    if context.job_queue is not None:
+        for job in context.job_queue.get_jobs_by_name(_sched_job_name(sched_id)):
+            job.schedule_removal()
+    row = queue_store.get_scheduled(sched_id)
+    _remove_files(r["path"] for r in row["payload"]["renders"])
+    log.info("scheduled #%d cancelled", sched_id)
+    await q.edit_message_text(f"✕ scheduled #{sched_id} cancelled — nothing "
+                              "was published")
+
+
+def _restore_scheduled(app) -> None:
+    """Startup: re-arm pending posts; report any a restart cut off mid-publish."""
+    for row in queue_store.scheduled_with_status("running"):
+        queue_store.claim_scheduled(row["id"], "running", "failed")
+        _remove_files(r["path"] for r in row["payload"]["renders"])
+        log.error("scheduled #%d was interrupted mid-publish by a restart — "
+                  "some platforms may have it, the rest don't", row["id"])
+        app.create_task(app.bot.send_message(
+            CHAT_ID, f"⚠️ scheduled #{row['id']} was interrupted mid-publish by "
+            "a restart. Some platforms may already have it — check the "
+            "accounts before reposting.",
+            reply_to_message_id=row["message_id"],
+            allow_sending_without_reply=True))
+    pending = queue_store.scheduled_with_status("pending")
+    for row in pending:
+        _arm_scheduled(app.job_queue, row["id"], row["due_at"])
+    if pending:
+        log.info("scheduled posts re-armed: %s", ", ".join(
+            f"#{r['id']} {schedule.fmt(r['due_at'])}" for r in pending))
+
+
+async def cmd_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/scheduled — what is waiting to go out, soonest first."""
+    _track(update.effective_message)
+    rows = queue_store.scheduled_with_status("pending", "running")
+    if not rows:
+        _track(await update.effective_message.reply_text("🕒 nothing scheduled"))
+        return
+    lines = []
+    for r in rows:
+        p = r["payload"]
+        ticked = [p["platforms"][i]["label"] for i in p["selected"]
+                  if i < len(p["platforms"])]
+        state = " (publishing now)" if r["status"] == "running" else ""
+        lines.append(f"#{r['id']} · {schedule.fmt(r['due_at'])} "
+                     f"({schedule.fmt_in(r['due_at'])}){state} → "
+                     f"{' · '.join(ticked)}\n   📰 {p.get('text', '')[:120]}")
+    _track(await update.effective_message.reply_text(
+        "🕒 scheduled:\n\n" + "\n\n".join(lines)))
 
 
 # --------------------------------------------------------------------------- #
@@ -1971,6 +2261,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if q.message.chat.id != CHAT_ID:
         await q.answer()
+        return
+
+    # Scheduled posts live in the DB, not in _pending — routed before it.
+    if (q.data or "").startswith("s:"):
+        await _on_schedule_cancel(q, context)
         return
 
     state = _pending.get(q.message.message_id)
@@ -2215,9 +2510,10 @@ async def _on_start(app) -> None:
                                         first=120, name="ig-token-refresh")
             log.info("IG token refresh scheduled daily for %s (tokens older than %d d)",
                      ", ".join(config.IG_GRAPH_ACCOUNTS), IG_TOKEN_MAX_AGE_DAYS)
+        _restore_scheduled(app)
     else:
-        log.warning("no job queue — weekly cleanup NOT scheduled "
-                    "(install python-telegram-bot[job-queue])")
+        log.warning("no job queue — weekly cleanup and scheduled posts NOT "
+                    "scheduled (install python-telegram-bot[job-queue])")
     if await mtproto.ensure_ready():
         log.info("big files: on — videos up to 2 GB can be branded and sent to YouTube")
     else:
@@ -2253,6 +2549,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     errmail.install("news_bot")  # every logged ERROR -> one email to the operator
+    _write_busy()  # nothing is running yet: clear a marker a crash left behind
     _sweep_orphans()
     queue_store.init()  # the autopilot reads/writes the same DB as the collector
     # PTB's 5 s read timeout is too tight for the VPS: Telegram delivered a
@@ -2267,6 +2564,7 @@ def main() -> None:
     app.add_handler(CommandHandler("autopilot", cmd_autopilot, filters=control))
     app.add_handler(CommandHandler("asks", cmd_asks, filters=control))
     app.add_handler(CommandHandler("next", cmd_next, filters=control))
+    app.add_handler(CommandHandler("scheduled", cmd_scheduled, filters=control))
     # Chat filter limits the bot to the control group; ~COMMAND skips /commands.
     app.add_handler(MessageHandler(control & ~filters.COMMAND, on_message))
     app.add_handler(CallbackQueryHandler(on_callback))
