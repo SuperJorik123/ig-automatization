@@ -165,8 +165,17 @@ SCORER_MODEL = os.environ.get("SCORER_MODEL", "").strip() or TRANSLATE_MODEL
 # of tokens (~$0.02 a caption), so it is the one leg here worth being able to
 # turn off without touching a model id. Off, the bare headline is posted, which
 # is exactly what shipped before this existed.
+#
+# NO SEARCH since 2026-10-12: the caption is written from the operator's info
+# only, and caption.searchless() strips ":online" from whatever is set here.
 IG_CAPTION_MODEL = (os.environ.get("IG_CAPTION_MODEL", "").strip()
-                    or "openai/gpt-5.6-luna:online")
+                    or "openai/gpt-5.6-luna")
+# Headline options (modules/telegram/headlines.py): an `info:` reply on a plan
+# card asks this model for five on-screen headlines. Few calls, short output,
+# and the headline is what every platform carries — so a top model rather
+# than the cheap caption tier (~$0.01-0.02 a batch).
+HEADLINE_MODEL = (os.environ.get("HEADLINE_MODEL", "").strip()
+                  or "anthropic/claude-opus-5.5")
 IG_CAPTION_ENABLED = os.environ.get("IG_CAPTION_ENABLED", "1").strip().lower() not in (
     "0", "false", "no", "off"
 )

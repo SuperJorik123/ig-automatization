@@ -26,6 +26,8 @@ the flat list.
 
 Callback namespace "b:" (the manual picker owns t:/y:/e:, asks own r:):
     b:go  b:edit  b:asis  b:cancel      the plan card
+    b:dl                                plan card: send the original back, post nothing
+    b:h:<i>                             plan card: use AI headline option i
     b:g:<i> b:custom b:groups           editor brands, collapsed (i indexes the groups)
     b:t:<i>                             editor brands, expanded (i indexes the brands)
     b:lay:<layout>  b:pk:<key>  b:done  editor design / platforms / back to the card
@@ -332,13 +334,21 @@ def _design_row(layouts: list, layout) -> list:
             for lay, label in layouts]
 
 
-def plan_keyboard(layouts: list = (), layout=None) -> InlineKeyboardMarkup:
-    """Render / Change / Post as-is / Cancel, with the design row right on the
-    card when a photo post has more than one design to choose from."""
+def plan_keyboard(layouts: list = (), layout=None, n_headlines: int = 0,
+                  chosen=None) -> InlineKeyboardMarkup:
+    """Render / Change / Download / Post as-is / Cancel, with the design row
+    right on the card when a photo post has more than one design to choose
+    from, and a 1-N row when AI headline options are on offer (`chosen` is
+    the one currently set, marked ●)."""
     rows = [[InlineKeyboardButton("🎬 Render", callback_data="b:go"),
              InlineKeyboardButton("✏️ Change", callback_data="b:edit")]]
     if len(layouts) > 1:
         rows.insert(0, _design_row(layouts, layout))
+    if n_headlines:
+        rows.insert(0, [InlineKeyboardButton(
+            f"{'● ' if i == chosen else ''}{i + 1}", callback_data=f"b:h:{i}")
+            for i in range(n_headlines)])
+    rows.append([InlineKeyboardButton("⬇ Download", callback_data="b:dl")])
     rows.append([InlineKeyboardButton("📤 Post as-is", callback_data="b:asis"),
                  InlineKeyboardButton("✕ Cancel", callback_data="b:cancel")])
     return InlineKeyboardMarkup(rows)

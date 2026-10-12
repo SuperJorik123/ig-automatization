@@ -1,6 +1,13 @@
 """
 modules/instagram/caption.py — a headline into a full Instagram caption.
 
+NO WEB SEARCH (2026-10-12, owner's decision). Everything below that talks
+about `:online` describes how this used to work. The caption is now written
+from the operator's `info:` reply, the vision report and the headline ONLY:
+`searchless` strips `:online` from whatever model id is configured, and both
+system prompts tell the model it has no web access and must not fill gaps
+from memory.
+
 Instagram is the one platform in this repo where the burned-in headline is not
 enough on its own. A Telegram post carries the video and a line of text, a
 tweet is 280 characters — but an IG caption is read as the story, and the
@@ -249,8 +256,8 @@ _GROWTH_RULES = (
     "and what it did. No wordplay, no pun, no question, no teaser that "
     "withholds the point, no hashtag, no emoji, no \"Breaking\". It is not "
     "the operator's headline copied out: write it for search. It obeys the "
-    "same FAITHFUL rule as everything else — a place or a name your sources "
-    "do not give stays out of it.\n"
+    "same FAITHFUL rule as everything else — a place or a name you were not "
+    "given stays out of it.\n"
     "KEYWORDS IN THE PARAGRAPHS — work one or two further phrases people "
     "search for this story into the paragraphs naturally: the town and the "
     "region, the event's common name, the institution's full name. Normal "
@@ -275,19 +282,20 @@ _INFO_RULES = (
     "INFO, it was written by the newsroom and is the SOURCE OF TRUTH: the "
     "outlet or account the story came from, who the people are, where and "
     "when it happened, what is confirmed, and WHAT HAPPENS in the media. It "
-    "outranks everything else you are given — the web search, the headline "
-    "and any report of what the media shows — wherever they disagree, and on "
-    "every kind of fact. Use its names, sources and "
-    "places to find the right story when you search. It may name a person or "
-    "a place nothing else names. Take the facts out of it and write them into "
+    "outranks everything else you are given — the headline and any report of "
+    "what the media shows — wherever they disagree, and on every kind of "
+    "fact. It is your ONLY source for names, places, dates, outcomes and "
+    "sources. It may name a person or a place nothing else names. Take the facts out of it and write them into "
     "the caption; never copy it in as a quotation, and never mention that you "
     "were given it.\n"
 )
 
 _SYSTEM = (
     "You write the Instagram captions for a news account. You are given one "
-    "headline. Search the web for that story as it stands today, then write "
-    "the account's caption for it.\n\n"
+    "headline and, usually, the operator's info about the story. You have NO "
+    "web access and must not draw on anything you remember about the story: "
+    "write the account's caption from what you were given and nothing "
+    "else.\n\n"
     "SHAPE — exactly this, and nothing else:\n"
     "  first line: the search line (below).\n"
     "  a blank line.\n"
@@ -304,14 +312,14 @@ _SYSTEM = (
     "  last line: the hashtags.\n\n"
     + _GROWTH_RULES +
     "FAITHFUL — every fact, name, number, date and quote in the caption must "
-    "come from the headline, from the operator's info when there is any, or "
-    "from what your search actually returns. Invent "
-    "nothing: no background you did not read, no consequence, no speculation, "
-    "no plausible-sounding detail, no quote you cannot source. If the search "
-    "returns little, write ONE short paragraph — a thin caption is "
+    "come from the headline or from the operator's info. Invent "
+    "nothing: no background you were not given, no consequence, no "
+    "speculation, no plausible-sounding detail, no quote you cannot source. "
+    "If you were given little, write ONE short paragraph — a thin caption is "
     "correct, a padded one is a lie on a news account. Never give a death "
-    "toll, a casualty count, a suspect's name or a cause as settled when your "
-    "sources disagree: attribute it (\"police said\") or leave it out.\n"
+    "toll, a casualty count, a suspect's name or a cause as settled unless "
+    "the info states it as confirmed: attribute it (\"police said\", "
+    "\"reports claim\") or leave it out.\n"
     "REGISTER — neutral wire-service prose, the way Reuters or AP writes. No "
     "hype, no editorialising, no adjective doing an opinion's work, no "
     "exclamation marks, no emoji, no rhetorical questions, no first person, "
@@ -346,22 +354,19 @@ _SYSTEM_FOOTAGE = (
     "report of what one video or photo ACTUALLY SHOWS — written by someone who "
     "watched it — and the headline its operator typed. Write the account's "
     "caption for that media.\n\n"
-    "THE FOOTAGE OUTRANKS THE SEARCH AND THE HEADLINE — NOT THE OPERATOR. The "
+    "THE FOOTAGE OUTRANKS THE HEADLINE — NOT THE OPERATOR. The "
     "caption describes the media in front of you and nothing else. When the "
     "message carries OPERATOR'S INFO, that is a human who watched the media "
     "and it comes first, before the report (see OPERATOR'S INFO below). "
-    "Search the web to find out WHICH event this is and "
-    "to put names, places, dates and official responses on it — but the search "
-    "serves the footage, never the other way round. Anything it returns that "
-    "CONTRADICTS the report, or that belongs to a different event which merely "
-    "matches the headline's words, is the wrong story: drop it and write from "
-    "the footage alone. A search that finds nothing costs this caption "
-    "nothing — you have a full account of what happens, which is all a caption "
-    "needs. The headline does not outrank the report either; it is the "
+    "You have NO web access and must not draw on anything you remember about "
+    "this story: names, places, dates and official responses come from the "
+    "operator's info and from nowhere else. Without them you still have a "
+    "full account of what happens, which is all a caption needs. The headline does not outrank the report either; it is the "
     "operator's guess at what the media shows, and where the two disagree the "
     "report wins.\n\n"
     "PICK THE REGISTER FROM WHAT YOU HAVE:\n"
-    "  A REPORTED EVENT — your search confirms a real news story behind this "
+    "  A REPORTED EVENT — the operator's info says there is a real news story "
+    "behind this "
     "media: a crash, a court ruling, a strike, an attack, an official "
     "announcement. Write it as the news. Neutral wire-service prose, the way "
     "Reuters or AP writes: who and what and where and when first, then the "
@@ -383,7 +388,7 @@ _SYSTEM_FOOTAGE = (
     "  a blank line.\n"
     "  last line: the hashtags.\n\n"
     + _GROWTH_RULES +
-    "  When the clip is the story and no search confirms where it happened, "
+    "  When the clip is the story and the info does not say where it happened, "
     "the search line's keyword is what happens in it (\"bear walks behind "
     "elderly man on residential street\") — never a place you were not "
     "given.\n\n"
@@ -418,15 +423,13 @@ _SYSTEM_FOOTAGE = (
     "Where the report stops, simply stop — a reader does not need to be told "
     "that what you cannot see, you did not see.\n\n"
     "FAITHFUL — every fact, name, number, date and quote comes from the "
-    "report, from the headline, from the operator's info, or from a search "
-    "result that genuinely matches the report. Invent nothing. Do not name a "
-    "person neither the report nor the operator's info names, however "
-    "familiar somebody looks in your search results — that "
-    "mistake is the reason you are given the report at all. Do not state a "
-    "city, a country or a date the report leaves open: \"a residential "
-    "street\" stays a residential street. Never give a death toll, a casualty "
-    "count, a suspect's name or a cause as settled when your sources "
-    "disagree — attribute it (\"police said\") or leave it out.\n"
+    "report, from the headline or from the operator's info. Invent nothing. "
+    "Do not name a person neither the report nor the operator's info names, "
+    "however familiar somebody looks. Do not state a city, a country or a "
+    "date the info and the report leave open: \"a residential street\" "
+    "stays a residential street. Never give a death toll, a casualty count, "
+    "a suspect's name or a cause as settled unless the info states it as "
+    "confirmed — attribute it (\"police said\") or leave it out.\n"
     "REGISTER — no hype, no editorialising, no adjective doing an opinion's "
     "work, no exclamation marks, no emoji, no rhetorical questions, no first "
     "person, no \"Breaking:\", no call to action other than the one share "
@@ -870,6 +873,14 @@ def _drop_headline(body: str, headline: str) -> str:
     return body
 
 
+def searchless(model: str) -> str:
+    """`model` with OpenRouter's `:online` search suffix stripped. The caption
+    is written from the operator's info alone (2026-10-12), and a VPS `.env`
+    that still names an `:online` id must not quietly bring the search back."""
+    model = (model or "").strip()
+    return model[:-len(":online")] if model.endswith(":online") else model
+
+
 def expand(headline: str, footage: dict | None = None,
            model: str | None = None, info: str = "") -> str:
     """The caption BODY for `headline`: paragraphs, blank line, hashtag pool.
@@ -916,7 +927,7 @@ def expand(headline: str, footage: dict | None = None,
 
     try:
         resp = _client.chat.completions.create(
-            model=model or config.IG_CAPTION_MODEL,
+            model=searchless(model or config.IG_CAPTION_MODEL),
             max_tokens=MAX_TOKENS,
             messages=[
                 {"role": "system", "content": system},

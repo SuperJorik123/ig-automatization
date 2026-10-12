@@ -92,7 +92,13 @@ def _editor(brands, selected, custom=False, layouts=(), layout=None,
 
 def test_plan_keyboard_is_go_change_asis_cancel():
     data = [b.callback_data for b in _buttons(branded.plan_keyboard())]
-    assert data == ["b:go", "b:edit", "b:asis", "b:cancel"]
+    assert data == ["b:go", "b:edit", "b:dl", "b:asis", "b:cancel"]
+
+
+def test_plan_keyboard_offers_headline_options_on_top():
+    rows = branded.plan_keyboard(n_headlines=5, chosen=2).inline_keyboard
+    assert [b.callback_data for b in rows[0]] == [f"b:h:{i}" for i in range(5)]
+    assert [b.text for b in rows[0]] == ["1", "2", "● 3", "4", "5"]
 
 
 def test_editor_marks_selection_and_disables_missing_logo():

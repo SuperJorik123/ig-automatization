@@ -215,9 +215,10 @@ def test_empty_headline_stays_empty(on, monkeypatch):
 
 
 def test_the_headline_is_the_user_message(on, monkeypatch):
+    """An `:online` id left in .env is stripped: the caption never searches."""
     fake = _client(monkeypatch, content=EXAMPLE)
     caption.expand("Pentagon criticized")
-    assert fake.calls[0]["model"] == "openai/gpt-5.5:online"
+    assert fake.calls[0]["model"] == "openai/gpt-5.5"
     assert fake.calls[0]["messages"][-1] == {"role": "user",
                                              "content": "Pentagon criticized"}
 
@@ -908,8 +909,22 @@ def test_the_footage_prompt_makes_the_media_outrank_the_search(on, monkeypatch):
     fake = _client(monkeypatch, content=EXAMPLE)
     caption.expand("Man walks past bear", footage=FOOTAGE)
     system = _system_of(fake).lower()
-    assert "the footage outranks the search and the headline" in system
-    assert "contradict" in system
+    assert "the footage outranks the headline" in system
+    assert "no web access" in system
+    assert "search the web" not in system
+
+
+def test_the_headline_prompt_has_no_web_access(on, monkeypatch):
+    fake = _client(monkeypatch, content=EXAMPLE)
+    caption.expand("Pentagon criticized", info="Source: Reuters")
+    system = _system_of(fake).lower()
+    assert "no web access" in system
+    assert "search the web" not in system
+
+
+def test_searchless_strips_only_the_online_suffix():
+    assert caption.searchless("openai/gpt-5.6-luna:online") == "openai/gpt-5.6-luna"
+    assert caption.searchless("openai/gpt-5.6-luna") == "openai/gpt-5.6-luna"
 
 
 def test_the_footage_prompt_forbids_restating_the_headline(on, monkeypatch):

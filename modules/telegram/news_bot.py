@@ -102,7 +102,7 @@ from modules.telegram import (  # noqa: E402
 )
 from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.twitter import publisher as tw_publisher  # noqa: E402
-from modules.telegram import branded, groups, translator  # noqa: E402
+from modules.telegram import branded, groups, headlines, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
@@ -312,6 +312,7 @@ def _plan_text(state: dict) -> str:
     else:
         lines += branded.footage_lines(state.get("footage") or {})
     lines += _info_lines(state)
+    lines += _headline_lines(state)
     lines.append("\n".join([
         _PLAN_RULE,
         *branded.plan_lines(state["brands"], state["sel_brands"],
@@ -319,8 +320,23 @@ def _plan_text(state: dict) -> str:
                             _photo_count(state["media"])),
         _PLAN_RULE]))
     lines.append("↩️ reply to this message to replace the headline\n"
-                 + _INFO_HINT)
+                 + _INFO_HINT + " — and get 5 headline options")
     return "\n\n".join(lines)
+
+
+def _headline_lines(state: dict) -> list:
+    """The AI headline options on the card (see _start_headlines): a
+    placeholder while they are being written, then the numbered list."""
+    if _task_running(state.get("headline_task")):
+        return ["✨ writing headline options…"]
+    if state.get("headline_failed"):
+        return ["⚠️ headline options failed — reply with your own"]
+    return headlines.card_lines(state.get("headline_opts"),
+                                state.get("headline_pick"))
+
+
+def _task_running(task) -> bool:
+    return task is not None and not task.done()
 
 
 def _plan_markup(state: dict) -> InlineKeyboardMarkup:
@@ -328,7 +344,10 @@ def _plan_markup(state: dict) -> InlineKeyboardMarkup:
     layouts = (branded.card_layouts(_photo_count(state["media"]))
                if state["gate_kind"] == "photo" else [])
     if not state.get("editing"):
-        return branded.plan_keyboard(layouts, state.get("layout"))
+        opts = state.get("headline_opts") or {}
+        return branded.plan_keyboard(layouts, state.get("layout"),
+                                     len(opts.get("headlines", ())),
+                                     state.get("headline_pick"))
     return branded.plan_edit_keyboard(
         state["brands"], state["sel_brands"], state.get("custom_brands", False),
         layouts, state.get("layout"), _plan_available(state),
@@ -468,9 +487,10 @@ def _cleanup(state: dict) -> None:
     Cancels a footage analysis still in flight first: its download would land
     in a directory this is about to empty, and its edit would land on a picker
     that no longer exists."""
-    task = state.get("vision_task")
-    if task is not None and not task.done():
-        task.cancel()
+    for key in ("vision_task", "headline_task"):
+        task = state.get(key)
+        if task is not None and not task.done():
+            task.cancel()
     _disarm_auto_publish(state)
     for path in state.get("files", ()):
         try:
@@ -566,7 +586,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else:
             state["text"] = value
             state["cap_src"] = "edited"
+            state["headline_pick"] = None  # option 6: the operator's own
         mode = state.get("mode")
+        if field == "info" and mode == "plan":
+            # The headline is still open on the card — write options from it.
+            _start_headlines(state, reply)
         if mode in ("rendering", "countdown"):
             # The headline is being burned in, or the publish is counting
             # down; an info reply was kept above and still reaches the
@@ -936,6 +960,42 @@ def _start_watching(bot, state: dict, message) -> None:
         _watch_media(bot, state, message))
 
 
+def _start_headlines(state: dict, message) -> None:
+    """(Re)write the AI headline options from the operator's info, in the
+    background — a newer info reply replaces a call still in flight, and an
+    empty `info:` (taking the info back) clears the options."""
+    task = state.get("headline_task")
+    if task is not None and not task.done():
+        task.cancel()
+    state.update(headline_opts=None, headline_pick=None, headline_failed=False)
+    state["headline_task"] = (asyncio.create_task(_write_headlines(state, message))
+                              if state.get("info") else None)
+
+
+async def _write_headlines(state: dict, message) -> None:
+    """Never raises. Uses whatever footage analysis has landed by now rather
+    than waiting for it — the options are about the operator's info."""
+    try:
+        opts = await asyncio.to_thread(
+            headlines.propose, state["info"], state.get("footage") or {},
+            state["text"])
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.error("headline options failed: %s", exc)
+        opts = None
+    state["headline_opts"] = opts
+    state["headline_failed"] = opts is None
+    state["headline_task"] = None
+    if state.get("mode") != "plan":
+        return
+    try:
+        await message.edit_text(_plan_text(state),
+                                reply_markup=_plan_markup(state))
+    except Exception:  # message deleted, or unchanged text
+        pass
+
+
 def _stop_watching(state: dict) -> None:
     """Posting as-is renders nothing, so nothing will read the analysis."""
     task = state.get("vision_task")
@@ -1065,6 +1125,25 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
         await redraw()
         return
 
+    if verb.startswith("h:"):
+        opts = (state.get("headline_opts") or {}).get("headlines", [])
+        i = int(verb.split(":", 1)[1])
+        if i >= len(opts):
+            await q.answer("Those options were replaced — pick again.",
+                           show_alert=True)
+            await redraw()
+            return
+        await q.answer()
+        state["text"] = opts[i]
+        state["cap_src"] = "AI"
+        state["headline_pick"] = i
+        await redraw()
+        return
+
+    if verb == "dl":
+        await _do_download(q, context, state)
+        return
+
     if verb == "go":
         # "b:go" is the 🎬 Render button. Validate BEFORE answering: a query
         # can only be answered once, so an alert sent after a bare q.answer()
@@ -1097,6 +1176,74 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
         return
 
     await q.answer()  # stale/unknown verb for a plan card
+
+
+async def _send_original(chat, item: dict) -> None:
+    """One media item of a post back into the group, untouched. Telegram-held
+    media is re-sent by file_id (no size limit, nothing downloaded); a URL
+    post's file goes up from disk — through the user client past the Bot
+    API's 50 MB upload cap, like a big render preview."""
+    caption = "⬇ original"
+    if not item.get("path"):
+        if item["type"] == "video":
+            _track(await chat.send_video(video=item["file_id"], caption=caption))
+        else:
+            _track(await chat.send_photo(photo=item["file_id"], caption=caption))
+        return
+
+    path = item["path"]
+    if item["type"] != "video":
+        with open(path, "rb") as fh:
+            try:
+                _track(await chat.send_photo(photo=fh, caption=caption))
+            except BadRequest:  # too big / odd dimensions for a photo
+                fh.seek(0)
+                _track(await chat.send_document(document=fh, caption=caption))
+        return
+
+    try:
+        w, h, duration = await asyncio.to_thread(shorts_format.probe, path)
+    except Exception:  # no ffprobe — Telegram guesses the player size
+        w = h = duration = 0
+    size = os.path.getsize(path)
+    if size > _BOT_UPLOAD_LIMIT:
+        if not await mtproto.ensure_ready():
+            raise RuntimeError(f"video is {mtproto.human_size(size)} — over the "
+                               f"Bot API's 50 MB, and {mtproto.unavailable_reason()}")
+        # Sent from the user account, so on_message sees it: the caption must
+        # carry _PREVIEW_MARK or it opens a fresh card for its own download.
+        await mtproto.send_video(chat.id, path, _PREVIEW_MARK + "original",
+                                 w, h, int(duration))
+        return
+    with open(path, "rb") as fh:
+        _track(await chat.send_video(video=fh, caption=caption,
+                                     width=w or None, height=h or None,
+                                     duration=int(duration) or None,
+                                     supports_streaming=True))
+
+
+async def _do_download(q, context, state: dict) -> None:
+    """⬇ Download: send the post's media back as it came — no render, no
+    caption work, nothing published — and close the card."""
+    await q.answer()
+    state["mode"] = "downloading"  # a second tap must not send twice
+    _pending.pop(q.message.message_id, None)
+    await q.edit_message_text("⬇ sending the original …")
+    sent, errors = 0, []
+    try:
+        for item in state["media"]:
+            try:
+                await _send_original(q.message.chat, item)
+                sent += 1
+            except Exception as exc:
+                log.error("download send failed: %s", exc)
+                errors.append(str(exc)[:200])
+    finally:
+        _cleanup(state)  # the files are in the chat now
+    lines = [f"⬇ sent {sent} file{'' if sent == 1 else 's'} — nothing was "
+             "rendered or published"]
+    lines += [f"❌ {e}" for e in errors]
+    await q.edit_message_text("\n".join(lines))
 
 
 def _preselect(state: dict) -> set:
