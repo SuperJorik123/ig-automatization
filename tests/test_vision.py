@@ -22,14 +22,11 @@ from shared import config, vision
 
 
 GOOD = {
-    "summary": "An elderly man walks along a street as a bear crosses behind him.",
-    "beats": [
-        "A man walks along a pavement past parked cars.",
-        "A bear steps out of the treeline a few feet behind him.",
-        "He turns, sees the bear and backs away.",
-    ],
-    "audible": "Bystanders shouting in English, warning the man to turn around.",
-    "setting": "A residential street, daytime.",
+    "on_screen_text": "02/04/2025 18:41:07  CAM 3",
+    "speech": "Someone shouts: turn around, turn around!",
+    "language": "English",
+    "setting": "outdoor, a residential street, daytime",
+    "people_count": "3",
 }
 
 
@@ -78,13 +75,19 @@ def _client(monkeypatch, **kw):
 # --------------------------------------------------------------------------- #
 
 
+def test_as_prompt_is_one_media_notes_line_without_empty_fields():
+    line = vision.as_prompt(dict(GOOD, speech="", people_count=""))
+    assert line == ("MEDIA NOTES: on-screen text: 02/04/2025 18:41:07  CAM 3; "
+                    "language: English; setting: outdoor, a residential "
+                    "street, daytime")
+    assert vision.as_prompt({}) == ""
+    assert vision.as_prompt({"summary": "old narration"}) == ""
+
+
 def test_describe_returns_the_parsed_analysis(on, monkeypatch, photo):
     _client(monkeypatch, content=json.dumps(GOOD))
     out = vision.describe(photo, "Man walks past bear")
-    assert out["summary"] == GOOD["summary"]
-    assert out["beats"] == GOOD["beats"]
-    assert out["audible"].startswith("Bystanders shouting")
-    assert set(out) == {"summary", "beats", "audible", "setting"}
+    assert out == GOOD
 
 
 def test_no_api_key_returns_empty(on, monkeypatch, photo):
@@ -121,10 +124,12 @@ def test_empty_completion_returns_empty(on, monkeypatch, photo):
     assert vision.describe(photo, "Man walks past bear") == {}
 
 
-def test_json_without_a_summary_returns_empty(on, monkeypatch, photo):
-    """A summary is the one key every caller reads — an object without it is
-    no more useful than no analysis at all."""
-    _client(monkeypatch, content=json.dumps({"beats": ["a", "b"]}))
+def test_json_with_every_field_empty_returns_empty(on, monkeypatch, photo):
+    """Nothing the model was sure of is the same as no notes — and an object
+    carrying only the old narration keys is nothing at all now."""
+    _client(monkeypatch, content=json.dumps(
+        {"on_screen_text": "", "speech": "", "summary": "A hug.",
+         "beats": ["a", "b"]}))
     assert vision.describe(photo, "Man walks past bear") == {}
 
 
@@ -136,38 +141,40 @@ def test_json_without_a_summary_returns_empty(on, monkeypatch, photo):
 def test_fenced_json_is_unwrapped(on, monkeypatch, photo):
     _client(monkeypatch,
             content="```json\n" + json.dumps(GOOD) + "\n```")
-    assert vision.describe(photo, "h")["summary"] == GOOD["summary"]
+    assert vision.describe(photo, "h")["on_screen_text"] == GOOD["on_screen_text"]
 
 
 def test_json_with_a_preamble_is_recovered(on, monkeypatch, photo):
     _client(monkeypatch,
             content="Here is the analysis:\n" + json.dumps(GOOD) + "\nHope that helps!")
-    assert vision.describe(photo, "h")["summary"] == GOOD["summary"]
+    assert vision.describe(photo, "h")["on_screen_text"] == GOOD["on_screen_text"]
 
 
 def test_missing_keys_are_defaulted(on, monkeypatch, photo):
-    _client(monkeypatch, content=json.dumps({"summary": "A bear."}))
+    _client(monkeypatch, content=json.dumps({"speech": "Help!"}))
     out = vision.describe(photo, "h")
-    assert out["beats"] == []
-    assert out["audible"] == ""
-    assert out["setting"] == ""
+    assert out == {"on_screen_text": "", "speech": "Help!", "language": "",
+                   "setting": "", "people_count": ""}
 
 
 def test_wrong_types_are_coerced_or_dropped(on, monkeypatch, photo):
     _client(monkeypatch, content=json.dumps({
+        "on_screen_text": ["EXIT", "Platform 2"],
+        "people_count": 3,
+        "speech": {"a": 1},
         "summary": "A bear.",
-        "beats": "not a list",
-        "audible": 42,
     }))
     out = vision.describe(photo, "h")
-    assert out["beats"] == []
-    assert out["audible"] == ""
+    assert out["on_screen_text"] == "EXIT; Platform 2"
+    assert out["people_count"] == "3"
+    assert out["speech"] == ""
+    assert "summary" not in out
 
 
 def test_a_model_still_judging_the_headline_is_ignored(on, monkeypatch, photo):
     """The headline check is gone: stray verdict fields never reach a caller."""
     _client(monkeypatch, content=json.dumps({
-        "summary": "A bear.", "headline_ok": False,
+        "speech": "Help!", "headline_ok": False,
         "headline_suggestion": "Another headline",
     }))
     out = vision.describe(photo, "h")
@@ -196,19 +203,31 @@ def test_a_photo_is_sent_as_an_image_part(on, monkeypatch, photo):
     assert url.startswith("data:image/jpeg;base64,")
 
 
-def test_the_headline_is_sent_with_the_media(on, monkeypatch, photo):
+def test_the_headline_is_not_sent_with_the_media(on, monkeypatch, photo):
+    """The headline used to go along as "context", and context is what talked
+    the model into describing the headline instead of the media."""
     fake = _client(monkeypatch, content=json.dumps(GOOD))
     vision.describe(photo, "Man walks past bear")
-    parts = fake.calls[0]["messages"][-1]["content"]
-    text = " ".join(p.get("text", "") for p in parts)
-    assert "Man walks past bear" in text
+    sent = json.dumps(fake.calls[0]["messages"], ensure_ascii=False)
+    assert "Man walks past bear" not in sent
+
+
+def test_the_prompt_forbids_describing_actions(on, monkeypatch, photo):
+    fake = _client(monkeypatch, content=json.dumps(GOOD))
+    vision.describe(photo)
+    system = fake.calls[0]["messages"][0]["content"]
+    assert "Do NOT describe or interpret what people do" in system
+    for key in ("on_screen_text", "speech", "language", "setting",
+                "people_count"):
+        assert f'"{key}"' in system
+    assert '"summary"' not in system and '"beats"' not in system
 
 
 def test_no_headline_still_analyses_the_media(on, monkeypatch, photo):
     """A post can reach the gate with no headline typed yet — the analysis is
     what tells the operator what to write."""
     fake = _client(monkeypatch, content=json.dumps(GOOD))
-    assert vision.describe(photo, "")["summary"] == GOOD["summary"]
+    assert vision.describe(photo, "")["speech"] == GOOD["speech"]
     assert len(fake.calls) == 1
 
 
@@ -371,7 +390,7 @@ def test_describe_end_to_end_against_a_real_encode(on, monkeypatch, clip):
     """Everything but the model: a real clip, a real pre-pass, a real base64."""
     fake = _client(monkeypatch, content=json.dumps(GOOD))
     out = vision.describe(clip, "Colour bars appear on screen")
-    assert out["summary"] == GOOD["summary"]
+    assert out["setting"] == GOOD["setting"]
     parts = fake.calls[0]["messages"][-1]["content"]
     url = next(p["video_url"]["url"] for p in parts if p["type"] == "video_url")
     assert url.startswith("data:video/mp4;base64,")

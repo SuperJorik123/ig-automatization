@@ -294,6 +294,28 @@ def _info_lines(state: dict) -> list:
     return ["ℹ️ your IG info:\n" + preview]
 
 
+def _source_text(state: dict) -> str:
+    return ((state.get("source") or {}).get("text") or "").strip()
+
+
+# How much of the source post the card shows — it is a reminder of what the
+# caption will draw on, not the post itself.
+_SOURCE_PREVIEW = 300
+
+
+def _source_lines(state: dict) -> list:
+    """The 📎 line: where the clip came from and what that post says."""
+    source = state.get("source") or {}
+    platform = ig_caption.PLATFORM_NAMES.get(source.get("platform") or "")
+    if not platform:
+        return []
+    who = ig_caption.credit(source).strip()
+    text = _source_text(state)
+    if len(text) > _SOURCE_PREVIEW:
+        text = text[:_SOURCE_PREVIEW].rstrip() + "…"
+    return [f"📎 source post ({who or platform}): {text or '(no text)'}"]
+
+
 def _photo_count(media: list) -> int:
     return sum(1 for m in media if m["type"] == "photo")
 
@@ -348,6 +370,7 @@ def _plan_text(state: dict) -> str:
         lines.append("👁 watching the clip…")
     else:
         lines += branded.footage_lines(state.get("footage") or {})
+    lines += _source_lines(state)
     lines += _info_lines(state)
     lines += _headline_lines(state)
     lines.append("\n".join([
@@ -554,8 +577,8 @@ async def _handle_url(msg, text: str) -> None:
     dest = os.path.join(config.TG_DATA_DIR, "media", f"manual_url_{msg.message_id}.mp4")
     try:
         # yt-dlp / gallery-dl are blocking — keep the event loop free.
-        paths, link_caption = await asyncio.to_thread(
-            reel_downloader.download_any, url, dest)
+        paths, link_caption, source = await asyncio.to_thread(
+            reel_downloader.fetch, url, dest)
     except Exception as exc:
         log.error("URL download failed for %s: %s", url, exc)
         await note.edit_text(f"❌ download failed: {str(exc)[:300]}")
@@ -573,7 +596,14 @@ async def _handle_url(msg, text: str) -> None:
         "files": list(paths),
         # Twitter clips carry hairline edge artifacts; the brand render reads
         # this to decide the edge-trim.
-        "origin": "twitter" if reel_downloader.is_twitter_url(url) else "instagram",
+        "origin": ("twitter" if reel_downloader.is_twitter_url(url)
+                   else "reddit" if reel_downloader.is_reddit_url(url)
+                   else "instagram"),
+        # The post the clip came from — its text and author — kept whether or
+        # not the operator typed a headline: it is the caption's third source
+        # (after the operator's info and headline) and the pinned comment's
+        # credit. Text "" when the platform gave none; never blocks a post.
+        "source": source,
         "sel_tg": set(),
         "sel_yt": set(),
         "sel_tw": set(),
@@ -584,6 +614,9 @@ async def _handle_url(msg, text: str) -> None:
         await note.edit_text(_plan_text(state), reply_markup=_plan_markup(state))
         _pending[note.message_id] = state
         _start_watching(msg.get_bot(), state, note)
+        if _source_text(state):
+            # The source post is enough to write headline options from.
+            _start_headlines(state, note)
         return
     await note.edit_text(_prompt_text(state), reply_markup=_keyboard(state))
     _pending[note.message_id] = state
@@ -1025,7 +1058,8 @@ def _start_headlines(state: dict, message) -> None:
         task.cancel()
     state.update(headline_opts=None, headline_pick=None, headline_failed=False)
     state["headline_task"] = (asyncio.create_task(_write_headlines(state, message))
-                              if state.get("info") else None)
+                              if state.get("info") or _source_text(state)
+                              else None)
 
 
 async def _write_headlines(state: dict, message) -> None:
@@ -1033,8 +1067,8 @@ async def _write_headlines(state: dict, message) -> None:
     than waiting for it — the options are about the operator's info."""
     try:
         opts = await asyncio.to_thread(
-            headlines.propose, state["info"], state.get("footage") or {},
-            state["text"])
+            headlines.propose, state.get("info", ""),
+            state.get("footage") or {}, state["text"], _source_text(state))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -1670,14 +1704,17 @@ async def _send_manual_captions(chat, state: dict, renders: list) -> None:
         caps = await _ig_captions(
             state.get("text", ""), [{"platform": "ig", "render": r} for r in manual],
             state.get("footage") or {}, state.get("info", ""),
-            cache=state.setdefault("caption_cache", {}))
+            cache=state.setdefault("caption_cache", {}),
+            source=state.get("source"))
         texts = {r["brand"]["name"]: caps.get(r["brand"]["name"]) or
                  ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
                  for r in manual}
         # One cheap searchless call per account, all at once: the comment to
-        # pin under the post, written from that account's own caption.
+        # pin under the post, written from that account's own caption and the
+        # source post, credited to the source when it is known.
         comments = dict(zip(texts, await asyncio.gather(
-            *(asyncio.to_thread(ig_caption.pinned_comment, t)
+            *(asyncio.to_thread(ig_caption.pinned_comment, t,
+                                state.get("source"))
               for t in texts.values()))))
         for r in manual:
             name = r["brand"]["name"]
@@ -1709,55 +1746,39 @@ CAPTION_PLATFORMS = ("ig", "fb", "yt")
 
 
 async def _ig_captions(source_text: str, pairs: list, footage: dict | None = None,
-                       info: str = "", cache: dict | None = None) -> dict[str, str]:
+                       info: str = "", cache: dict | None = None,
+                       source: dict | None = None) -> dict[str, str]:
     """The Instagram caption for each brand, keyed by brand NAME.
 
-    Instagram and YouTube are the platforms here that post more than the
-    headline (see modules/instagram/caption.py; YouTube gets a shorter cut of
-    the same caption via `caption.youtube_description`), so this runs only
-    when an IG or YT pair is actually in the set — the web search is billed per
-    publish, not per render, and a post that goes to neither never pays for it.
+    Instagram, Facebook (verbatim) and YouTube (a cut, via
+    `caption.youtube_description`) post more than the headline, so this runs
+    only when one of those pairs is in the set.
 
-    KEYED BY BRAND, NOT BY LANGUAGE. It used to be by language, and twelve of
-    the thirteen brands are "en": every English account published the same
-    caption within seconds of the others, which is duplicate content by any
-    reading. So the search is still bought ONCE, and the WORDING varies per
-    account — `caption.plan` says who rewrites and how, and each account draws
-    its own five hashtags out of the shared pool. N accounts cost one search
-    (~$0.05, nearly all of it the web search) plus a rewrite each at $0.0004.
+    ONE EXPANSION, A REWRITE PER ACCOUNT. `caption.expand` writes the base
+    caption — hook, context, question, eight hashtag candidates — from the
+    operator's `info`, the headline (`source_text`), the `source` post the
+    clip came from and the `footage` media notes, in that order of trust.
+    `caption.plan` then says who rewrites: every brand with a tone line
+    (`writing_style` in brands/<group>/<name>/style.json) gets a cheap
+    searchless `caption.rephrase` with its own hook and question, all of them
+    at once, then once more for a page whose hook or question came back too
+    close to another's (`caption.rewrite_all`); a non-English brand's rewrite is wholly in its language and
+    brings its own eight native candidates.
 
-    EACH ACCOUNT WRITES IN ITS OWN VOICE: `writing_style` out of
-    brands/<group>/<name>/style.json, which is why the brand dicts are copied with a
-    `style` attached before planning. The angle keeps two accounts apart on one
-    post; the style is the same on every post an account publishes, which is
-    what makes it recognisable rather than merely different. A brand with no
-    style file behaves exactly as it did before styles existed.
+    ONE HASHTAG MEASUREMENT. Every brand's candidates go through a single
+    `caption.choose_hashtags` (one Apify pass) and each brand keeps up to four
+    story tags under its own tag (`caption.finish`).
 
-    `footage` is shared/vision's report of what the media shows — it is what
-    makes the search corroborate the clip instead of chasing the headline's
-    words, and an empty one simply expands from the headline as before.
+    Each value is the FINISHED caption. `cache` (the post's
+    `state["caption_cache"]`) holds the one base expansion per (headline, info,
+    source text), so the hand-posted brands' captions sent at render time and
+    the publish afterwards share it; an `info:` reply in between changes the
+    key and buys a fresh one.
 
-    `info` is the operator's `info:` reply — the source and the facts they
-    already have. It goes into the one expansion as the source of truth and
-    steers its search; it is never published as such.
-
-    Each value is the FINISHED caption: that brand's own headline (the one on
-    its render, already translated), a blank line, then the AI-written body
-    with the brand's tag opening its hashtag line (`caption.compose`).
-
-    `cache` (the post's `state["caption_cache"]`) holds the one expansion per
-    (text, info), so the hand-posted brands' captions sent at render time and
-    the IG/YT publish afterwards share a single web search. An `info:` reply
-    in between changes the key and buys a fresh one.
-
-    Never raises: an empty dict means every IG pair falls back to its headline,
-    which is what shipped before any of this existed, and a single failed
-    rewrite falls back to the shared caption on its own.
+    Never raises: an empty dict means every pair falls back to its tagged
+    headline, and a single failed rewrite falls back to the base caption.
     """
-    # Facebook posts these same captions verbatim and YouTube descriptions are
-    # cut from them (see the "fb"/"yt" legs of _do_publish), so an FB or YT
-    # pair buys the expansion too. One caption per BRAND — a brand on several
-    # platforms is planned once.
+    # One caption per BRAND — a brand on several platforms is planned once.
     ig_pairs = list({p["render"]["brand"]["name"]: p for p in pairs
                      if p["platform"] in CAPTION_PLATFORMS}.values())
     brands = [dict(p["render"]["brand"],
@@ -1772,40 +1793,32 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
     if not brands or not (source_text or "").strip():
         return {}
     try:
-        key = (source_text, info or "")
+        key = (source_text, info or "", ((source or {}).get("text") or ""))
         if cache is not None and cache.get("key") == key:
-            full = cache["full"]
+            base = cache["base"]
         else:
-            full = await asyncio.to_thread(
-                ig_caption.expand, source_text, footage or {}, None, info or "")
-            # Measure the candidate tags and keep the 5k-200k ones — once per
-            # post, before the per-account rewrites copy the line through.
-            if full:
-                full = await asyncio.to_thread(ig_caption.verify_hashtags, full)
-            if full and cache is not None:
-                cache.update(key=key, full=full)
-        if not full:
+            base = await asyncio.to_thread(
+                ig_caption.expand, source_text, footage or {}, None,
+                info or "", source)
+            if base and cache is not None:
+                cache.update(key=key, base=base)
+        if not base:
             return {}
-        out = {}
-        for entry in ig_caption.plan(brands, ig_caption.seed_for(source_text)):
-            lang = entry["lang"]
-            if entry["angle"] or entry["style"]:
-                # In this account's own voice where it has one, an angle where
-                # it doesn't. The rewrite carries the translation too — one
-                # call, not two.
-                text = await asyncio.to_thread(
-                    ig_caption.rephrase, full, entry["angle"], lang,
-                    entry["style"])
-            elif lang:
-                text = await asyncio.to_thread(
-                    translator.translate, full, lang, config.SOURCE_LANG)
-            else:
-                text = full
-            body = ig_caption.pick_hashtags(
-                text, entry["offset"], brand=entry["name"], others=names)
-            out[entry["name"]] = ig_caption.compose(
-                headlines.get(entry["name"]) or source_text, body)
-        return out
+        prose, base_tags = ig_caption.split_tags(base)
+        entries = ig_caption.plan(brands, ig_caption.seed_for(source_text))
+        # In parallel, then a second pass for any page too close to another.
+        texts = await asyncio.to_thread(ig_caption.rewrite_all, prose, entries)
+        bodies, candidates = {}, {}
+        for e, text in zip(entries, texts):
+            body, own = ig_caption.split_tags(text)
+            bodies[e["name"]] = body
+            candidates[e["name"]] = (own if own and not ig_caption.is_base_lang(
+                e["lang"]) else base_tags)
+        chosen = await asyncio.to_thread(ig_caption.choose_hashtags, candidates)
+        return {name: ig_caption.finish(headlines.get(name) or source_text,
+                                        body, chosen.get(name, []),
+                                        brand=name, others=names)
+                for name, body in bodies.items()}
     except Exception:
         log.exception("instagram caption expansion failed — posting headlines")
         return {}
@@ -1844,7 +1857,8 @@ async def _publish_pairs(message, bot, state: dict) -> None:
     ig_caps = await _ig_captions(state.get("text", ""), pairs,
                                  state.get("footage") or {},
                                  state.get("info", ""),
-                                 cache=state.setdefault("caption_cache", {}))
+                                 cache=state.setdefault("caption_cache", {}),
+                                 source=state.get("source"))
 
     lines = []
     for p in pairs:

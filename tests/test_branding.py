@@ -60,7 +60,10 @@ def test_filter_graph_contains_fixed_design_constants():
     assert "scale=135:240:force_original_aspect_ratio=increase" in graph
     assert "gblur=sigma=4" in graph                        # blur-fill canvas
     assert "scale=1080:1920[bg]" in graph                  # upscaled back
-    assert "scale=1080:1920:force_original_aspect_ratio=decrease[fg]" in graph
+    # The clip fits 1080x1708: a 9:16 one shrinks to 89 % so the blur frames
+    # it; wider clips are width-bound and unchanged.
+    assert ("scale=1080:1708:force_original_aspect_ratio=decrease"
+            ":force_divisible_by=2[fg]") in graph
     assert "scale=205:-1[logo0]" in graph                  # logo width
     # Top-right margins, matched to the reference render — not equal.
     assert "overlay=W-w-82:102" in graph
@@ -73,7 +76,9 @@ def test_filter_graph_contains_fixed_design_constants():
     assert "x=117" in graph
     assert "boxw=842" in graph                             # 856 box - 2x7 border
     assert "fade=t=out:st=5:d=1.5:alpha=1" in graph        # banner fade-out
-    assert "y=h*0.775" in graph
+    # Bottom-anchored: however many rows, the box ends above Instagram's UI
+    # in the bottom 20 % of the frame.
+    assert "y=h*0.79-12-text_h" in graph
     assert "textfile='/t/text.txt'" in graph               # never inline text
     assert "fontfile='/f/font.ttf'" in graph
 

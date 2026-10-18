@@ -1,6 +1,20 @@
 """
-shared/vision.py — what the media actually shows, before anything is written
-about it.
+shared/vision.py — MEDIA NOTES: what can be read or heard in the media, and
+nothing else.
+
+DEMOTED 2026-10-18. This used to narrate the clip (`summary`, `beats`) and the
+caption was written from that narration. Gemini gets ACTIONS wrong too often
+for that — a woman bumping into a man came back as a hug, and on posts/005.mp4
+"teenager saves friend from electrocution" came back as "two players fell
+over" and overrode the operator's headline. Facts now come from people: the
+operator's info, the headline, the source post the clip was lifted from (see
+modules/instagram/caption.py). This module reports only what a model reads
+or hears reliably — on-screen text, speech, language, setting, a head count —
+and is told outright not to describe what anybody does. The headline is no
+longer sent either: it was "context", and context is what talked the model
+into describing the headline instead of the media.
+
+What follows is the history of why the media is analysed at all.
 
 THE BUG THIS EXISTS TO FIX. An Instagram caption used to be produced from the
 headline alone: `modules/instagram/caption.py` sent it to an `:online` model,
@@ -84,45 +98,25 @@ MAX_TOKENS = 4000
 _VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi"}
 
 _SYSTEM = (
-    "You are shown one video or photo that a news account is about to "
-    "publish, together with the headline its operator typed for it. Report "
-    "what the media ACTUALLY SHOWS. Somebody downstream writes the caption "
-    "from your report and cannot see the media themselves, so your report is "
-    "the only thing standing between the footage and a caption about a "
-    "different event.\n\n"
-    "OBSERVE, DO NOT IDENTIFY. Describe what is visible and audible. Do not "
-    "name a person unless the media itself names them — a caption on screen, "
-    "a chyron, a jersey, somebody addressing them by name. Never guess an "
-    "identity from resemblance, and never assume the headline's people are "
-    "the people on screen: the headline is context, not evidence. The "
-    "same goes for place and date — report the city only if a sign, a plate, "
-    "a uniform or the speech says so, and say what is inferable as inferable "
-    "(\"an English-speaking country\", \"a residential street\").\n\n"
-    "LISTEN. The audio is half the story: shouting, warnings, what bystanders "
-    "say, a commentator, an announcement, a language you can identify. A "
-    "caption that says people were shouting can only come from you.\n\n"
-    "SEQUENCE. Give the beats in the order they happen, as separate short "
-    "sentences — what leads up to it, what happens, how it ends. That order is "
-    "what the caption is written from, so a report that only says what the "
-    "scene contains is a failed report.\n\n"
-    "Reply with ONE JSON object and nothing else — no prose before it, no "
-    "explanation after it, no markdown fence:\n"
+    "You are shown one video or photo a news account will publish. Do NOT "
+    "describe or interpret what people do; that comes from other sources. "
+    "Report only what you can read or hear with certainty.\n\n"
+    "Reply with ONE JSON object and nothing else:\n"
     "{\n"
-    '  "summary": "one sentence: what happens in this media",\n'
-    '  "beats": ["what happens first", "then this", "how it ends"],\n'
-    '  "audible": "speech, shouting, commentary, or \\"\\" if there is none",\n'
-    '  "setting": "where and when it appears to be, or \\"\\""\n'
-    "}"
+    '  "on_screen_text": "all text visible in the media, verbatim: captions, '
+    'chyrons, signs, CCTV timestamps, or \\"\\"",\n'
+    '  "speech": "what is said, transcribed or closely summarised, or '
+    '\\"\\"",\n'
+    '  "language": "spoken or written language if identifiable, or \\"\\"",\n'
+    '  "setting": "indoor/outdoor, type of place, day/night, or \\"\\"",\n'
+    '  "people_count": "approximate number of people clearly involved, or '
+    '\\"\\""\n'
+    "}\n\n"
+    "If you are not certain, leave the field empty. An empty field is better "
+    "than a guess. Never name a person unless the media itself names them."
 )
 
-_USER_WITH_HEADLINE = (
-    "The operator's headline for this post, for context only:\n\n{headline}\n\n"
-    "Report what the media shows."
-)
-_USER_NO_HEADLINE = (
-    "No headline has been written for this post yet. Report what the media "
-    "shows."
-)
+_USER = "Report what can be read and heard in this media."
 
 # A model told to emit bare JSON still wraps it in a fence or a sentence often
 # enough to be worth recovering rather than losing the analysis over.
@@ -130,10 +124,11 @@ _FENCE = re.compile(r"```[a-zA-Z]*\s*(.*?)\s*```", re.DOTALL)
 
 # Every key the callers read, with what an absent one means.
 _SHAPE = {
-    "summary": "",
-    "beats": [],
-    "audible": "",
+    "on_screen_text": "",
+    "speech": "",
+    "language": "",
     "setting": "",
+    "people_count": "",
 }
 
 
@@ -239,8 +234,10 @@ def _parse(raw: str) -> dict:
 
     Recovers a fenced or preamble-wrapped object rather than losing an
     otherwise good analysis to a wrapper the prompt already forbade, then
-    forces every value to the type its reader expects: a model that answers
-    `"beats": "a then b"` must not reach a caller iterating it.
+    forces every value to a string: a model that answers `"people_count": 3`
+    or a list of signs must not reach a caller expecting text. Keys outside
+    the shape (an old-style "summary" a model still volunteers) are dropped —
+    narration is exactly what this module no longer passes on.
     """
     text = (raw or "").strip()
     if not text:
@@ -261,17 +258,20 @@ def _parse(raw: str) -> dict:
         return {}
 
     out = dict(_SHAPE)
-    for key, default in _SHAPE.items():
-        value = data.get(key, default)
-        if key == "beats":
-            out[key] = [str(b).strip() for b in value
-                        if isinstance(value, list) and str(b).strip()]
-        else:
-            out[key] = value.strip() if isinstance(value, str) else ""
-
-    # A summary is the one field every caller reads; without it there is
-    # nothing to put in front of the operator or into the caption prompt.
-    if not out["summary"]:
+    for key in _SHAPE:
+        value = data.get(key)
+        if isinstance(value, list):
+            value = "; ".join(str(v).strip() for v in value if str(v).strip())
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = str(value)
+        # One line per field: a sign or a chyron comes back with its own line
+        # breaks, and the notes travel as ONE line of the caption prompt.
+        out[key] = (" / ".join(part.strip() for part in value.splitlines()
+                               if part.strip())
+                    if isinstance(value, str) else "")
+    # Every field empty is a model that saw nothing it was sure of — the
+    # prompt's own instruction — and is the same as no notes at all.
+    if not any(out.values()):
         return {}
     return out
 
@@ -279,8 +279,9 @@ def _parse(raw: str) -> dict:
 def describe(path: str, headline: str = "", model: str | None = None) -> dict:
     """What `path` shows, as a dict — or {} when that can't be established.
 
-    `headline` is what the operator typed; it is sent along as context only,
-    and may be empty (a post can reach the gate before a headline is written).
+    `headline` is accepted for the callers' sake and NOT sent: the notes are
+    what the media itself says, and a headline in the prompt is what used to
+    talk the model into reporting the headline.
 
     Returns {} — never raises — for: analysis switched off, no API key, a
     missing file, a failed or oversized ffmpeg pre-pass, a failed call, or a
@@ -322,9 +323,7 @@ def describe(path: str, headline: str = "", model: str | None = None) -> dict:
                   "publishing without one", os.path.basename(path), exc)
         return {}
 
-    headline = (headline or "").strip()
-    prompt = (_USER_WITH_HEADLINE.format(headline=headline) if headline
-              else _USER_NO_HEADLINE)
+    prompt = _USER
     try:
         resp = _client.chat.completions.create(
             model=model or config.IG_VISION_MODEL,
@@ -353,28 +352,31 @@ def describe(path: str, headline: str = "", model: str | None = None) -> dict:
         log.warning("vision: analysis of %s came back unusable — publishing "
                     "without one", os.path.basename(path))
         return {}
-    log.info("vision: %s — %s", os.path.basename(path), out["summary"][:160])
+    log.info("vision: %s — %s", os.path.basename(path), as_prompt(out)[:200])
     return out
 
 
 def as_prompt(footage: dict) -> str:
-    """The analysis as the block that goes into the caption prompt.
+    """The notes as the one MEDIA NOTES line the caption prompt carries:
+    "MEDIA NOTES: on-screen text: ...; speech: ...; language: ...; setting:
+    ...". An empty field is left out rather than printed as "" — the model
+    reads a field that is there as a fact. "" for no notes.
 
     Kept here rather than in caption.py because the shape of the dict is this
-    module's business: a key added here reaches the caption without the caption
-    module having to know it exists.
+    module's business. A dict from before 2026-10-18 (a scheduled post that
+    stored `summary`/`beats`) has none of these keys and gives "" — the old
+    narration is deliberately not passed on.
     """
     if not footage:
         return ""
-    lines = ["WHAT THE MEDIA SHOWS: " + footage["summary"]]
-    if footage.get("beats"):
-        lines.append("IN ORDER:")
-        lines += [f"  - {b}" for b in footage["beats"]]
-    if footage.get("audible"):
-        lines.append("AUDIBLE: " + footage["audible"])
-    if footage.get("setting"):
-        lines.append("SETTING: " + footage["setting"])
-    return "\n".join(lines)
+    parts = [f"{label}: {footage[key].strip()}"
+             for key, label in (("on_screen_text", "on-screen text"),
+                                ("speech", "speech"),
+                                ("language", "language"),
+                                ("setting", "setting"),
+                                ("people_count", "people"))
+             if isinstance(footage.get(key), str) and footage[key].strip()]
+    return "MEDIA NOTES: " + "; ".join(parts) if parts else ""
 
 
 def _cli() -> int:
@@ -385,7 +387,7 @@ def _cli() -> int:
                     "sees it.")
     parser.add_argument("path")
     parser.add_argument("--headline", default="",
-                        help="the operator's headline, sent as context")
+                        help="ignored — kept so old invocations still run")
     parser.add_argument("--model", default="")
     args = parser.parse_args()
 
