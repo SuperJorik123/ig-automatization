@@ -34,17 +34,22 @@ for _k, _v in _saved.items():
 
 
 FOOTAGE = {
-    "summary": "An elderly man walks along a street as a bear crosses behind him.",
-    "beats": ["He walks past parked cars.", "A bear steps out behind him."],
-    "audible": "Bystanders shouting.",
-    "setting": "A residential street.",
+    "on_screen_text": "CAM 3 02/04/2025",
+    "speech": "Someone shouts: turn around!",
+    "language": "English",
+    "setting": "a residential street, daytime",
+    "people_count": "3",
 }
 
 INFO = "Filmed in Asheville, North Carolina. Source: WLOS."
 
-# The body `expand` returns when the model skips the search line: no
-# headline, a prose paragraph (too long to be a search line), then the pool —
-# so every account's caption still opens on its own render headline.
+SOURCE = {"platform": "x", "url": "https://x.com/wlos/status/1",
+          "text": "Bear wanders behind a man on Kimberly Ave.",
+          "author": "wlos"}
+
+# The base caption `expand` returns when the model skipped the hook: a prose
+# paragraph too long to be one, then eight candidates — so every account's
+# caption still opens on its own render headline.
 EXPANDED = (
     "A bear crossed a residential street a few feet behind a man who did not "
     "see it, while people nearby shouted warnings until he finally turned "
@@ -66,23 +71,28 @@ def _pair(name="mir", lang="en", headline="Man walks past a bear"):
 @pytest.fixture
 def calls(monkeypatch):
     """Record every billed call the caption layer would make."""
-    seen = {"expand": [], "rephrase": []}
+    seen = {"expand": [], "rephrase": [], "hashtags": [], "comment": []}
 
-    def _expand(headline, footage=None, model=None, info=""):
-        seen["expand"].append((headline, footage, info))
+    def _expand(headline, footage=None, model=None, info="", source=None):
+        seen["expand"].append((headline, footage, info, source))
         return EXPANDED
 
-    def _rephrase(text, angle, lang="", style="", model=None):
-        seen["rephrase"].append((text, angle, lang, style))
+    def _rephrase(text, lang="", style="", model=None, avoid=()):
+        seen["rephrase"].append((text, lang, style, tuple(avoid)))
         return text
+
+    real_choose = news_bot.ig_caption.choose_hashtags
+
+    def _choose(candidates):
+        seen["hashtags"].append(dict(candidates))
+        return real_choose(candidates)      # no APIFY_TOKEN in tests: top four
 
     monkeypatch.setattr(news_bot.ig_caption, "expand", _expand)
     monkeypatch.setattr(news_bot.ig_caption, "rephrase", _rephrase)
-    monkeypatch.setattr(news_bot.translator, "translate",
-                        lambda text, lang, src=None: text)
+    monkeypatch.setattr(news_bot.ig_caption, "choose_hashtags", _choose)
 
-    def _comment(text, model=None):
-        seen.setdefault("comment", []).append(text)
+    def _comment(text, source=None, model=None):
+        seen["comment"].append((text, source))
         return "Would you have noticed the bear?"
 
     monkeypatch.setattr(news_bot.ig_caption, "pinned_comment", _comment)
@@ -100,7 +110,7 @@ def _run(*args, **kw):
 
 def test_the_info_is_passed_to_the_expansion(calls):
     _run("Man walks past a bear", [_pair()], FOOTAGE, INFO)
-    assert calls["expand"] == [("Man walks past a bear", FOOTAGE, INFO)]
+    assert calls["expand"] == [("Man walks past a bear", FOOTAGE, INFO, None)]
 
 
 def test_info_does_not_skip_the_search(calls):
@@ -111,17 +121,34 @@ def test_info_does_not_skip_the_search(calls):
 
 def test_the_footage_is_passed_to_the_expansion(calls):
     _run("Man walks past a bear", [_pair()], FOOTAGE)
-    assert calls["expand"] == [("Man walks past a bear", FOOTAGE, "")]
+    assert calls["expand"] == [("Man walks past a bear", FOOTAGE, "", None)]
 
 
 def test_no_footage_passes_an_empty_dict(calls):
     _run("Man walks past a bear", [_pair()])
-    assert calls["expand"] == [("Man walks past a bear", {}, "")]
+    assert calls["expand"] == [("Man walks past a bear", {}, "", None)]
 
 
-def test_the_search_is_bought_once_for_every_account(calls):
+def test_the_expansion_is_bought_once_for_every_account(calls):
     _run("h", [_pair("a"), _pair("b"), _pair("c")], FOOTAGE, INFO)
     assert len(calls["expand"]) == 1
+
+
+def test_the_source_post_reaches_the_expansion(calls):
+    _run("Man walks past a bear", [_pair()], FOOTAGE, INFO, source=SOURCE)
+    assert calls["expand"] == [("Man walks past a bear", FOOTAGE, INFO, SOURCE)]
+
+
+def test_every_account_is_measured_in_one_hashtag_pass(calls):
+    _run("h", [_pair("a"), _pair("b"), _pair("c", "ru")], FOOTAGE)
+    assert len(calls["hashtags"]) == 1
+    assert set(calls["hashtags"][0]) == {"a", "b", "c"}
+
+
+def test_only_the_first_unstyled_english_brand_skips_the_rewrite(calls):
+    _run("h", [_pair("a"), _pair("b"), _pair("c", "ru")], FOOTAGE)
+    assert [r[1] for r in calls["rephrase"] if not r[3]] == ["en", "ru"]
+    assert all("#" not in r[0] for r in calls["rephrase"])   # tags stripped
 
 
 def test_a_post_with_no_instagram_pair_buys_nothing(calls):
@@ -158,20 +185,17 @@ def test_the_caption_opens_on_the_headline_then_a_blank_line(calls):
     assert out["mir"].startswith("Man walks past a bear\n\nA bear crossed")
 
 
-def test_a_search_line_replaces_the_headline_as_line_one(monkeypatch, calls):
-    """The growth shape: the model's search line is the caption's first line,
-    and the share line survives the per-account hashtag deal."""
+def test_the_hook_replaces_the_headline_as_line_one(monkeypatch, calls):
+    """The new shape: hook, context, question, tags — no share line."""
     monkeypatch.setattr(
         news_bot.ig_caption, "expand",
         lambda *a, **k: "Bear walks behind man on Asheville street\n\n"
-                        + EXPANDED.replace("\n\n#", "\n\nSend this to someone "
-                                           "in bear country.\n\n#"))
+                        "He never saw it.\n\nWould you have noticed?\n\n"
+                        "#bear #bearsighting")
     out = _run("Man walks past a bear", [_pair()], FOOTAGE)["mir"]
-    paras = out.split("\n\n")
-    assert paras[0] == "Bear walks behind man on Asheville street"
-    assert "Man walks past a bear" not in out
-    assert paras[-2] == "Send this to someone in bear country."
-    assert paras[-1].split()[0] == "#mir"
+    assert out.split("\n\n") == [
+        "Bear walks behind man on Asheville street", "He never saw it.",
+        "Would you have noticed?", "#mir #bear #bearsighting"]
 
 
 def test_each_account_opens_on_its_own_render_headline(calls):
@@ -190,7 +214,7 @@ def test_every_account_tag_line_opens_with_its_own_tag(calls):
     assert out["wswire"].splitlines()[-1].split()[0] == "#wswire"
 
 
-def test_every_account_gets_five_unique_tags(calls):
+def test_every_account_gets_its_tag_and_four_unique_story_tags(calls):
     out = _run("h", [_pair("mir"), _pair("wswire")], FOOTAGE)
     for caption in out.values():
         tags = caption.splitlines()[-1].split()
@@ -201,6 +225,7 @@ def test_every_account_gets_five_unique_tags(calls):
 def test_a_sibling_brand_tag_is_never_dealt(monkeypatch, calls):
     monkeypatch.setattr(news_bot.ig_caption, "expand",
                         lambda *a, **kw: "Para.\n\n#wswire #bear #usa #news")
+    # (no Apify in tests: each account keeps the top four candidates)
     out = _run("h", [_pair("mir"), _pair("wswire")], FOOTAGE)
     assert "#wswire" not in out["mir"]
     assert out["wswire"].splitlines()[-1].split().count("#wswire") == 1
@@ -232,10 +257,20 @@ def test_the_plan_card_says_it_is_watching_while_the_call_runs():
     assert "👁 watching the clip…" in body
 
 
-def test_the_plan_card_shows_what_was_seen():
+def test_the_plan_card_shows_the_media_notes():
     body = news_bot._plan_text(_card(watching=True, footage=FOOTAGE))
     assert "watching" not in body
-    assert FOOTAGE["summary"] in body
+    assert "👁 on-screen text: CAM 3 02/04/2025" in body
+
+
+def test_the_plan_card_shows_the_source_post():
+    body = news_bot._plan_text(_card(source=SOURCE))
+    assert "📎 source post (via @wlos): Bear wanders behind a man" in body
+
+
+def test_no_source_post_means_no_source_line():
+    assert "📎" not in news_bot._plan_text(_card())
+    assert "📎" not in news_bot._plan_text(_card(source={"platform": ""}))
 
 
 def test_the_plan_card_never_questions_the_headline():
@@ -355,8 +390,8 @@ def test_hand_posted_brands_get_their_caption_as_a_reply(calls):
 
 
 def test_the_publish_reuses_the_render_time_search(calls):
-    """One web search per post: the hand-posted captions at render time and
-    the IG publish afterwards share the cached expansion."""
+    """One expansion per post: the hand-posted captions at render time and
+    the IG publish afterwards share the cached one."""
     chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
     asyncio.run(news_bot._send_manual_captions(chat, state, [_render("eur24news")]))
     _run("Man walks past a bear", [_pair("wswire")], FOOTAGE,
@@ -364,11 +399,18 @@ def test_the_publish_reuses_the_render_time_search(calls):
     assert len(calls["expand"]) == 1
 
 
-def test_a_new_info_reply_buys_a_fresh_search(calls):
+def test_a_new_info_reply_buys_a_fresh_expansion(calls):
     cache = {}
     _run("h", [_pair()], FOOTAGE, cache=cache)
     _run("h", [_pair()], FOOTAGE, "Source: WLOS.", cache=cache)
     assert len(calls["expand"]) == 2
+
+
+def test_a_cached_expansion_is_reused_with_the_same_sources(calls):
+    cache = {}
+    _run("h", [_pair()], FOOTAGE, INFO, cache=cache, source=SOURCE)
+    _run("h", [_pair("b")], FOOTAGE, INFO, cache=cache, source=SOURCE)
+    assert len(calls["expand"]) == 1
 
 
 def test_hand_posted_brands_get_a_comment_to_pin(calls):
@@ -379,11 +421,20 @@ def test_hand_posted_brands_get_a_comment_to_pin(calls):
     assert len(chat.sent) == 2
     for text, _ in chat.sent:
         assert "📌 Comment to pin:\n<pre>Would you have noticed the bear?</pre>" in text
-    assert all("#" in c for c in calls["comment"])     # the finished captions
+    assert all("#" in c for c, _ in calls["comment"])  # the finished captions
+
+
+def test_the_comment_to_pin_gets_the_source_post(calls):
+    chat = _Chat()
+    state = {"text": "Man walks past a bear", "footage": FOOTAGE,
+             "source": SOURCE}
+    asyncio.run(news_bot._send_manual_captions(chat, state,
+                                               [_render("eur24news")]))
+    assert calls["comment"][0][1] == SOURCE
 
 
 def test_no_comment_block_when_the_comment_fails(monkeypatch, calls):
-    monkeypatch.setattr(news_bot.ig_caption, "pinned_comment", lambda t, model=None: "")
+    monkeypatch.setattr(news_bot.ig_caption, "pinned_comment", lambda t, source=None, model=None: "")
     chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
     asyncio.run(news_bot._send_manual_captions(chat, state, [_render("eur24news")]))
     assert "📌" not in chat.sent[0][0] and "<pre>" in chat.sent[0][0]

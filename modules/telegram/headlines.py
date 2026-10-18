@@ -92,8 +92,10 @@ _SYSTEM = (
     "  Anyone seriously hurt or killed, violence, disaster, a crime: a "
     "straight news headline. No teasing hook, no jokes, no curiosity bait — "
     "state what happened, soberly.\n\n"
-    "ACCURACY — every fact comes from the operator's info, the footage "
-    "report or the current headline you are given. You have NO web access "
+    "ACCURACY — every fact comes from the operator's info, the source "
+    "post, the media notes or the current headline you are given; where they "
+    "disagree, the operator's info wins, then the headline, then the source "
+    "post. The media notes are on-screen text and speech only. You have NO web access "
     "and must not add anything from memory. If the info is an outlet's or "
     "someone else's claim of a death, an injury, a crime or another serious "
     "fact that is not confirmed, do not state it as fact: attribute it "
@@ -110,9 +112,13 @@ _SYSTEM = (
 )
 
 
-def _user_prompt(info: str, footage: dict | None, current: str) -> str:
-    parts = [f"OPERATOR'S INFO (the source of truth):\n{info}"]
-    if footage:
+def _user_prompt(info: str, footage: dict | None, current: str,
+                 source: str = "") -> str:
+    parts = [f"OPERATOR'S INFO (the source of truth):\n{info or '(none)'}"]
+    if source:
+        parts.append("SOURCE POST (the post the clip came from — facts only, "
+                     f"never its opinions):\n{source}")
+    if footage and vision.as_prompt(footage):
         parts.append(vision.as_prompt(footage))
     if current:
         parts.append(f"CURRENT HEADLINE (the operator's draft or the source "
@@ -204,10 +210,12 @@ def parse(text: str) -> dict | None:
 
 
 def propose(info: str, footage: dict | None = None, current: str = "",
-            model: str | None = None) -> dict | None:
-    """Five headline options for the story in `info`, or None. Never raises."""
+            source: str = "", model: str | None = None) -> dict | None:
+    """Five headline options for the story in `info` — or, with no info, in
+    the `source` post the clip came from — or None. Never raises."""
     info = (info or "").strip()
-    if not info:
+    source = (source or "").strip()[:1500]
+    if not info and not source:
         return None
     if _client is None:
         log.warning("OPENROUTER_API_KEY not set — no headline options")
@@ -218,7 +226,7 @@ def propose(info: str, footage: dict | None = None, current: str = "",
             max_tokens=MAX_TOKENS,
             messages=[{"role": "system", "content": _SYSTEM},
                       {"role": "user", "content": _user_prompt(
-                          info, footage, (current or "").strip())}],
+                          info, footage, (current or "").strip(), source)}],
         )
         out = parse(resp.choices[0].message.content or "")
     except Exception as exc:

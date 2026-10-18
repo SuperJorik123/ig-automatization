@@ -130,3 +130,10 @@ def test_store_add_claim_once(store):
     assert not store.claim_scheduled(sid, "pending", "cancelled")  # too late
     assert store.claim_scheduled(sid, "running", "done")
     assert store.scheduled_with_status("pending", "running") == []
+
+
+def test_the_source_post_survives_the_round_trip():
+    st = dict(_state(), source={"platform": "x", "text": "t", "author": "a"})
+    state, _ = schedule.from_payload(schedule.to_payload(st), [
+        {"name": "a", "tw": "acc_a", "ig": "ig_a"}, {"name": "b", "tw": "acc_b"}])
+    assert state["source"] == {"platform": "x", "text": "t", "author": "a"}

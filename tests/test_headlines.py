@@ -104,3 +104,14 @@ def test_strip_emoji_keeps_letters_and_punctuation():
 
 def test_the_prompt_forbids_emoji():
     assert "ABSOLUTELY NO EMOJI" in headlines._SYSTEM
+
+
+def test_the_source_post_alone_is_enough_to_propose(monkeypatch):
+    fake = _Fake(json.dumps(ANSWER))
+    monkeypatch.setattr(headlines, "_client", fake)
+    out = headlines.propose("", current="Teen saves friend",
+                            source="Brazil: a 15-year-old pulled his friend off a live wall.")
+    assert len(out["headlines"]) == 5
+    user = fake.calls[0]["messages"][-1]["content"]
+    assert "SOURCE POST" in user and "live wall" in user
+    assert "(none)" in user

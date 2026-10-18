@@ -41,6 +41,7 @@ import re
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from modules.telegram import groups
+from shared import vision
 from modules.youtube.shorts_format import MAX_SHORT_S
 
 # (brand-dict key, picker label) — the order platforms appear in the picker.
@@ -69,24 +70,26 @@ def parse_reply(text: str) -> tuple:
 
 
 # The picker already carries the headline and the operator is reading it on a
-# phone — what the analysis owes them here is one orientation line, not the
-# report. The full thing goes into the caption prompt either way.
+# phone — what the analysis owes them here is one line, not the report. The
+# full notes go into the caption prompt either way.
 _SUMMARY_CHARS = 300
 
 
 def footage_lines(footage: dict) -> list:
-    """The 👁 line a picker shows for a footage analysis.
+    """The 👁 line a picker shows for the media notes (shared/vision): what
+    the clip SAYS — on-screen text, speech, setting. Since 2026-10-18 the
+    analysis no longer narrates what happens, so neither does this line.
 
-    Empty for an analysis that didn't happen or didn't come back — vision is
-    best-effort, and a picker that says nothing about it looks exactly like the
-    picker that shipped before it existed.
+    Empty for an analysis that didn't happen, didn't come back, or found
+    nothing it was sure of — vision is best-effort.
     """
-    if not footage:
+    notes = vision.as_prompt(footage or {})
+    if not notes:
         return []
-    summary = footage.get("summary", "").strip()
-    if len(summary) > _SUMMARY_CHARS:
-        summary = summary[:_SUMMARY_CHARS].rstrip() + "…"
-    return [f"👁 {summary}"]
+    notes = notes.removeprefix("MEDIA NOTES: ")
+    if len(notes) > _SUMMARY_CHARS:
+        notes = notes[:_SUMMARY_CHARS].rstrip() + "…"
+    return [f"👁 {notes}"]
 
 
 def available_brands(brands: list) -> list:
@@ -337,7 +340,7 @@ def _design_row(layouts: list, layout) -> list:
 
 
 def plan_keyboard(layouts: list = (), layout=None, n_headlines: int = 0,
-                  chosen=None) -> InlineKeyboardMarkup:
+                  chosen=None, bundle: bool = False) -> InlineKeyboardMarkup:
     """Render / Change / Download / Post as-is / Cancel, with the design row
     right on the card when a photo post has more than one design to choose
     from, and a 1-N row when AI headline options are on offer (`chosen` is
@@ -350,6 +353,9 @@ def plan_keyboard(layouts: list = (), layout=None, n_headlines: int = 0,
         rows.insert(0, [InlineKeyboardButton(
             f"{'● ' if i == chosen else ''}{i + 1}", callback_data=f"b:h:{i}")
             for i in range(n_headlines)])
+    if bundle:
+        # Starts a bundle with this video (or joins the one just opened).
+        rows.append([InlineKeyboardButton("📦 Bundle", callback_data="b:bundle")])
     rows.append([InlineKeyboardButton("⬇ Download", callback_data="b:dl")])
     rows.append([InlineKeyboardButton("📤 Post as-is", callback_data="b:asis"),
                  InlineKeyboardButton("✕ Cancel", callback_data="b:cancel")])

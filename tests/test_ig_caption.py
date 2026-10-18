@@ -99,30 +99,10 @@ def test_empty_completion_returns_no_body(on, monkeypatch):
     assert caption.expand("Pentagon criticized") == ""
 
 
-def test_a_headline_the_model_repeats_anyway_is_dropped(on, monkeypatch):
-    """compose puts the headline on top — a model that writes it too would
-    give the post the same first line twice."""
-    _client(monkeypatch, content="Pentagon Criticized!\n\nA paragraph.\n\n#usa")
-    assert caption.expand("Pentagon criticized") == "A paragraph.\n\n#usa"
-
-
 def test_a_first_paragraph_that_merely_starts_like_the_headline_stays(on, monkeypatch):
     body = "Pentagon criticized over benefits by veterans.\n\n#usa"
     _client(monkeypatch, content=body)
     assert caption.expand("Pentagon criticized") == body
-
-
-def test_both_prompts_ask_for_the_growth_shape(on, monkeypatch):
-    """Search line first, share line last, mid-size tags — in both prompts."""
-    for footage in ({}, {"summary": "A bear."}):
-        fake = _client(monkeypatch, content=EXAMPLE)
-        caption.expand("h", footage=footage)
-        system = fake.calls[0]["messages"][0]["content"]
-        assert "THE SEARCH LINE" in system and "125 characters" in system
-        assert "THE SHARE LINE" in system
-        assert "5,000 and 200,000" in system
-        assert "#londonnews 33k" in system          # the measured calibration
-        assert "other than the one share line" in system
 
 
 # --------------------------------------------------------------------------- #
@@ -131,73 +111,6 @@ def test_both_prompts_ask_for_the_growth_shape(on, monkeypatch):
 
 
 INFO = "Filmed in Asheville, North Carolina. Source: WLOS."
-
-
-def test_info_goes_into_the_user_message(on, monkeypatch):
-    """The user message is what :online builds its search query from."""
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("Man walks past bear", info=INFO)
-    user = fake.calls[0]["messages"][-1]["content"]
-    assert user.startswith("Man walks past bear")
-    assert "OPERATOR'S INFO:\n" + INFO in user
-
-
-def test_info_goes_in_beside_the_footage_too(on, monkeypatch):
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("Man walks past bear", footage={"summary": "A bear."},
-                   info=INFO)
-    user = fake.calls[0]["messages"][-1]["content"]
-    assert "A bear." in user and INFO in user
-    assert user.rstrip().endswith("Write the caption.")
-
-
-def test_info_is_the_source_of_truth_in_both_prompts(on, monkeypatch):
-    for footage in ({}, {"summary": "A bear."}):
-        fake = _client(monkeypatch, content=EXAMPLE)
-        caption.expand("h", footage=footage, info=INFO)
-        system = fake.calls[0]["messages"][0]["content"]
-        assert "SOURCE OF TRUTH" in system
-
-
-def test_info_outranks_the_footage_report_on_what_happens(on, monkeypatch):
-    """The vision report once read a false assault claim as "a hug as people
-    cheer", and the old prompt told the model the report wins on WHAT HAPPENS
-    — so the operator's correct info: reply was overruled."""
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("h", footage={"summary": "Two women hug."}, info=INFO)
-    system = fake.calls[0]["messages"][0]["content"]
-    assert "write what the report shows" not in system
-    assert "NOT THE OPERATOR" in system
-    assert "write what the INFO says" in system
-    assert "WHAT HAPPENS in the media" in system
-
-
-def test_info_comes_before_the_footage_report(on, monkeypatch):
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("h", footage={"summary": "Two women hug."}, info=INFO)
-    user = fake.calls[0]["messages"][-1]["content"]
-    assert user.startswith("OPERATOR'S INFO:\n" + INFO)
-    assert user.index(INFO) < user.index("Two women hug.")
-
-
-def test_the_rewrite_never_writes_a_headline_either(on, monkeypatch):
-    """A rewritten headline is how an account's first line drifted from the
-    headline on its own banner."""
-    fake = _client(monkeypatch, content="A variant.\n\n#usa")
-    caption.rephrase("A paragraph.\n\n#usa", "Open on WHERE it happened.")
-    system = fake.calls[0]["messages"][0]["content"]
-    assert "THE SEARCH LINE" in system and "THE SHARE LINE" in system
-    assert "Keep its main keyword phrase" in system
-    assert "must NOT be the one you were given" in system
-
-
-def test_a_house_style_cannot_rewrite_the_growth_lines_away(on, monkeypatch):
-    """A "two paragraphs, never more" voice must not drop the share line."""
-    fake = _client(monkeypatch, content="A variant.\n\n#usa")
-    caption.rephrase("A paragraph.\n\n#usa", "", style="Two paragraphs, never more.")
-    system = fake.calls[0]["messages"][0]["content"]
-    house = system.index("HOUSE STYLE")
-    assert "never removes, merges or moves the search line" in system[house:]
 
 
 def test_blank_info_changes_nothing(on, monkeypatch):
@@ -212,15 +125,6 @@ def test_empty_headline_stays_empty(on, monkeypatch):
     fake = _client(monkeypatch, content=EXAMPLE)
     assert caption.expand("   ") == ""
     assert fake.calls == []
-
-
-def test_the_headline_is_the_user_message(on, monkeypatch):
-    """An `:online` id left in .env is stripped: the caption never searches."""
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("Pentagon criticized")
-    assert fake.calls[0]["model"] == "openai/gpt-5.5"
-    assert fake.calls[0]["messages"][-1] == {"role": "user",
-                                             "content": "Pentagon criticized"}
 
 
 def test_no_temperature_is_sent(on, monkeypatch):
@@ -285,20 +189,6 @@ def test_hashtag_line_survives_cleaning(on, monkeypatch):
         "#miami #florida #planecrash #aviation #amazon")
 
 
-def test_an_overlong_hashtag_line_is_cut_to_the_pool(on, monkeypatch):
-    """expand() returns CANDIDATES (up to twenty, measured next); with no
-    lookup available verify_hashtags cuts them to the POOL each account draws
-    its five from. Relevance-first ordering means the HEAD is what survives."""
-    _client(monkeypatch, content=EXAMPLE_TOO_MANY_TAGS)
-    out = caption.expand("h")
-    n = len(EXAMPLE_TOO_MANY_TAGS.splitlines()[-1].split())
-    assert len(out.splitlines()[-1].split()) == min(caption.CANDIDATE_HASHTAGS, n)
-    tags = caption.verify_hashtags(out).splitlines()[-1].split()
-    assert len(tags) == min(caption.POOL_HASHTAGS, n)
-    assert tags[:5] == ["#miami", "#florida", "#planecrash", "#aviation",
-                        "#amazon"]
-
-
 def test_a_short_hashtag_line_is_left_alone(on, monkeypatch):
     _client(monkeypatch, content="Headline\n\nA paragraph.\n\n#ohio #crime")
     assert caption.expand("h").splitlines()[-1] == "#ohio #crime"
@@ -344,26 +234,10 @@ PROSE = ("A bear crossed a residential street a few feet behind an elderly "
          "he turned around and walked away.")
 
 
-def test_compose_opens_on_the_search_line():
-    """The model's search line replaces the headline as line 1."""
-    body = ("Bear walks behind man in Asheville\n\n" + PROSE +
-            "\n\nSend this to someone in bear country.\n\n#mir #usa")
-    assert caption.compose("Man walks past bear", body) == body
-
-
 def test_compose_without_a_search_line_opens_on_the_headline():
     """A model that skipped the search line: the headline goes back on top."""
     assert caption.compose("Man walks past bear", PROSE + "\n\n#mir #usa") \
         == "Man walks past bear\n\n" + PROSE + "\n\n#mir #usa"
-
-
-def test_an_overlong_caption_keeps_search_share_and_tag_lines():
-    body = ("Bear walks behind man in Asheville\n\n" + " ".join(["word"] * 800)
-            + "\n\nSave this before your next hike.\n\n#mir #usa")
-    out = caption.compose("Headline", body)
-    assert len(out) <= 2200
-    assert out.startswith("Bear walks behind man in Asheville\n\nword")
-    assert out.endswith("…\n\nSave this before your next hike.\n\n#mir #usa")
 
 
 def test_compose_without_a_body_is_the_headline():
@@ -377,20 +251,8 @@ def test_compose_never_doubles_the_headline():
 
 
 # --------------------------------------------------------------------------- #
-# per-account variants: the rotating angle                                    #
+# per-account variants: the seed                                              #
 # --------------------------------------------------------------------------- #
-
-
-def test_angle_for_is_deterministic_and_cycles():
-    assert caption.angle_for(0) == caption.angle_for(len(caption.ANGLES))
-    assert caption.angle_for(3) == caption.angle_for(3)
-    # Enough angles that every IG account on a post gets its own one.
-    assert len(caption.ANGLES) >= 8
-
-
-def test_consecutive_offsets_give_different_angles():
-    seen = [caption.angle_for(i) for i in range(len(caption.ANGLES))]
-    assert len(set(seen)) == len(caption.ANGLES)
 
 
 def test_seed_for_is_stable_across_processes():
@@ -496,13 +358,6 @@ def test_a_repeated_tag_is_dealt_once():
     assert tags == ["#wswire", "#miami", "#florida", "#usa"]
 
 
-def test_the_pool_is_de_duplicated_before_it_is_capped(on, monkeypatch):
-    _client(monkeypatch, content="A paragraph.\n\n" + " ".join(
-        ["#miami"] * 5 + ["#a", "#b", "#c", "#d", "#e", "#f", "#g", "#h"]))
-    tags = caption.expand("h").splitlines()[-1].split()
-    assert tags == ["#miami", "#a", "#b", "#c", "#d", "#e", "#f", "#g", "#h"]
-
-
 def test_a_sibling_brands_tag_is_never_dealt():
     pool = "A paragraph.\n\n#mirnews #miami #florida #usa #news #wswire"
     out = caption.pick_hashtags(pool, 0, brand="wswire",
@@ -566,21 +421,6 @@ def test_plan_covers_every_brand_in_order():
     assert [e["name"] for e in p] == [b["name"] for b in BRANDS]
 
 
-def test_the_first_brand_of_a_language_is_not_rephrased():
-    """It posts the shared caption — that call is already paid for, and one
-    account per language may as well carry the canonical wording."""
-    p = caption.plan(BRANDS, seed=0)
-    assert p[0]["angle"] is None            # first en
-    assert p[2]["angle"] is None            # only ru
-
-
-def test_every_later_brand_of_a_language_gets_its_own_angle():
-    p = caption.plan(BRANDS, seed=0)
-    angles = [p[1]["angle"], p[3]["angle"]]
-    assert all(angles)
-    assert len(set(angles)) == 2
-
-
 def test_plan_offsets_are_distinct_so_no_two_accounts_share_hashtags():
     p = caption.plan(BRANDS, seed=99)
     assert len({e["offset"] for e in p}) == len(BRANDS)
@@ -590,14 +430,6 @@ def test_the_same_post_plans_the_same_way_twice():
     assert caption.plan(BRANDS, seed=5) == caption.plan(BRANDS, seed=5)
 
 
-def test_a_different_post_rotates_the_angles():
-    """"Rotating angle per post" — the same account must not always open the
-    same way, or its posts become a template."""
-    a = [e["angle"] for e in caption.plan(BRANDS, seed=0)]
-    b = [e["angle"] for e in caption.plan(BRANDS, seed=1)]
-    assert a != b
-
-
 # --------------------------------------------------------------------------- #
 # per-account variants: the rephrase call                                     #
 # --------------------------------------------------------------------------- #
@@ -605,72 +437,6 @@ def test_a_different_post_rotates_the_angles():
 
 VARIANT = ("Five killed as cargo plane overruns Miami runway\n"
            "\nA paragraph.\n\n#miami #florida #ntsb")
-
-
-def test_rephrase_returns_the_variant(on, monkeypatch):
-    _client(monkeypatch, content=VARIANT)
-    assert caption.rephrase(EXAMPLE, caption.ANGLES[0]) == VARIANT
-
-
-def test_rephrase_uses_the_offline_variant_model(on, monkeypatch):
-    """No search: the facts are already in the caption being rewritten, and a
-    second search would double the only bill this feature has."""
-    fake = _client(monkeypatch, content=VARIANT)
-    monkeypatch.setattr(config, "IG_CAPTION_VARIANT_MODEL", "openai/cheap")
-    caption.rephrase(EXAMPLE, caption.ANGLES[0])
-    assert fake.calls[0]["model"] == "openai/cheap"
-    assert ":online" not in fake.calls[0]["model"]
-
-
-def test_rephrase_sends_the_angle_and_no_temperature(on, monkeypatch):
-    fake = _client(monkeypatch, content=VARIANT)
-    caption.rephrase(EXAMPLE, "Open with the number at the centre.")
-    sent = fake.calls[0]["messages"][0]["content"]
-    assert "Open with the number at the centre." in sent
-    assert "temperature" not in fake.calls[0]
-    assert fake.calls[0]["max_tokens"] == caption.MAX_TOKENS
-
-
-def test_rephrase_into_another_language_is_one_call_not_two(on, monkeypatch):
-    """A foreign-language account's variant IS its translation — asking for
-    both in one call keeps the bill at the translate it replaces."""
-    fake = _client(monkeypatch, content=VARIANT)
-    caption.rephrase(EXAMPLE, caption.ANGLES[0], lang="ru")
-    assert len(fake.calls) == 1
-    assert "ru" in fake.calls[0]["messages"][0]["content"]
-
-
-def test_rephrase_failure_returns_the_caption_unchanged(on, monkeypatch):
-    _client(monkeypatch, exc=RuntimeError("502 from the gateway"))
-    assert caption.rephrase(EXAMPLE, caption.ANGLES[0]) == EXAMPLE
-
-
-def test_rephrase_empty_completion_returns_the_caption_unchanged(on, monkeypatch):
-    _client(monkeypatch, content="  \n ")
-    assert caption.rephrase(EXAMPLE, caption.ANGLES[0]) == EXAMPLE
-
-
-def test_rephrase_without_a_key_returns_the_caption_unchanged(on, monkeypatch):
-    monkeypatch.setattr(caption, "_client", None)
-    assert caption.rephrase(EXAMPLE, caption.ANGLES[0]) == EXAMPLE
-
-
-def test_rephrase_disabled_returns_the_caption_without_calling(on, monkeypatch):
-    fake = _client(monkeypatch, content=VARIANT)
-    monkeypatch.setattr(config, "IG_CAPTION_ENABLED", False)
-    assert caption.rephrase(EXAMPLE, caption.ANGLES[0]) == EXAMPLE
-    assert fake.calls == []
-
-
-def test_rephrase_without_an_angle_or_a_style_does_not_call(on, monkeypatch):
-    fake = _client(monkeypatch, content=VARIANT)
-    assert caption.rephrase(EXAMPLE, "") == EXAMPLE
-    assert fake.calls == []
-
-
-def test_rephrase_cleans_up_after_the_model(on, monkeypatch):
-    _client(monkeypatch, content="```\n" + VARIANT + "\n```")
-    assert caption.rephrase(EXAMPLE, caption.ANGLES[0]) == VARIANT
 
 
 def test_pick_hashtags_has_a_line_for_every_brand_there_is():
@@ -698,96 +464,10 @@ STYLED = [
 ]
 
 
-def _rewrites(entry):
-    """What news_bot asks: does this account write its own caption at all?"""
-    return bool(entry["angle"] or entry["style"])
-
-
-def test_a_styled_brand_always_gets_its_own_call():
-    """A style is the whole point of having one, and the shared caption is
-    written in no account's voice — so the free ride passes to a brand that
-    has none."""
-    p = caption.plan(STYLED, seed=0)
-    assert _rewrites(p[0]) and _rewrites(p[1])
-    assert not _rewrites(p[2])
-
-
-def test_a_styled_brand_gets_no_angle_on_top_of_its_voice():
-    """Two structural instructions fight: a voice that says "two paragraphs,
-    never more" against an angle that says "write it as four short
-    paragraphs" comes back in neither."""
-    p = caption.plan(STYLED, seed=0)
-    assert p[0]["angle"] is None and p[1]["angle"] is None
-
-
-def test_a_voiceless_brand_gets_an_angle_instead():
-    brands = STYLED + [{"name": "otherplain", "lang": "en"}]
-    p = caption.plan(brands, seed=0)
-    assert p[3]["angle"] and not p[3]["style"]
-
-
-def test_the_free_ride_is_taken_once_per_language():
-    brands = STYLED + [{"name": "otherplain", "lang": "en"}]
-    p = caption.plan(brands, seed=0)
-    assert [_rewrites(e) for e in p] == [True, True, False, True]
-
-
-def test_with_every_brand_styled_nobody_takes_the_shared_caption():
-    p = caption.plan(STYLED[:2], seed=0)
-    assert all(_rewrites(e) for e in p)
-
-
-def test_a_style_alone_is_enough_to_rewrite(on, monkeypatch):
-    """news_bot calls rephrase for a styled account with no angle at all."""
-    fake = _client(monkeypatch, content=VARIANT)
-    assert caption.rephrase(EXAMPLE, "", style="Two paragraphs.") == VARIANT
-    sent = fake.calls[0]["messages"][0]["content"]
-    assert "Two paragraphs." in sent
-    assert "HOW YOURS MUST DIFFER" not in sent
-
-
-def test_neither_angle_nor_style_does_not_call(on, monkeypatch):
-    fake = _client(monkeypatch, content=VARIANT)
-    assert caption.rephrase(EXAMPLE, "", style="") == EXAMPLE
-    assert fake.calls == []
-
-
 def test_plan_carries_the_style_through():
     p = caption.plan(STYLED, seed=0)
     assert p[0]["style"] == "Two paragraphs, never more."
     assert p[2]["style"] == ""
-
-
-def test_the_style_is_sent_with_the_angle(on, monkeypatch):
-    fake = _client(monkeypatch, content=VARIANT)
-    caption.rephrase(EXAMPLE, caption.ANGLES[0], style="Two paragraphs, never more.")
-    sent = fake.calls[0]["messages"][0]["content"]
-    assert "Two paragraphs, never more." in sent
-    assert caption.ANGLES[0] in sent
-
-
-def test_the_style_never_outranks_the_facts(on, monkeypatch):
-    """A voice changes how a fact is told, never which facts exist — the
-    prompt has to say so next to the style itself, not only above it."""
-    fake = _client(monkeypatch, content=VARIANT)
-    caption.rephrase(EXAMPLE, caption.ANGLES[0], style="Punchy and loud.")
-    sent = fake.calls[0]["messages"][0]["content"]
-    house = sent.index("HOUSE STYLE")
-    assert "never which facts exist" in sent[house:]
-
-
-def test_no_style_sends_no_house_style_section(on, monkeypatch):
-    fake = _client(monkeypatch, content=VARIANT)
-    caption.rephrase(EXAMPLE, caption.ANGLES[0])
-    assert "HOUSE STYLE" not in fake.calls[0]["messages"][0]["content"]
-
-
-def test_style_and_language_travel_together_in_one_call(on, monkeypatch):
-    fake = _client(monkeypatch, content=VARIANT)
-    caption.rephrase(EXAMPLE, caption.ANGLES[0], lang="ru", style="Numbers first.")
-    assert len(fake.calls) == 1
-    sent = fake.calls[0]["messages"][0]["content"]
-    assert "Numbers first." in sent and "ru" in sent
 
 
 def test_a_blank_line_with_a_space_on_it_is_still_blank(on, monkeypatch):
@@ -796,17 +476,6 @@ def test_a_blank_line_with_a_space_on_it_is_still_blank(on, monkeypatch):
     paragraph on a live post (2026-09-11)."""
     _client(monkeypatch, content="Headline\n \n\nA paragraph.  \n\n#news")
     assert caption.expand("h") == "Headline\n\nA paragraph.\n\n#news"
-
-
-def test_the_house_style_examples_are_marked_as_form_only(on, monkeypatch):
-    """A style descriptor carries examples, and a model copied one verbatim
-    onto a story it did not fit — "The investigation continues." on a protest
-    (2026-09-11). The prompt has to say examples are shapes, not text."""
-    fake = _client(monkeypatch, content=VARIANT)
-    caption.rephrase(EXAMPLE, "", style="End on a status line.")
-    sent = fake.calls[0]["messages"][0]["content"]
-    house = sent.index("HOUSE STYLE")
-    assert "FORM ONLY" in sent[house:]
 
 
 # --------------------------------------------------------------------------- #
@@ -825,16 +494,6 @@ def test_a_keycap_hashtag_line_is_repaired(on, monkeypatch):
     line = KEYCAP + "madrid " + KEYCAP + "spain " + KEYCAP + "housing"
     _client(monkeypatch, content="Headline\n\nA paragraph.\n\n" + line)
     assert caption.expand("h").splitlines()[-1] == "#madrid #spain #housing"
-
-
-def test_a_repaired_line_is_then_capped_and_picked(on, monkeypatch):
-    tags = " ".join(KEYCAP + t for t in
-                    ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j"))
-    _client(monkeypatch, content="Headline\n\nA paragraph.\n\n" + tags)
-    out = caption.expand("h")
-    assert len(out.splitlines()[-1].split()) == caption.POOL_HASHTAGS
-    assert len(caption.pick_hashtags(out, 0).splitlines()[-1].split()) == \
-        caption.MAX_HASHTAGS
 
 
 def test_comma_separated_tags_are_repaired(on, monkeypatch):
@@ -866,14 +525,11 @@ def test_a_clean_tag_line_is_left_exactly_alone(on, monkeypatch):
 # in first and the search is told it may only corroborate it.
 
 FOOTAGE = {
-    "summary": "An elderly man walks along a street as a bear crosses behind him.",
-    "beats": [
-        "A man walks along a pavement past parked cars.",
-        "A bear steps out of the treeline a few feet behind him.",
-        "He turns, sees the bear and backs away.",
-    ],
-    "audible": "Bystanders shouting, warning the man to turn around.",
-    "setting": "A residential street, daytime.",
+    "on_screen_text": "02/04/2025 18:41",
+    "speech": "Someone shouts: turn around!",
+    "language": "English",
+    "setting": "a residential street, daytime",
+    "people_count": "3",
 }
 
 
@@ -895,25 +551,6 @@ def test_no_footage_sends_exactly_what_it_always_sent(on, monkeypatch):
     assert a.calls[0]["messages"] == b.calls[0]["messages"]
 
 
-def test_the_footage_is_sent_with_the_headline(on, monkeypatch):
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("Man walks past bear", footage=FOOTAGE)
-    user = _user_of(fake)
-    assert "Man walks past bear" in user
-    assert FOOTAGE["summary"] in user
-    assert "Bystanders shouting" in user
-    assert "A bear steps out of the treeline" in user
-
-
-def test_the_footage_prompt_makes_the_media_outrank_the_search(on, monkeypatch):
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("Man walks past bear", footage=FOOTAGE)
-    system = _system_of(fake).lower()
-    assert "the footage outranks the headline" in system
-    assert "no web access" in system
-    assert "search the web" not in system
-
-
 def test_the_headline_prompt_has_no_web_access(on, monkeypatch):
     fake = _client(monkeypatch, content=EXAMPLE)
     caption.expand("Pentagon criticized", info="Source: Reuters")
@@ -925,22 +562,6 @@ def test_the_headline_prompt_has_no_web_access(on, monkeypatch):
 def test_searchless_strips_only_the_online_suffix():
     assert caption.searchless("openai/gpt-5.6-luna:online") == "openai/gpt-5.6-luna"
     assert caption.searchless("openai/gpt-5.6-luna") == "openai/gpt-5.6-luna"
-
-
-def test_the_footage_prompt_forbids_restating_the_headline(on, monkeypatch):
-    """The thin duplicate caption — headline, then one paragraph saying the
-    headline again — is the second half of the bug this replaced."""
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("Man walks past bear", footage=FOOTAGE)
-    assert "restate" in _system_of(fake).lower()
-
-
-def test_the_footage_prompt_offers_both_registers(on, monkeypatch):
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("Man walks past bear", footage=FOOTAGE)
-    system = _system_of(fake)
-    assert "THE CLIP IS THE STORY" in system
-    assert "A REPORTED EVENT" in system
 
 
 def test_footage_expansion_still_never_raises(on, monkeypatch):
@@ -958,17 +579,6 @@ def test_disabled_skips_the_call_even_with_footage(on, monkeypatch):
     monkeypatch.setattr(config, "IG_CAPTION_ENABLED", False)
     assert caption.expand("Man walks past bear", footage=FOOTAGE) == ""
     assert fake.calls == []
-
-
-def test_the_footage_prompt_bans_video_description(on, monkeypatch):
-    """The report is a witness account, not a text to paraphrase. Transcribing
-    it gives "the player in the purple shirt" and "a high-pitched noise is
-    heard" — screen language, in a caption read as a story."""
-    fake = _client(monkeypatch, content=EXAMPLE)
-    caption.expand("Man walks past bear", footage=FOOTAGE)
-    system = _system_of(fake)
-    assert "TELL THE STORY, DON'T DESCRIBE THE VIDEO" in system
-    assert "Past tense" in system
 
 
 # --------------------------------------------------------------------------- #
@@ -1029,15 +639,6 @@ def test_youtube_description_never_doubles_shorts_or_keeps_angle_brackets():
 # --------------------------------------------------------------------------- #
 
 
-def test_pinned_comment_is_one_cleaned_line(on, monkeypatch):
-    fake = _client(monkeypatch, content='"Would you have noticed the bear?"')
-    assert caption.pinned_comment("A caption.\n\n#mir") == \
-        "Would you have noticed the bear?"
-    assert fake.calls[0]["messages"][-1]["content"] == "A caption.\n\n#mir"
-    assert "QUESTION" in fake.calls[0]["messages"][0]["content"]
-    assert ":online" not in fake.calls[0]["model"]          # no search
-
-
 def test_pinned_comment_drops_a_paragraph(on, monkeypatch):
     _client(monkeypatch, content="word " * 60)
     assert caption.pinned_comment("A caption.") == ""
@@ -1053,3 +654,383 @@ def test_pinned_comment_never_raises(on, monkeypatch):
     monkeypatch.setattr(caption, "_client", _Boom)
     assert caption.pinned_comment("A caption.") == ""
     assert caption.pinned_comment("") == ""
+
+
+# --------------------------------------------------------------------------- #
+# the 2026-10-18 redesign: sources, shape, rewrites, hashtags                 #
+# --------------------------------------------------------------------------- #
+
+
+BASE = ("Teen saves friend from electrocution on football pitch\n\n"
+        "His friend collapsed by the wall near the goal. He ran in, got "
+        "shocked himself, and still dragged him clear.\n\n"
+        "Would you have known what to do?\n\n"
+        "#electrocution #rescue #futsal #electricshock #teenhero #futsall "
+        "#football #hero")
+
+SOURCE = {"platform": "x", "url": "https://x.com/a/status/1",
+          "text": "Brazil: a 15-year-old pulled his friend off a live wall.",
+          "author": "newsdesk"}
+
+
+def test_the_user_message_lists_the_four_sources_in_trust_order(on, monkeypatch):
+    fake = _client(monkeypatch, content=BASE)
+    caption.expand("Teenager saves friend from electrocution", FOOTAGE,
+                   info="Happened in Sao Paulo.", source=SOURCE)
+    user = _user_of(fake).splitlines()
+    assert user[0] == "OPERATOR'S INFO: Happened in Sao Paulo."
+    assert user[1] == "HEADLINE: Teenager saves friend from electrocution"
+    assert user[2] == ("SOURCE POST (X): Brazil: a 15-year-old pulled his "
+                       "friend off a live wall.")
+    assert user[3].startswith("MEDIA NOTES: on-screen text: 02/04/2025 18:41;")
+
+
+def test_missing_sources_say_none(on, monkeypatch):
+    fake = _client(monkeypatch, content=BASE)
+    caption.expand("Teenager saves friend")
+    assert _user_of(fake).splitlines() == [
+        "OPERATOR'S INFO: (none)", "HEADLINE: Teenager saves friend",
+        "SOURCE POST: (none)", "MEDIA NOTES: (none)"]
+
+
+def test_an_overlong_source_post_is_cut(on, monkeypatch):
+    fake = _client(monkeypatch, content=BASE)
+    caption.expand("h", source=dict(SOURCE, text="word " * 1000))
+    assert len(_user_of(fake)) < caption.SOURCE_TEXT_MAX + 200
+
+
+def test_old_narration_never_reaches_the_prompt(on, monkeypatch):
+    """A scheduled post stored before the redesign carries summary/beats —
+    exactly the narration that turned an electrocution into a fall."""
+    fake = _client(monkeypatch, content=BASE)
+    caption.expand("h", {"summary": "two players fell over",
+                         "beats": ["they fell"]})
+    assert "fell" not in _user_of(fake)
+
+
+def test_the_prompt_is_the_operators_spec(on, monkeypatch):
+    fake = _client(monkeypatch, content=BASE)
+    caption.expand("h")
+    system = _system_of(fake)
+    for must in ("SOURCES, IN ORDER OF TRUST", "LINE 1, THE HOOK. At most 90",
+                 "CONTEXT. One or two short sentences", "QUESTION.",
+                 "Eight candidates", "NO CALLS TO ACTION",
+                 "clothing colour", "\"the video shows\""):
+        assert must in system
+    assert "share line" not in system.lower()
+
+
+def test_the_expansion_keeps_eight_candidates(on, monkeypatch):
+    _client(monkeypatch, content=BASE + " #extra1 #extra2")
+    _, tags = caption.split_tags(caption.expand("h"))
+    assert len(tags) == caption.CANDIDATE_HASHTAGS == 8
+
+
+def test_split_tags_returns_the_prose_and_normalised_tags():
+    prose, tags = caption.split_tags(BASE)
+    assert prose.endswith("Would you have known what to do?")
+    assert tags[:3] == ["electrocution", "rescue", "futsal"]
+    assert caption.split_tags("Just prose.") == ("Just prose.", [])
+
+
+def test_split_tags_keeps_cyrillic_tags():
+    _, tags = caption.split_tags("Текст.\n\n#Новости #спасение")
+    assert tags == ["новости", "спасение"]
+
+
+# --- plan --------------------------------------------------------------------
+
+
+def test_one_unstyled_english_brand_keeps_the_base_caption():
+    p = caption.plan([{"name": "a", "lang": "en"}, {"name": "b", "lang": "en"},
+                      {"name": "c", "lang": "en", "style": "Calm."}])
+    assert [e["rewrite"] for e in p] == [False, True, True]
+
+
+def test_every_styled_brand_rewrites():
+    p = caption.plan([{"name": "a", "lang": "en", "style": "Punchy."},
+                      {"name": "b", "lang": "en", "style": "Calm."}])
+    assert all(e["rewrite"] for e in p)
+
+
+def test_a_non_english_brand_always_rewrites():
+    p = caption.plan([{"name": "v", "lang": "ru"}])
+    assert p[0]["rewrite"] is True
+
+
+# --- rephrase -----------------------------------------------------------------
+
+
+PROSE_ONLY = caption.split_tags(BASE)[0]
+
+
+def test_rephrase_returns_the_variant_without_tags_in_english(on, monkeypatch):
+    _client(monkeypatch, content="Hook\n\nContext.\n\nQuestion?\n\n#stray")
+    assert caption.rephrase(PROSE_ONLY, "en", "Punchy.") == \
+        "Hook\n\nContext.\n\nQuestion?"
+
+
+def test_rephrase_keeps_a_foreign_rewrites_own_candidates(on, monkeypatch):
+    out = "Хук\n\nКонтекст.\n\nВопрос?\n\n#удартоком #спасение"
+    _client(monkeypatch, content=out)
+    assert caption.rephrase(PROSE_ONLY, "ru") == out
+
+
+def test_rephrase_asks_a_foreign_brand_for_native_tags(on, monkeypatch):
+    fake = _client(monkeypatch, content="x")
+    caption.rephrase(PROSE_ONLY, "ru", "Calm.")
+    system = _system_of(fake)
+    assert "Russian" in system and "HASHTAG CANDIDATES" in system
+    assert "the hook included" in system
+
+
+def test_rephrase_in_english_asks_for_no_tags(on, monkeypatch):
+    fake = _client(monkeypatch, content="x")
+    caption.rephrase(PROSE_ONLY, "en", "Calm.")
+    system = _system_of(fake)
+    assert "no hashtags" in system and "HASHTAG CANDIDATES" not in system
+
+
+def test_the_tone_is_tone_only_and_the_question_preference_is_soft(on, monkeypatch):
+    fake = _client(monkeypatch, content="x")
+    caption.rephrase(PROSE_ONLY, "en", "Prefers a blunt question.")
+    system = _system_of(fake)
+    assert "HOUSE TONE — how your page always sounds: Prefers a blunt question." in system
+    assert "Tone only" in system
+    assert "otherwise ask any question specific to the story" in system
+
+
+def test_rephrase_demands_a_different_hook_and_question(on, monkeypatch):
+    fake = _client(monkeypatch, content="x")
+    caption.rephrase(PROSE_ONLY, "en", "Calm.")
+    system = _system_of(fake)
+    assert "a different hook" in system and "a different question" in system
+    assert "SAME FACTS, NOTHING ADDED" in system
+    assert "Never ask the reader to send, share, save" in system
+
+
+def test_rephrase_is_searchless_and_sends_no_temperature(on, monkeypatch):
+    monkeypatch.setattr(config, "IG_CAPTION_VARIANT_MODEL", "x/y:online")
+    fake = _client(monkeypatch, content="x")
+    caption.rephrase(PROSE_ONLY, "en", "Calm.")
+    assert fake.calls[0]["model"] == "x/y"
+    assert "temperature" not in fake.calls[0]
+
+
+@pytest.mark.parametrize("kw", [dict(exc=RuntimeError("down")), dict(content="")])
+def test_rephrase_failure_returns_the_base(on, monkeypatch, kw):
+    _client(monkeypatch, **kw)
+    assert caption.rephrase(PROSE_ONLY, "en", "Calm.") == PROSE_ONLY
+
+
+def test_rephrase_disabled_or_keyless_does_not_call(on, monkeypatch):
+    fake = _client(monkeypatch, content="x")
+    monkeypatch.setattr(config, "IG_CAPTION_ENABLED", False)
+    assert caption.rephrase(PROSE_ONLY, "en", "Calm.") == PROSE_ONLY
+    assert fake.calls == []
+    monkeypatch.setattr(caption, "_client", None)
+    monkeypatch.setattr(config, "IG_CAPTION_ENABLED", True)
+    assert caption.rephrase(PROSE_ONLY, "en", "Calm.") == PROSE_ONLY
+
+
+# --- choose_hashtags ----------------------------------------------------------
+
+
+@pytest.fixture
+def counts(monkeypatch):
+    seen = []
+    table = {"electrocution": 45_000, "rescue": 9_000_000, "futsal": 4_000_000,
+             "electricshock": 12_000, "teenhero": 0, "futsall": 300,
+             "удартоком": 7_000, "спасение": 600_000}
+
+    def lookup(tags):
+        seen.append(list(tags))
+        return {t: table.get(t, 0) for t in tags}, {"unrelated": 50_000}
+    monkeypatch.setattr(config, "APIFY_TOKEN", "token")
+    monkeypatch.setattr(caption.hashtags, "lookup", lookup)
+    return seen
+
+
+def test_every_caption_is_measured_in_one_pass(counts):
+    caption.choose_hashtags({
+        "wswire": ["electrocution", "rescue"],
+        "vestra24": ["удартоком", "спасение"]})
+    assert len(counts) == 1
+    assert sorted(counts[0]) == sorted(
+        ["electrocution", "rescue", "удартоком", "спасение"])
+
+
+def test_in_band_first_then_relevance_fallback_up_to_three(counts):
+    out = caption.choose_hashtags({"en": ["electrocution", "rescue", "futsal",
+                                          "electricshock", "teenhero", "futsall"]})
+    assert out["en"] == ["electrocution", "rescue", "electricshock"]
+
+
+def test_zero_and_tiny_tags_are_never_picked(counts):
+    out = caption.choose_hashtags({"en": ["teenhero", "futsall", "rescue"]})
+    assert out["en"] == ["rescue"]
+
+
+def test_related_suggestions_are_never_used(counts):
+    out = caption.choose_hashtags({"en": ["teenhero"]})
+    assert out["en"] == []
+
+
+def test_apify_down_keeps_the_top_four_unmeasured(monkeypatch):
+    monkeypatch.setattr(config, "APIFY_TOKEN", "token")
+    monkeypatch.setattr(caption.hashtags, "lookup", lambda tags: None)
+    out = caption.choose_hashtags({"en": list("abcdef")})
+    assert out["en"] == ["a", "b", "c", "d"]
+
+
+def test_no_token_never_calls_apify(monkeypatch):
+    monkeypatch.setattr(config, "APIFY_TOKEN", "")
+    monkeypatch.setattr(caption.hashtags, "lookup",
+                        lambda tags: (_ for _ in ()).throw(AssertionError))
+    assert caption.choose_hashtags({"en": ["a", "b"]}) == {"en": ["a", "b"]}
+
+
+# --- compose / finish ---------------------------------------------------------
+
+
+def test_compose_opens_on_the_hook():
+    body = "Teen saves friend from electrocution\n\nContext.\n\nQ?\n\n#a #b"
+    assert caption.compose("Headline", body) == body
+
+
+def test_compose_puts_the_headline_on_top_when_the_hook_is_missing():
+    long = "word " * 40
+    assert caption.compose("Headline", long.strip()).startswith("Headline\n\n")
+
+
+def test_an_overlong_caption_keeps_its_tag_line():
+    body = "Hook\n\n" + "word " * 600 + "\n\n#mir #a"
+    out = caption.compose("Headline", body)
+    assert len(out) <= caption.CAPTION_MAX
+    assert out.startswith("Hook\n\n") and out.endswith("\n\n#mir #a")
+
+
+def test_finish_signs_the_line_with_the_brand_tag_first():
+    out = caption.finish("Headline", "Hook\n\nContext.\n\nQ?",
+                         ["electrocution", "rescue", "electricshock"],
+                         brand="wswire", others={"mirnews"})
+    assert out.splitlines()[-1] == "#wswire #electrocution #rescue #electricshock"
+
+
+def test_finish_with_no_tags_still_carries_the_brand_tag():
+    out = caption.finish("Headline", "Hook\n\nContext.", [], brand="wswire")
+    assert out.endswith("\n\n#wswire")
+
+
+def test_finish_drops_a_sibling_brands_tag():
+    out = caption.finish("H", "Hook", ["mirnews", "rescue"], brand="wswire",
+                         others={"mirnews", "wswire"})
+    assert out.splitlines()[-1] == "#wswire #rescue"
+
+
+# --- captions_for (the CLI / trace pipeline) ------------------------------------
+
+
+def test_captions_for_runs_the_whole_pipeline(on, monkeypatch, counts):
+    _client(monkeypatch, content=BASE)
+    monkeypatch.setattr(caption, "rephrase",
+                        lambda text, lang="", style="", model=None, avoid=():
+                        "Хук\n\nКонтекст.\n\nВопрос?\n\n#удартоком #спасение"
+                        if lang == "ru" else "Other hook\n\nCtx.\n\nQ2?")
+    out = caption.captions_for(
+        "Teenager saves friend", [
+            {"name": "wswire", "lang": "en", "style": "Formal."},
+            {"name": "vestra24", "lang": "ru", "style": "Calm."}],
+        source=SOURCE)
+    assert out["wswire"].startswith("Other hook")
+    assert out["wswire"].splitlines()[-1].startswith("#wswire #electrocution")
+    assert out["vestra24"].splitlines()[-1] == "#vestra24 #удартоком #спасение"
+    assert len(counts) == 1
+
+
+# --- pinned comment credit ------------------------------------------------------
+
+
+@pytest.mark.parametrize("source,want", [
+    ({"platform": "x", "author": "newsdesk"}, " via @newsdesk"),
+    ({"platform": "instagram", "author": "clips.daily"}, " via @clips.daily"),
+    ({"platform": "reddit", "author": "throwaway1"}, " via u/throwaway1"),
+    ({"platform": "reddit", "author": ""}, " via Reddit"),
+    ({"platform": "", "author": "someone"}, ""),
+    (None, ""),
+])
+def test_credit_never_invents_a_handle(source, want):
+    assert caption.credit(source) == want
+
+
+def test_pinned_comment_is_credited_to_the_source(on, monkeypatch):
+    fake = _client(monkeypatch, content='"Would you have gone in?"')
+    out = caption.pinned_comment("A caption.", SOURCE)
+    assert out == "Would you have gone in? via @newsdesk"
+    assert "Brazil: a 15-year-old" in _user_of(fake)
+
+
+def test_pinned_comment_without_a_source_has_no_credit(on, monkeypatch):
+    _client(monkeypatch, content="Would you have gone in?")
+    assert caption.pinned_comment("A caption.") == "Would you have gone in?"
+
+
+# --- rewrite_all: no two pages with the same hook or question ---------------------
+
+
+def test_similar_catches_a_one_word_swap_but_not_a_rewrite():
+    assert caption.similar(
+        "Teenager saves friend from electrocution after suffering a severe shock",
+        "Teenager rescues friend from electrocution after suffering a severe shock")
+    assert not caption.similar(
+        "Crowded train passenger erupts after frustration builds",
+        "Passenger hits a breaking point on a crowded train")
+
+
+def test_a_page_too_close_to_another_is_rewritten_once_told_what_is_taken(monkeypatch):
+    seen = []
+
+    def fake(text, lang="", style="", model=None, avoid=()):
+        seen.append((style, list(avoid)))
+        if avoid:
+            return "A brand new hook here\n\nCtx.\n\nWho is to blame here?"
+        return "Same hook for everyone\n\nCtx.\n\nWould you have helped?"
+
+    monkeypatch.setattr(caption, "rephrase", fake)
+    entries = caption.plan([{"name": "a", "lang": "en", "style": "A."},
+                            {"name": "b", "lang": "en", "style": "B."}])
+    texts = caption.rewrite_all("Base hook\n\nCtx.\n\nQ?", entries)
+    assert texts[0].startswith("Same hook") and texts[1].startswith("A brand new")
+    retry = [a for _, a in seen if a]
+    assert retry == [["Same hook for everyone", "Would you have helped?"]]
+
+
+def test_distinct_rewrites_cost_no_second_call(monkeypatch):
+    calls = []
+
+    def fake(text, lang="", style="", model=None, avoid=()):
+        calls.append(style)
+        return {"A.": "First page hook\n\nCtx.\n\nHero or reckless?",
+                "B.": "Totally other opening line\n\nCtx.\n\nWould you go in?"}[style]
+
+    monkeypatch.setattr(caption, "rephrase", fake)
+    entries = caption.plan([{"name": "a", "lang": "en", "style": "A."},
+                            {"name": "b", "lang": "en", "style": "B."}])
+    caption.rewrite_all("Base\n\nCtx.\n\nQ?", entries)
+    assert sorted(calls) == ["A.", "B."]
+
+
+def test_the_avoid_list_reaches_the_prompt(on, monkeypatch):
+    fake = _client(monkeypatch, content="x")
+    caption.rephrase("Hook\n\nCtx.", "en", "Calm.", avoid=["Taken hook", "Taken?"])
+    system = _system_of(fake)
+    assert "ALREADY TAKEN" in system and "- Taken hook" in system
+
+
+def test_both_prompts_ban_quiz_questions(on, monkeypatch):
+    fake = _client(monkeypatch, content=BASE)
+    caption.expand("h")
+    assert "OPINION or EXPERIENCE" in _system_of(fake)
+    fake = _client(monkeypatch, content="x")
+    caption.rephrase("Hook\n\nCtx.", "en", "Calm.")
+    assert "OPINION or EXPERIENCE" in _system_of(fake)

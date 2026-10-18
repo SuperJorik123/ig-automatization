@@ -6,10 +6,11 @@ pass, building the shared blur-fill canvas once and splitting it per brand
 (the per-brand encodes still dominate — see the speed-knob comments below).
 
 The geometry is FIXED (same size and position every time): 1080x1920 canvas
-(blur-fill, the same treatment shorts_format gives horizontal videos — for an
-exact 9:16 input the background is simply invisible), logo scaled to 205 px
+(blur-fill, the same treatment shorts_format gives horizontal videos; a clip
+taller than ~0.63:1 is shrunk to 89 % of the height so the blur frames it), logo scaled to 205 px
 wide sitting 82 px from the right edge and 102 px from the top, headline at
-77.5 % frame height — semi-bold, in a banner box of fixed width (matched to
+a box whose bottom edge sits at 79 % of frame height (clear of Instagram's UI
+in the bottom 20 %) — semi-bold, in a banner box of fixed width (matched to
 the reference renders at the repo root, `example.MP4` foremost),
 tightly-spaced rows (as many as the text needs, never truncated), left-aligned
 inside it, fading out smoothly after 5 s. The box does NOT resize to the
@@ -99,7 +100,12 @@ BOX_W = 856                 # box width, independent of the headline
 BOX_PAD_X = 7               # box border left/right of the text
 BOX_PAD_Y = 12              # box border above/below the text block
 TEXT_X = BOX_X + BOX_PAD_X
-TEXT_Y = 0.775              # TEXT top (box top = this - BOX_PAD_Y/OUT_H)
+# The banner is anchored by its BOTTOM edge, not its top: Instagram draws its
+# own UI (caption, buttons, the audio row) over the bottom ~20 % of a Reel, so
+# the box must end above that line however many rows the headline wraps to —
+# a top anchor grew a three-row banner straight into it. 0.79 leaves a few px
+# of slack under the 0.80 line for drawtext's rounding of text_h.
+BANNER_BOTTOM = 0.79        # box bottom edge, as a fraction of frame height
 # Rows wrap to the pixel width left inside the box — a fixed box can't be
 # allowed to overflow, and character counts can't promise that across fonts.
 LINE_PX = BOX_X + BOX_W - TEXT_X - BOX_PAD_X
@@ -124,6 +130,14 @@ PRESET = "superfast"
 # skips the full-res Gaussian — ~12 % of the render.
 BLUR_W, BLUR_H = 135, 240
 BLUR_SIGMA = 4
+# The clip's box on the canvas: full width, but only FG_SCALE of the height.
+# A 9:16 clip used to fill the whole canvas, which made the blur-fill
+# invisible — an Instagram repost came out as the same frame upscaled. Fitting
+# into 1080x1708 shrinks every clip taller than ~0.63:1 to 89 % (a 9:16 one
+# to 961x1708), so the blurred frame shows round it, while 16:9, 1:1 and 4:5
+# clips are width-bound and come out exactly as before.
+FG_SCALE = 0.89
+FG_H = int(OUT_H * FG_SCALE) // 2 * 2       # 1708 — even, for yuv420p
 
 STYLE_FILE = "style.json"   # optional, next to the brand's logo.png
 
@@ -405,7 +419,8 @@ def blurfill_chain(out_label: str = "[canvas]") -> str:
         f"[0:v]scale={BLUR_W}:{BLUR_H}:force_original_aspect_ratio=increase,"
         f"crop={BLUR_W}:{BLUR_H},gblur=sigma={BLUR_SIGMA},"
         f"scale={OUT_W}:{OUT_H}[bg];"
-        f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease[fg];"
+        f"[0:v]scale={OUT_W}:{FG_H}:force_original_aspect_ratio=decrease"
+        f":force_divisible_by=2[fg];"
         # setsar=1: the fit scales leave a fractional compensating SAR (e.g.
         # 4321:4320) in the header, and players that honor it show the frame
         # very slightly off-square. The canvas is the display shape; pin it.
@@ -443,7 +458,7 @@ def _brand_chain(i: int, font_path: str, text_path: str,
         # comes out BOX_W wide.
         f":boxborderw={BOX_PAD_Y}|{BOX_PAD_X}|{BOX_PAD_Y}|{BOX_PAD_X}"
         f":boxw={BOX_W - 2 * BOX_PAD_X}"
-        f":x={TEXT_X}:y=h*{TEXT_Y},"
+        f":x={TEXT_X}:y=h*{BANNER_BOTTOM}-{BOX_PAD_Y}-text_h,"
         f"fade=t=out:st={FADE_START}:d={FADE_DUR}:alpha=1[banner{i}];"
         f"[branded{i}][banner{i}]overlay=0:0:shortest=1{out_label}"
     )

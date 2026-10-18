@@ -1,4 +1,4 @@
-"""Hashtag post counts, and the loop that keeps a caption's tags in the band.
+"""Hashtag post counts, and the choice of a caption's tags from them.
 
 Instagram (2026) buries a post in a tag with millions of posts and shows it to
 nobody in a tag with a few hundred, so a story tag is only published when it
@@ -8,24 +8,22 @@ band (#valencia 32M, #roadclosures 8k, #valenciafloods 0) — so they are
 MEASURED, with Apify's `instagram-hashtag-stats` actor (~$0.002 a tag, ~6-10 s
 for a batch of twenty).
 
-`refine(text, candidates, suggest)` runs up to HASHTAG_ROUNDS rounds:
+ONE MEASUREMENT PASS (2026-10-18). The caption model returns eight candidates
+per caption, most relevant first (a non-English account's rewrite brings its
+own eight), and `caption.choose_hashtags` sends every caption's candidates
+through ONE `lookup`. `select` then picks per caption:
 
-  1. measure the candidates (cache first — counts move slowly, so a tag seen in
-     the last HASHTAG_CACHE_DAYS costs nothing and waits for nothing);
-  2. keep the ones in the band, in the order given (the model orders them most
-     relevant first, and `pick_hashtags` keeps the head on every account);
-  3. if fewer than HASHTAG_TARGET passed, hand the MEASURED numbers back to the
-     model (`suggest`) — "#valencia 32M, too big; #roadclosures 8k, ok" — plus
-     the in-band related tags Apify returned alongside, and measure what it
-     proposes next. Real numbers tell it which way to go, which blind guessing
-     never does.
+  1. drop tags under HASHTAG_FLOOR_POSTS (500) — a tag with no posts is
+     usually a compound the model coined, and nobody browses one with fifty;
+  2. keep the in-band ones (5k-200k), in the model's relevance order;
+  3. fewer than three in the band → fill up to three with the most relevant
+     REMAINING candidates, whatever their size;
+  4. never anything from Apify's "related" lists — that is where a misspelled
+     #futsall and a run of unrelated Indonesian futsal tags came from, back
+     when a feedback round fed them to the model.
 
-It stops at HASHTAG_TARGET or after the last round, and returns whatever is in
-the band. When NOTHING landed in it, the pool is the measured candidates
-nearest the TOP of the band instead (`nearest` — by ratio, so 725k beats 3k,
-and never a tag with no posts): a post is better off in a tag slightly too big
-than in ten tags nobody browses. The account's own tag is exempt either way —
-it is the account's signature.
+Each candidate's count and verdict is logged, so a selection can be reviewed.
+The account's own tag is exempt — it is the account's signature.
 
 APIFY ACTOR BUG: the actor's numeric `postsCount` is 100x too big for every
 count it formats with "K" ("161.1 K" -> 16,110,000; seen on #sagunto, #faa,
@@ -33,8 +31,8 @@ count it formats with "K" ("161.1 K" -> 16,110,000; seen on #sagunto, #faa,
 (`parse_count`) and `postsCount` is only a fallback for when it is absent.
 
 Never raises. `lookup` returns None when Apify can't be reached (no token,
-outage, out of credit, timeout) and `refine` passes that on as None, which the
-caller reads as "unchecked": the model's own tags go out as before.
+outage, out of credit, timeout), which the caller reads as "unchecked": the
+model's top candidates go out unmeasured.
 Blocking — async callers go through asyncio.to_thread.
 
 CLI: py modules/instagram/hashtags.py valencia roadclosures ntsb
@@ -64,8 +62,10 @@ _API = "https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
 _COUNT = re.compile(r"\s*([\d][\d.,]*)\s*([kmgb]?)\s*", re.IGNORECASE)
 _UNIT = {"": 1, "k": 1e3, "m": 1e6, "g": 1e9, "b": 1e9}
 
-# Everything Instagram does not index inside a tag — same rule as caption.py.
-_TAG_CHARS = re.compile(r"[^a-z0-9]")
+# Everything Instagram does not index inside a tag: anything but a letter or a
+# digit. Unicode letters ARE tag characters — a Russian account's #новости is
+# one tag — which is why this is not caption.py's ASCII-only brand-tag rule.
+_TAG_CHARS = re.compile(r"[\W_]+")
 
 # The related-hashtag lists the actor returns with each result, every entry a
 # {"hash": "#x", "info": "92.27 k"}. Free with the lookup, and measured.
@@ -175,16 +175,28 @@ def _fetch(tags: list) -> list | None:
     return items if isinstance(items, list) else None
 
 
+def measurable(tag: str) -> bool:
+    """Can the actor count this tag? Only a Latin-script one: it URL-encodes
+    anything else and answers a bare `postsCount: 0` with no `posts` text —
+    seen live on #спасение and #новости (2026-10-18), both huge. A tag it
+    can't count is left UNMEASURED, never recorded as 0: a 0 would drop it
+    from the caption and sit in the cache for HASHTAG_CACHE_DAYS."""
+    return bool(tag) and tag.isascii()
+
+
 def lookup(tags) -> tuple[dict, dict] | None:
     """Post counts for `tags`: (counts, related) or None when Apify failed.
 
-    `counts` has every requested tag (normalised) — a tag the actor returned
-    nothing for counts as 0, since that is what an unused tag looks like.
+    `counts` has every requested MEASURABLE tag (normalised) — a tag the
+    actor returned nothing for counts as 0, since that is what an unused tag
+    looks like. A tag `measurable` rejects is absent from it: unmeasured.
     `related` is the in-band related tags the actor reported alongside, with
     their counts: suggestions the next round may use, already paid for.
     Cached tags are answered without a run; everything measured is cached.
     """
-    want = [t for t in dict.fromkeys(norm(t) for t in tags) if t]
+    want = [t for t in dict.fromkeys(norm(t) for t in tags) if measurable(t)]
+    if not want:
+        return {}, {}
     cache = _load()
     counts = {t: cache[t][0] for t in want if t in cache}
     missing = [t for t in want if t not in counts]
@@ -222,72 +234,40 @@ def lookup(tags) -> tuple[dict, dict] | None:
     return {t: counts[t] for t in want}, related
 
 
-def refine(text: str, candidates, suggest) -> list[str] | None:
-    """The in-band tags for a caption, after up to HASHTAG_ROUNDS rounds.
+def select(candidates, counts: dict, limit: int = 4, fill: int = 3,
+           label: str = "") -> list:
+    """Up to `limit` tags out of `candidates` (most relevant first), by their
+    measured `counts`: the in-band ones first in relevance order; when fewer
+    than `fill` are in the band, the most relevant remaining candidates fill
+    up to `fill`, whatever their size. Never a tag measured under
+    HASHTAG_FLOOR_POSTS (0 = nobody uses it); a tag absent from `counts` is
+    UNMEASURED (`measurable`) and may fill like any other. Returned in the
+    candidates' relevance order.
 
-    `candidates` is the model's first list, most relevant first. `suggest(text,
-    measured, related, need)` is the model call that proposes the next round
-    from the measured numbers (caption.suggest_hashtags); it returns a list of
-    tags, empty to give up. Returns the in-band tags in order (at most
-    HASHTAG_TARGET) — or, when none landed in the band, the measured ones
-    nearest its top (`nearest`); empty only when every candidate had no
-    posts at all. None when the FIRST lookup failed —
-    the caller then publishes the unchecked tags. A later round failing keeps
-    what earlier rounds found.
-    """
-    target = max(int(config.HASHTAG_TARGET), 1)
-    found: list = []
-    measured: dict = {}
-    related: dict = {}
-    batch = [t for t in dict.fromkeys(norm(c) for c in candidates) if t]
-    for round_no in range(1, max(int(config.HASHTAG_ROUNDS), 1) + 1):
-        batch = [t for t in batch if t not in measured]
-        if not batch:
+    Logs one line per candidate — its count and whether it was picked in band,
+    picked as a relevance fallback, dropped, or not needed. Pure otherwise."""
+    tags = [t for t in dict.fromkeys(norm(c) for c in candidates) if t]
+    usable = [t for t in tags if t not in counts
+              or (counts[t] or 0) >= config.HASHTAG_FLOOR_POSTS]
+    band = [t for t in usable if in_band(counts.get(t))][:max(int(limit), 0)]
+    picked = set(band)
+    fallback = set()
+    for t in usable:
+        if len(picked) >= min(int(fill), int(limit)):
             break
-        res = lookup(batch)
-        if res is None:
-            return None if round_no == 1 else found
-        counts, rel = res
-        measured.update(counts)
-        related.update(rel)
-        found += [t for t in batch if in_band(counts[t]) and t not in found]
-        log.info("hashtags round %d: %d/%d in band, %d found so far",
-                 round_no, sum(in_band(counts[t]) for t in batch), len(batch),
-                 len(found))
-        if len(found) >= target or round_no >= config.HASHTAG_ROUNDS:
-            break
-        offer = {t: n for t, n in related.items() if t not in measured}
-        try:
-            batch = list(suggest(text, measured, offer, target - len(found)) or ())
-        except Exception as exc:          # a model failure ends the search
-            log.error("hashtag suggestion failed: %s", exc)
-            break
-        batch = [t for t in dict.fromkeys(norm(c) for c in batch) if t]
-    if not found:
-        found = nearest(measured, target)
-        if found:
-            log.warning("no hashtag in the band after the last round — "
-                        "using the %d measured tags nearest %s posts",
-                        len(found), f"{config.HASHTAG_MAX_POSTS:,}")
-    return found[:target]
-
-
-def nearest(measured: dict, limit: int) -> list:
-    """The fallback when nothing landed in the band: the measured candidates
-    CLOSEST TO THE TOP of it, nearest first.
-
-    Closeness is a RATIO, not a difference — 725k is 3.6x over, 3k is 67x
-    under — so a tag just over the ceiling always beats a tiny one, and the
-    pool never fills with tags of a few dozen posts. A tag with no posts is
-    never used. Only the model's own candidates are in `measured` (Apify's
-    related tags were never checked for relevance, so they stay out). The
-    order matters: `pick_hashtags` keeps the first two on every account and
-    rotates the rest.
-    """
-    top = float(config.HASHTAG_MAX_POSTS)
-    used = [(t, n) for t, n in measured.items() if n and n > 0]
-    used.sort(key=lambda tn: max(tn[1] / top, top / tn[1]))
-    return [t for t, _ in used[:max(int(limit), 0)]]
+        if t not in picked:
+            picked.add(t)
+            fallback.add(t)
+    for t in tags:
+        n = counts.get(t)
+        size = "unmeasured" if n is None else f"{int(n or 0):,} posts"
+        why = ("picked: in band" if t in band
+               else "picked: relevance fallback" if t in fallback
+               else "not picked" if t in usable
+               else f"dropped: under {config.HASHTAG_FLOOR_POSTS:,} posts")
+        log.info("hashtag%s #%s — %s — %s",
+                 f" [{label}]" if label else "", t, size, why)
+    return [t for t in tags if t in picked]
 
 
 if __name__ == "__main__":

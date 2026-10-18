@@ -226,7 +226,7 @@ def _build_keyboard(selected):
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Detect IG / X URLs in incoming group messages and post the
+    """Detect IG / X / Reddit URLs in incoming group messages and post the
     account-selection keyboard."""
     msg = update.effective_message
     if msg is None:
@@ -342,7 +342,7 @@ def main() -> None:
         MessageHandler(filters.Chat(CHAT_ID) & ~filters.COMMAND, on_message)
     )
     app.add_handler(CallbackQueryHandler(on_callback))
-    print(f"Bot listening on chat {CHAT_ID} — paste IG / X URLs in the group.")
+    print(f"Bot listening on chat {CHAT_ID} — paste IG / X / Reddit URLs in the group.")
     print(f"Accounts: {', '.join('@' + a for a in ACCOUNTS)}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

@@ -232,6 +232,64 @@ def whoami(account: str) -> dict:
                          "access_token": token})
 
 
+# --------------------------------------------------------------------------- #
+# numbers: followers, Reel insights, publishing quota (bundle mode)           #
+# --------------------------------------------------------------------------- #
+
+# What a Reel's insights are read as. `follows` is deliberately NOT here: the
+# Media Insights API rejects it for Reels ("does not support the follows
+# metric for this media product type", checked 2026-10-18), so follows are
+# measured as the account's follower delta instead (`followers`).
+REEL_METRICS = ("views", "reach", "shares", "saved", "comments")
+
+
+def followers(account: str) -> int | None:
+    """The account's follower count, or None when it can't be read. Never
+    raises — a number for a report is not worth failing a publish over."""
+    try:
+        token, _ = _creds(account)
+        body = _call("GET", f"{API}/me",
+                     params={"fields": "followers_count", "access_token": token})
+        return int(body["followers_count"])
+    except Exception as exc:
+        log.warning("[IG:%s] follower count unavailable: %s", account, exc)
+        return None
+
+
+def reel_insights(media_id: str, account: str) -> tuple[dict | None, str]:
+    """({metric: value} for REEL_METRICS, "") — or (None, why) when the token
+    can't read them (a missing permission names itself in `why`). Never
+    raises."""
+    try:
+        token, _ = _creds(account)
+        body = _call("GET", f"{API}/{media_id}/insights",
+                     params={"metric": ",".join(REEL_METRICS),
+                             "access_token": token})
+        out = {}
+        for item in body.get("data") or ():
+            values = item.get("values") or [{}]
+            out[item.get("name")] = values[0].get("value")
+        return out, ""
+    except Exception as exc:
+        return None, str(exc)[:300]
+
+
+def publishing_quota(account: str) -> tuple[int, int] | None:
+    """(posts used, posts allowed) in the rolling 24 h — Instagram's own
+    count (100 a day per account) — or None when it can't be read."""
+    try:
+        token, user_id = _creds(account)
+        body = _call("GET", f"{API}/{user_id}/content_publishing_limit",
+                     params={"fields": "config,quota_usage",
+                             "access_token": token})
+        row = (body.get("data") or [{}])[0]
+        return int(row.get("quota_usage") or 0), \
+            int((row.get("config") or {}).get("quota_total") or 100)
+    except Exception as exc:
+        log.warning("[IG:%s] publishing quota unavailable: %s", account, exc)
+        return None
+
+
 def _rewrite_env(path: str, key: str, value: str, stamp_key: str,
                  stamp_value: str) -> None:
     """Replace `key=` in place (keeping every other line byte-for-byte) and

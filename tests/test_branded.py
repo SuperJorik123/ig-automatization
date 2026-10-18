@@ -338,8 +338,9 @@ def test_prose_merely_containing_the_word_is_a_headline():
 # --- the footage lines on the picker ---------------------------------------
 
 def _footage(**kw):
-    out = {"summary": "A man walks past a bear.", "beats": [], "audible": "",
-           "setting": ""}
+    out = {"on_screen_text": "CAM 3 02/04/2025", "speech": "Turn around!",
+           "language": "English", "setting": "a residential street",
+           "people_count": ""}
     out.update(kw)
     return out
 
@@ -348,24 +349,23 @@ def test_no_footage_adds_no_lines():
     assert branded.footage_lines({}) == []
 
 
-def test_the_picker_shows_only_what_was_seen():
+def test_the_picker_shows_the_media_notes():
     lines = branded.footage_lines(_footage())
-    assert len(lines) == 1
-    assert lines[0].startswith("👁")
-    assert "A man walks past a bear." in lines[0]
+    assert lines == ["👁 on-screen text: CAM 3 02/04/2025; speech: Turn "
+                     "around!; language: English; setting: a residential street"]
 
 
-def test_there_is_no_headline_warning_any_more():
-    """An old analysis dict carrying a complaint must not bring the check back."""
-    lines = branded.footage_lines(_footage(headline_ok=False,
-                                           headline_note="unrelated"))
-    assert len(lines) == 1 and "⚠️" not in lines[0]
+def test_an_old_narration_shows_nothing():
+    """A dict from before 2026-10-18 carries a summary of what happens — the
+    very thing the analysis no longer reports."""
+    assert branded.footage_lines({"summary": "A man walks past a bear.",
+                                  "beats": []}) == []
 
 
-def test_a_long_summary_is_trimmed_for_the_picker():
+def test_long_notes_are_trimmed_for_the_picker():
     """Telegram caps a message at 4096 and the picker already shows the
-    headline — the analysis is an orientation line, not the report."""
-    lines = branded.footage_lines(_footage(summary="word " * 400))
+    headline — the notes are one line, not the report."""
+    lines = branded.footage_lines(_footage(speech="word " * 400))
     assert len(lines[0]) < 400
 
 

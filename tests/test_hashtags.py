@@ -7,7 +7,7 @@ import json
 import pytest
 
 from shared import config
-from modules.instagram import caption, hashtags
+from modules.instagram import hashtags
 
 
 # Real measurements from 2026-10-07, as the actor's TEXT field gives them.
@@ -25,8 +25,7 @@ def apify(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TG_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(config, "HASHTAG_MIN_POSTS", 5_000)
     monkeypatch.setattr(config, "HASHTAG_MAX_POSTS", 200_000)
-    monkeypatch.setattr(config, "HASHTAG_TARGET", 10)
-    monkeypatch.setattr(config, "HASHTAG_ROUNDS", 3)
+    monkeypatch.setattr(config, "HASHTAG_FLOOR_POSTS", 500)
     runs = []
 
     def _fetch(tags):
@@ -107,165 +106,61 @@ def test_a_failed_run_is_none(apify, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# the rounds                                                                  #
+# select: one pass, in band first, then the most relevant remaining           #
 # --------------------------------------------------------------------------- #
 
 
-def test_refine_keeps_only_the_band_in_relevance_order(apify):
-    out = hashtags.refine("x", ["valencia", "sagunto", "roadclosures",
-                                "flooding", "ntsb"], lambda *a: [])
-    assert out == ["sagunto", "roadclosures", "ntsb"]
+MEASURED = {"valencia": 32_290_000, "roadclosures": 8073, "londonnews": 33_100,
+            "sagunto": 161_100, "ntsb": 8852, "spainweather": 0,
+            "flooding": 1_290_000, "tiny": 120}
 
 
-def test_refine_feeds_the_measured_numbers_back(apify):
-    seen = []
-
-    def suggest(text, measured, related, need):
-        seen.append((dict(measured), dict(related), need))
-        return ["flashflood", "texasflood", "valencia"]   # one already measured
-
-    out = hashtags.refine("caption", ["valencia", "flooding", "ntsb"], suggest)
-    assert out == ["ntsb", "flashflood", "texasflood"]
-    measured, related, need = seen[0]
-    assert measured["valencia"] == 32_290_000 and need == 9
-    assert related == {"flooded": 60_720}
-    assert apify[1] == ["flashflood", "texasflood"]       # never re-measured
+def test_select_keeps_the_band_in_relevance_order(apify):
+    assert hashtags.select(["valencia", "sagunto", "ntsb", "londonnews",
+                            "roadclosures"], MEASURED) ==         ["sagunto", "ntsb", "londonnews", "roadclosures"]
 
 
-def test_refine_stops_at_the_target(apify, monkeypatch):
-    monkeypatch.setattr(config, "HASHTAG_TARGET", 2)
-    calls = []
-    out = hashtags.refine("x", ["sagunto", "ntsb", "londonnews"],
-                          lambda *a: calls.append(a) or [])
-    assert out == ["sagunto", "ntsb"] and calls == []
+def test_select_caps_at_the_limit(apify):
+    out = hashtags.select(["sagunto", "ntsb", "londonnews", "roadclosures"],
+                          MEASURED, limit=2)
+    assert out == ["sagunto", "ntsb"]
 
 
-def test_refine_gives_up_after_the_last_round(apify):
-    rounds = []
-
-    def suggest(*a):
-        rounds.append(1)
-        return [f"made{len(rounds)}"]                     # always 0 posts
-
-    out = hashtags.refine("x", ["valencia"], suggest)
-    # three rounds, nothing in the band -> the only tag with posts stands in
-    assert out == ["valencia"] and len(apify) == 3 and len(rounds) == 2
+def test_a_thin_band_is_filled_up_to_three_by_relevance(apify):
+    out = hashtags.select(["valencia", "flooding", "ntsb", "spainweather"],
+                          MEASURED)
+    assert out == ["valencia", "flooding", "ntsb"]
 
 
-def test_refine_is_none_when_the_first_lookup_fails(apify, monkeypatch):
-    monkeypatch.setattr(hashtags, "_fetch", lambda tags: None)
-    assert hashtags.refine("x", ["ntsb"], lambda *a: []) is None
+def test_zero_and_tiny_tags_are_never_selected(apify):
+    assert hashtags.select(["spainweather", "tiny"], MEASURED) == []
 
 
-def test_a_later_failure_keeps_what_was_found(apify, monkeypatch):
-    real = hashtags._fetch
-
-    def suggest(*a):
-        monkeypatch.setattr(hashtags, "_fetch", lambda tags: None)
-        return ["texasflood"]
-
-    assert real                                           # fixture installed
-    assert hashtags.refine("x", ["ntsb", "valencia"], suggest) == ["ntsb"]
+def test_an_unmeasured_tag_fills_by_relevance(apify):
+    """A tag missing from the counts is one the actor could not count — it
+    fills like a fallback rather than being dropped as a 0."""
+    assert hashtags.select(["новости", "спасение", "tiny", "чп", "x"],
+                           {"tiny": 120}) == ["новости", "спасение", "чп"]
 
 
-def test_a_failing_suggestion_ends_the_search(apify):
-    def suggest(*a):
-        raise RuntimeError("model down")
-    assert hashtags.refine("x", ["ntsb", "valencia"], suggest) == ["ntsb"]
+def test_non_latin_tags_are_never_sent_to_the_actor(apify):
+    """The actor URL-encodes them and answers postsCount 0 with no text count
+    — a 0 that would drop #спасение and sit in the cache for a month."""
+    counts, _ = hashtags.lookup(["спасение", "ntsb"])
+    assert counts == {"ntsb": 8852}
+    assert apify == [["ntsb"]]
+    assert hashtags.lookup(["спасение"]) == ({}, {})
 
 
-# --------------------------------------------------------------------------- #
-# the caption wiring                                                          #
-# --------------------------------------------------------------------------- #
+def test_every_candidate_is_logged_with_its_verdict(apify, caplog):
+    caplog.set_level("INFO", logger="modules.instagram.hashtags")
+    hashtags.select(["valencia", "ntsb", "spainweather"], MEASURED, label="wswire")
+    text = caplog.text
+    assert "[wswire] #ntsb — 8,852 posts — picked: in band" in text
+    assert "#valencia — 32,290,000 posts — picked: relevance fallback" in text
+    assert "#spainweather — 0 posts — dropped: under 500 posts" in text
 
 
-BODY = ("Search line\n\nA paragraph.\n\nSend this to someone.\n\n"
-        "#valencia #sagunto #flooding #ntsb")
-
-
-def test_verify_replaces_the_line_with_the_measured_pool(apify, monkeypatch):
-    monkeypatch.setattr(caption, "suggest_hashtags", lambda *a: [])
-    out = caption.verify_hashtags(BODY)
-    assert out.splitlines()[-1] == "#sagunto #ntsb"
-    assert out.startswith("Search line\n\nA paragraph.")
-
-
-def test_verify_with_nothing_in_band_uses_the_nearest_to_the_top(apify, monkeypatch):
-    monkeypatch.setattr(caption, "suggest_hashtags", lambda *a: [])
-    out = caption.verify_hashtags(
-        "Line\n\nText.\n\n#valencia #spainweather #flooding")
-    # 1.29M (6.5x over) before 32M (161x over); #spainweather has no posts
-    assert out.splitlines()[-1] == "#flooding #valencia"
-
-
-def test_verify_with_no_posts_anywhere_leaves_no_tag_line(apify, monkeypatch):
-    monkeypatch.setattr(caption, "suggest_hashtags", lambda *a: [])
-    out = caption.verify_hashtags("Line\n\nText.\n\n#spainweather #madeupthing")
-    assert out == "Line\n\nText."
-    # ...and the account's own tag still signs it.
-    assert caption.with_brand_tag(out, "eur24news").endswith("\n\n#eur24news")
-
-
-def test_verify_without_a_token_keeps_the_unchecked_pool(monkeypatch):
-    line = " ".join(f"#t{i}" for i in range(20))
-    out = caption.verify_hashtags("Text.\n\n" + line)
-    assert out.splitlines()[-1].split() == [f"#t{i}" for i in
-                                            range(caption.POOL_HASHTAGS)]
-
-
-def test_verify_when_apify_is_down_keeps_the_unchecked_pool(apify, monkeypatch):
-    monkeypatch.setattr(hashtags, "_fetch", lambda tags: None)
-    assert caption.verify_hashtags(BODY).splitlines()[-1] == \
-        "#valencia #sagunto #flooding #ntsb"
-
-
-def test_suggestions_are_parsed_and_normalised(monkeypatch):
-    class _Fake:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(**kw):
-                    _Fake.kw = kw
-                    msg = type("M", (), {"content": "#FlashFlood #texas_flood, txweather"})
-                    return type("R", (), {"choices": [type("C", (), {"message": msg})]})
-    monkeypatch.setattr(caption, "_client", _Fake)
-    monkeypatch.setattr(config, "IG_CAPTION_ENABLED", True)
-    out = caption.suggest_hashtags("cap", {"valencia": 32_290_000},
-                                   {"flooded": 60_720}, 4)
-    assert out == ["flashflood", "texasflood", "txweather"]
-    user = _Fake.kw["messages"][-1]["content"]
-    assert "#valencia — 32,290,000 posts (too big)" in user
-    assert "#flooded — 60,720 posts" in user
-    assert ":online" not in _Fake.kw["model"]
-
-
-# --------------------------------------------------------------------------- #
-# nothing in the band: the measured tags nearest its TOP                      #
-# --------------------------------------------------------------------------- #
-
-
-def test_nearest_ranks_by_ratio_to_the_top():
-    measured = {"tiny": 3_000, "over": 725_000, "huge": 32_290_000,
-                "under": 4_900, "unused": 0, "close": 240_000}
-    # 240k 1.2x, 725k 3.6x, 4.9k 41x, 3k 67x, 32M 161x; 0 never
-    assert hashtags.nearest(measured, 10) == ["close", "over", "under",
-                                              "tiny", "huge"]
-    assert hashtags.nearest(measured, 2) == ["close", "over"]
-
-
-def test_refine_falls_back_to_the_nearest_when_nothing_passes(apify):
-    out = hashtags.refine("x", ["valencia", "flooding", "spainweather"],
-                          lambda *a: [])
-    assert out == ["flooding", "valencia"]
-
-
-def test_the_fallback_never_takes_unvetted_related_tags(apify):
-    """#flooded (60k, in band) came from Apify's related list, not the model:
-    it was never checked for relevance, so it is not a fallback."""
-    assert hashtags.refine("x", ["flooding"], lambda *a: []) == ["flooding"]
-
-
-def test_a_partial_band_is_not_topped_up(apify):
-    """The fallback is for NOTHING in the band; found tags go out as found."""
-    out = hashtags.refine("x", ["ntsb", "valencia", "flooding"], lambda *a: [])
-    assert out == ["ntsb"]
+def test_norm_keeps_unicode_letters():
+    assert hashtags.norm("#Новости") == "новости"
+    assert hashtags.norm("#Road_Closures!") == "roadclosures"
