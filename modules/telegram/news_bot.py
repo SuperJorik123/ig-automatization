@@ -108,7 +108,7 @@ from modules.telegram import branded, bundle, groups, headlines, schedule, trans
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
-from shared import branding, photo_card, public_media, vision  # noqa: E402
+from shared import branding, photo_card, public_media, video_edit, vision  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -376,6 +376,7 @@ def _plan_text(state: dict) -> str:
         lines += branded.footage_lines(state.get("footage") or {})
     lines += _source_lines(state)
     lines += _info_lines(state)
+    lines += _edit_lines(state)
     lines += _headline_lines(state)
     lines.append("\n".join([
         _PLAN_RULE,
@@ -383,9 +384,84 @@ def _plan_text(state: dict) -> str:
                             _plan_keys(state), state.get("layout"),
                             _photo_count(state["media"])),
         _PLAN_RULE]))
-    lines.append("↩️ reply to this message to replace the headline\n"
-                 + _INFO_HINT + " — and get 5 headline options")
+    hint = ("↩️ reply to this message to replace the headline\n"
+            + _INFO_HINT + " — and get 5 headline options")
+    if state["gate_kind"] == "video":
+        hint += "\n" + _EDIT_HINT
+    lines.append(hint)
     return "\n\n".join(lines)
+
+
+_EDIT_HINT = ("↩️ reply `edit: 23-26, crop bottom 10%, cut end 2` to put a "
+              "hook first, crop a banner off or cut time")
+
+
+def _edit_lines(state: dict) -> list:
+    """The ✂️ line: the clip edit the render will apply, with its result
+    length once the clip's length is known."""
+    line = video_edit.describe(state.get("edit") or {},
+                               state.get("src_duration"))
+    return [line] if line else []
+
+
+async def _on_edit_reply(state: dict, value: str, reply, msg) -> None:
+    """An `edit:` reply: parse it, check it against the clip when the clip is
+    already here, and redraw the card or the bundle line. Only before the
+    render — after that the edit is burned into nothing and would mislead."""
+    mode = state.get("mode")
+    if not _has_video(state.get("media") or []):
+        _track(await msg.reply_text("✂️ edit works on videos only"))
+        return
+    if mode not in ("plan", "bundle"):
+        _track(await msg.reply_text(
+            "✂️ too late for an edit — it is applied when 🎬 Render runs"
+            if mode in ("rendering", "publish", "countdown", "schedule")
+            else "✂️ an edit applies to branded renders — use 🎬 Render"))
+        return
+    try:
+        spec = video_edit.parse(value)
+        video = next(m for m in state["media"] if m["type"] == "video")
+        if video.get("path") and not state.get("src_duration"):
+            _, _, state["src_duration"] = await asyncio.to_thread(
+                shorts_format.probe, video["path"])
+        if spec and state.get("src_duration"):
+            video_edit.resolve(spec, state["src_duration"])
+    except ValueError as exc:
+        _track(await msg.reply_text(f"✂️ {exc}\n\n{video_edit.SYNTAX}"))
+        return
+    except Exception as exc:  # ffprobe — the render will check it again
+        log.warning("edit: couldn't probe the clip (%s)", exc)
+    state["edit"] = spec if not video_edit.is_noop(spec) else None
+    if mode == "bundle":
+        await asyncio.to_thread(_save_video, state)
+        await _redraw_line(state, reply)
+        return
+    try:
+        await reply.edit_text(_plan_text(state), reply_markup=_plan_markup(state))
+    except Exception:  # "message is not modified" — same edit again
+        pass
+
+
+async def _edited_source(state: dict, src: str, duration: float) -> tuple:
+    """(path, duration) of the clip the brands render from: `src` itself, or
+    its edited copy when the post has an `edit:`. The copy is made once per
+    edit and reused by a second render of the same post."""
+    spec = state.get("edit")
+    if video_edit.is_noop(spec or {}):
+        return src, duration
+    k = video_edit.key(spec)
+    done = state.get("edited") or {}
+    if done.get("key") == k and os.path.exists(done.get("path") or ""):
+        return done["path"], done["duration"]
+    out = os.path.splitext(src)[0] + f"_edit_{k}.mp4"
+    try:
+        await asyncio.to_thread(video_edit.render, src, spec, out, duration)
+        _, _, new_duration = await asyncio.to_thread(shorts_format.probe, out)
+    except (ValueError, RuntimeError) as exc:
+        raise _EditError(str(exc)) from exc
+    state["files"].append(out)
+    state["edited"] = {"key": k, "path": out, "duration": new_duration}
+    return out, new_duration
 
 
 def _headline_lines(state: dict) -> list:
@@ -667,6 +743,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if reply is not None and reply.message_id in _pending and text.strip():
         state = _pending[reply.message_id]
         field, value = branded.parse_reply(text)
+        if field == "edit":
+            await _on_edit_reply(state, value, reply, msg)
+            return
         if state.get("mode") == "bundle":
             # A bundle video's line: info starts its headlines (the model's
             # pick is used unless another is tapped); anything else is the
@@ -1442,6 +1521,12 @@ class _RenderSetupError(Exception):
     """The source video couldn't be fetched or probed — nothing rendered."""
 
 
+class _EditError(_RenderSetupError):
+    """The operator's `edit:` couldn't be applied to this clip. A single post
+    goes back to its plan card (the edit is the operator's to fix, the post
+    isn't lost); a bundle reports it like any other unreadable video."""
+
+
 async def _render_video(bot, chat, state: dict, brands: list, tag: str,
                         label: str = "") -> tuple[list, list, list, float]:
     """Render `state`'s video once per brand in `brands` (headline translated
@@ -1463,6 +1548,9 @@ async def _render_video(bot, chat, state: dict, brands: list, tag: str,
         _, _, duration = await asyncio.to_thread(shorts_format.probe, src)
     except Exception as exc:
         raise _RenderSetupError(str(exc)) from exc
+    # The operator's `edit:` (hook / crop / cuts) — one pass, before the
+    # brands, so everything after this only sees a different input file.
+    src, duration = await _edited_source(state, src, duration)
 
     media_dir = os.path.join(config.TG_DATA_DIR, "media")
     renders, failures, warnings = [], [], []
@@ -1564,6 +1652,12 @@ async def _do_render(q, context, state: dict) -> None:
         renders, failures, warnings, duration = await _render_video(
             context.bot, q.message.chat, state, brands,
             str(q.message.message_id))
+    except _EditError as exc:
+        state["mode"] = "plan"
+        await q.edit_message_text(
+            _plan_text(state) + f"\n\n❌ the edit failed: {str(exc)[:300]}",
+            reply_markup=_plan_markup(state))
+        return
     except _RenderSetupError as exc:
         log.error("brand render setup failed: %s", exc)
         _pending.pop(q.message.message_id, None)
@@ -2083,7 +2177,7 @@ _BUNDLE_DIR = os.path.join(config.TG_DATA_DIR, "media", "bundles")
 # caption are made from. The rest (brands, pickers, tasks) is rebuilt.
 _VIDEO_KEYS = ("text", "cap_src", "info", "source", "footage",
                "headline_opts", "headline_pick", "media", "files", "origin",
-               "video_key")
+               "video_key", "edit")
 
 
 def _video_key(state: dict) -> str:
@@ -2150,6 +2244,7 @@ def _line_body(state: dict) -> tuple[str, InlineKeyboardMarkup]:
     view = dict(state, headline_task_running=_task_running(
         state.get("headline_task")))
     lines = [bundle.line_text(state["bundle_id"], len(ids), n, view)]
+    lines += _edit_lines(state)
     if state.get("info") or _task_running(state.get("headline_task")):
         lines += _headline_lines(state)
     opts = (state.get("headline_opts") or {}).get("headlines", [])

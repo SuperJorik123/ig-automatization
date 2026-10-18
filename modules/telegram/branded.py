@@ -56,16 +56,22 @@ PLATFORMS = (("tg", "TG"), ("yt", "YT"), ("tw", "X"), ("ig", "IG"),
 # follows keeps its own line breaks, only the prefix is stripped.
 _INFO_PREFIX = re.compile(r"^\s*info\s*:[ \t]*\r?\n?", re.IGNORECASE)
 
+# `edit: 23-26, crop bottom 10%, cut end 2` — the clip's hook, crop and cuts,
+# applied before branding (shared/video_edit.py reads what follows).
+_EDIT_PREFIX = re.compile(r"^\s*edit\s*:[ \t]*\r?\n?", re.IGNORECASE)
+
 
 def parse_reply(text: str) -> tuple:
-    """A picker reply as (field, value): "info" or "text".
+    """A picker reply as (field, value): "info", "edit" or "text".
 
-    "info:" with nothing after it is not a mistake — it is how the operator
-    takes their info back off, so it returns empty info rather than falling
-    through to the headline.
+    "info:" (or "edit:") with nothing after it is not a mistake — it is how
+    the operator takes it back off, so it returns an empty value rather than
+    falling through to the headline.
     """
     if _INFO_PREFIX.match(text or ""):
         return "info", _INFO_PREFIX.sub("", text, count=1).strip()
+    if _EDIT_PREFIX.match(text or ""):
+        return "edit", _EDIT_PREFIX.sub("", text, count=1).strip()
     return "text", (text or "").strip()
 
 
