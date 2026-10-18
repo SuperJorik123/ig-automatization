@@ -144,6 +144,55 @@ def init() -> None:
                    created_at TEXT NOT NULL)"""
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled(status)")
+        # Bundle mode (modules/telegram/bundle.py). In the DB so an open
+        # bundle — and a rendered one waiting for 🚀 Publish — survives a
+        # restart. `plan` is the rendered bundle: assignment, renders,
+        # captions, timetable (JSON).
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS bundles(
+                   id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                   chat_id    TEXT NOT NULL,
+                   status     TEXT NOT NULL, -- open|rendering|ready|scheduled|cancelled
+                   platforms  TEXT NOT NULL, -- JSON list of plan platform keys
+                   message_id INTEGER,       -- the summary message, once rendered
+                   plan       TEXT,
+                   created_at TEXT NOT NULL)"""
+        )
+        # One row per video: the plan-card state that matters (headline,
+        # info, source post, media notes, the file), JSON. `card_id` is the
+        # video's bundle line — replies to it are how its info arrives.
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS bundle_videos(
+                   id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                   bundle_id  INTEGER NOT NULL,
+                   card_id    INTEGER,
+                   status     TEXT NOT NULL, -- active|removed|carried
+                   state      TEXT NOT NULL,
+                   created_at TEXT NOT NULL)"""
+        )
+        # Every Instagram reel the news bot published, bundle or not: the
+        # history bundle assignment checks (video_key per account), and the
+        # numbers the weekly report is made of.
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS reel_log(
+                   id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                   bundle_id         INTEGER,
+                   video_key         TEXT NOT NULL,
+                   brand             TEXT NOT NULL,
+                   account           TEXT NOT NULL,
+                   media_id          TEXT,
+                   copy_count        INTEGER,
+                   posted_at         TEXT NOT NULL,
+                   followers_at_post INTEGER,
+                   insights_24h      TEXT,
+                   insights_72h      TEXT,
+                   followers_24h     INTEGER,
+                   followers_72h     INTEGER)"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_reel_log_brand ON reel_log(brand)")
+        sched_cols = {r["name"] for r in c.execute("PRAGMA table_info(scheduled)")}
+        if "bundle_id" not in sched_cols:
+            c.execute("ALTER TABLE scheduled ADD COLUMN bundle_id INTEGER")
         # Added after the first release — ALTER only when the column is absent
         # so existing news.db files migrate without losing rows.
         cols = {r["name"] for r in c.execute("PRAGMA table_info(items)")}
@@ -460,14 +509,29 @@ def _scheduled(row) -> dict:
 
 
 def add_scheduled(due_at: datetime, chat_id, message_id: int,
-                  payload: dict) -> int:
+                  payload: dict, bundle_id: int | None = None) -> int:
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO scheduled(due_at, chat_id, message_id, payload, status,"
-            " created_at) VALUES(?,?,?,?,'pending',?)",
+            " created_at, bundle_id) VALUES(?,?,?,?,'pending',?,?)",
             (due_at.astimezone(timezone.utc).isoformat(timespec="seconds"),
-             str(chat_id), message_id, json.dumps(payload), _now()))
+             str(chat_id), message_id, json.dumps(payload), _now(), bundle_id))
         return cur.lastrowid
+
+
+def set_scheduled_payload(sched_id: int, payload: dict) -> None:
+    with _conn() as c:
+        c.execute("UPDATE scheduled SET payload=? WHERE id=?",
+                  (json.dumps(payload), sched_id))
+
+
+def scheduled_for_bundle(bundle_id: int, *statuses: str) -> list[dict]:
+    marks = ",".join("?" * len(statuses))
+    with _conn() as c:
+        rows = c.execute(f"SELECT * FROM scheduled WHERE bundle_id=? AND "
+                         f"status IN ({marks}) ORDER BY due_at",
+                         (bundle_id, *statuses))
+        return [_scheduled(r) for r in rows]
 
 
 def get_scheduled(sched_id: int) -> dict | None:
@@ -493,3 +557,180 @@ def claim_scheduled(sched_id: int, from_status: str, to_status: str) -> bool:
         cur = c.execute("UPDATE scheduled SET status=? WHERE id=? AND status=?",
                         (to_status, sched_id, from_status))
         return cur.rowcount == 1
+
+
+# --------------------------------------------------------------------------- #
+# bundles                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _bundle(row) -> dict:
+    d = dict(row)
+    d["platforms"] = json.loads(d["platforms"] or "[]")
+    d["plan"] = json.loads(d["plan"]) if d["plan"] else None
+    return d
+
+
+def open_bundle(chat_id, platforms: list) -> int:
+    with _conn() as c:
+        return c.execute(
+            "INSERT INTO bundles(chat_id, status, platforms, created_at)"
+            " VALUES(?, 'open', ?, ?)",
+            (str(chat_id), json.dumps(list(platforms)), _now())).lastrowid
+
+
+def get_bundle(bundle_id: int) -> dict | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM bundles WHERE id=?", (bundle_id,)).fetchone()
+        return _bundle(row) if row else None
+
+
+def current_bundle(chat_id) -> dict | None:
+    """The chat's open bundle — at most one (`open_bundle` is only called
+    when this returns None)."""
+    with _conn() as c:
+        row = c.execute("SELECT * FROM bundles WHERE chat_id=? AND status='open'"
+                        " ORDER BY id DESC LIMIT 1", (str(chat_id),)).fetchone()
+        return _bundle(row) if row else None
+
+
+def bundles_with_status(*statuses: str) -> list[dict]:
+    marks = ",".join("?" * len(statuses))
+    with _conn() as c:
+        rows = c.execute(f"SELECT * FROM bundles WHERE status IN ({marks})"
+                         " ORDER BY id", statuses)
+        return [_bundle(r) for r in rows]
+
+
+def claim_bundle(bundle_id: int, from_status: str, to_status: str) -> bool:
+    """Same fire-once guard as claim_scheduled: two taps on Render (or Render
+    racing Cancel) can't both win."""
+    with _conn() as c:
+        return c.execute("UPDATE bundles SET status=? WHERE id=? AND status=?",
+                         (to_status, bundle_id, from_status)).rowcount == 1
+
+
+def update_bundle(bundle_id: int, **fields) -> None:
+    """Set `plan` (dict), `message_id`, `platforms` or `status`."""
+    if "plan" in fields and fields["plan"] is not None:
+        fields["plan"] = json.dumps(fields["plan"])
+    if "platforms" in fields:
+        fields["platforms"] = json.dumps(list(fields["platforms"]))
+    cols = ", ".join(f"{k}=?" for k in fields)
+    with _conn() as c:
+        c.execute(f"UPDATE bundles SET {cols} WHERE id=?",
+                  (*fields.values(), bundle_id))
+
+
+def _bundle_video(row) -> dict:
+    d = dict(row)
+    d["state"] = json.loads(d["state"])
+    return d
+
+
+def add_bundle_video(bundle_id: int, state: dict, card_id: int | None) -> int:
+    with _conn() as c:
+        return c.execute(
+            "INSERT INTO bundle_videos(bundle_id, card_id, status, state,"
+            " created_at) VALUES(?,?,'active',?,?)",
+            (bundle_id, card_id, json.dumps(state), _now())).lastrowid
+
+
+def save_bundle_video(video_id: int, state: dict | None = None,
+                      card_id: int | None = None, status: str | None = None,
+                      bundle_id: int | None = None) -> None:
+    fields = {}
+    if state is not None:
+        fields["state"] = json.dumps(state)
+    if card_id is not None:
+        fields["card_id"] = card_id
+    if status is not None:
+        fields["status"] = status
+    if bundle_id is not None:
+        fields["bundle_id"] = bundle_id
+    if not fields:
+        return
+    cols = ", ".join(f"{k}=?" for k in fields)
+    with _conn() as c:
+        c.execute(f"UPDATE bundle_videos SET {cols} WHERE id=?",
+                  (*fields.values(), video_id))
+
+
+def bundle_videos(bundle_id: int, status: str = "active") -> list[dict]:
+    """A bundle's videos in the order they joined."""
+    with _conn() as c:
+        rows = c.execute("SELECT * FROM bundle_videos WHERE bundle_id=? AND "
+                         "status=? ORDER BY id", (bundle_id, status))
+        return [_bundle_video(r) for r in rows]
+
+
+def get_bundle_video(video_id: int) -> dict | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM bundle_videos WHERE id=?",
+                        (video_id,)).fetchone()
+        return _bundle_video(row) if row else None
+
+
+# --------------------------------------------------------------------------- #
+# reel log                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _reel(row) -> dict:
+    d = dict(row)
+    for key in ("insights_24h", "insights_72h"):
+        d[key] = json.loads(d[key]) if d[key] else None
+    return d
+
+
+def log_reel(video_key: str, brand: str, account: str, media_id: str | None,
+             bundle_id: int | None = None, copy_count: int | None = None,
+             followers: int | None = None) -> int:
+    with _conn() as c:
+        return c.execute(
+            "INSERT INTO reel_log(bundle_id, video_key, brand, account, media_id,"
+            " copy_count, posted_at, followers_at_post) VALUES(?,?,?,?,?,?,?,?)",
+            (bundle_id, video_key, brand, account, media_id, copy_count, _now(),
+             followers)).lastrowid
+
+
+def published_videos(brands) -> dict:
+    """{brand: set of video keys it has published} — bundle history."""
+    brands = list(brands)
+    if not brands:
+        return {}
+    marks = ",".join("?" * len(brands))
+    out = {b: set() for b in brands}
+    with _conn() as c:
+        for row in c.execute(f"SELECT brand, video_key FROM reel_log WHERE "
+                             f"brand IN ({marks})", brands):
+            out[row["brand"]].add(row["video_key"])
+    return out
+
+
+def reels_due(field: str, older_than_h: int) -> list[dict]:
+    """Logged reels with a media id, older than `older_than_h`, whose
+    `field` (insights_24h / insights_72h) is still empty."""
+    assert field in ("insights_24h", "insights_72h")
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(hours=older_than_h)).isoformat(timespec="seconds")
+    with _conn() as c:
+        rows = c.execute(f"SELECT * FROM reel_log WHERE media_id IS NOT NULL "
+                         f"AND {field} IS NULL AND posted_at<=? ORDER BY id",
+                         (cutoff,))
+        return [_reel(r) for r in rows]
+
+
+def save_insights(reel_id: int, window: str, insights: dict,
+                  followers: int | None) -> None:
+    assert window in ("24h", "72h")
+    with _conn() as c:
+        c.execute(f"UPDATE reel_log SET insights_{window}=?, followers_{window}=?"
+                  " WHERE id=?", (json.dumps(insights), followers, reel_id))
+
+
+def reels_since(since: datetime) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute("SELECT * FROM reel_log WHERE posted_at>=? ORDER BY id",
+                         (since.astimezone(timezone.utc).isoformat(timespec="seconds"),))
+        return [_reel(r) for r in rows]

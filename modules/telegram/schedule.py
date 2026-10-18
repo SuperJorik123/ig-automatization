@@ -191,6 +191,11 @@ def to_payload(state: dict) -> dict:
         "info": state.get("info", ""),
         "footage": state.get("footage") or {},
         "source": state.get("source") or {},
+        "video_key": state.get("video_key", ""),
+        # Bundle posts: the captions written at render time, and which bundle
+        # and video this is (the reel log needs both).
+        "captions": state.get("captions") or {},
+        "bundle": state.get("bundle") or {},
         "renders": [{"brand": r["brand"]["name"], "path": r["path"],
                      "headline": r["headline"], "kind": r.get("kind", "video")}
                     for r in renders],
@@ -227,7 +232,10 @@ def from_payload(payload: dict, brands: list) -> tuple:
                           "renders": rs})
     state = {"text": payload.get("text", ""), "info": payload.get("info", ""),
              "footage": payload.get("footage") or {},
-             "source": payload.get("source") or {}, "renders": renders,
+             "source": payload.get("source") or {},
+             "video_key": payload.get("video_key", ""),
+             "captions": payload.get("captions") or {},
+             "bundle": payload.get("bundle") or {}, "renders": renders,
              "platforms": platforms, "sel_platforms": selected,
              "files": [r["path"] for r in payload["renders"]], "media": []}
     return state, sorted(set(missing))

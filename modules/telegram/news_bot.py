@@ -104,7 +104,7 @@ from modules.telegram import (  # noqa: E402
 )
 from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.twitter import publisher as tw_publisher  # noqa: E402
-from modules.telegram import branded, groups, headlines, schedule, translator  # noqa: E402
+from modules.telegram import branded, bundle, groups, headlines, schedule, translator  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
@@ -220,6 +220,9 @@ def _extract_media(msg):
     if msg.video:
         return {
             "file_id": msg.video.file_id,
+            # Stable across bots and re-forwards — the bundle history's key
+            # for a video that came in as a Telegram upload.
+            "file_unique_id": msg.video.file_unique_id,
             "type": "video",
             "file_size": msg.video.file_size or 0,
             **src,
@@ -345,6 +348,7 @@ def _init_plan(state: dict, kind: str) -> None:
                  # lands the card says so. Photos are never analysed — see
                  # _start_watching.
                  watching=config.IG_VISION_ENABLED and kind != "photo")
+    state["video_key"] = _video_key(state)
 
 
 def _plan_available(state: dict) -> list:
@@ -407,7 +411,8 @@ def _plan_markup(state: dict) -> InlineKeyboardMarkup:
         opts = state.get("headline_opts") or {}
         return branded.plan_keyboard(layouts, state.get("layout"),
                                      len(opts.get("headlines", ())),
-                                     state.get("headline_pick"))
+                                     state.get("headline_pick"),
+                                     bundle=state["gate_kind"] == "video")
     return branded.plan_edit_keyboard(
         state["brands"], state["sel_brands"], state.get("custom_brands", False),
         layouts, state.get("layout"), _plan_available(state),
@@ -533,6 +538,12 @@ async def _gate(msg, text: str, media: list, files: list | None = None,
     leads there. State is the same _pending dict, mode-tagged."""
     state = {"text": text, "media": media, "files": list(files or ()),
              "sel_tg": set(), "sel_yt": set(), "sel_tw": set(), "sel_em": set()}
+    if kind == "video":
+        bndl = await asyncio.to_thread(queue_store.current_bundle, CHAT_ID)
+        if bndl is not None:
+            line = _track(await msg.reply_text("📦 joining the bundle …"))
+            await _join_bundle(msg.get_bot(), bndl, state, line)
+            return
     _init_plan(state, kind)
     prompt = _track(await msg.reply_text(_plan_text(state),
                                          reply_markup=_plan_markup(state)))
@@ -609,6 +620,11 @@ async def _handle_url(msg, text: str) -> None:
         "sel_tw": set(),
         "sel_em": set(),
     }
+    if config.BRANDS and is_video:
+        bndl = await asyncio.to_thread(queue_store.current_bundle, CHAT_ID)
+        if bndl is not None:
+            await _join_bundle(msg.get_bot(), bndl, state, note)
+            return
     if config.BRANDS and (is_video or _all_photos(state["media"])):
         _init_plan(state, "video" if is_video else "photo")
         await note.edit_text(_plan_text(state), reply_markup=_plan_markup(state))
@@ -651,6 +667,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if reply is not None and reply.message_id in _pending and text.strip():
         state = _pending[reply.message_id]
         field, value = branded.parse_reply(text)
+        if state.get("mode") == "bundle":
+            # A bundle video's line: info starts its headlines (the model's
+            # pick is used unless another is tapped); anything else is the
+            # operator's own headline.
+            if field == "info":
+                state["info"] = value
+                _start_headlines(state, reply)
+            else:
+                state.update(text=value, cap_src="edited", headline_pick=None)
+            await asyncio.to_thread(_save_video, state)
+            await _redraw_line(state, reply)
+            return
         # On the publish picker (or its time picker) a reply that reads as a
         # time schedules the post — before it could be taken as a headline.
         if field == "text" and state.get("mode") in ("publish", "schedule"):
@@ -1025,6 +1053,10 @@ async def _watch_media(bot, state: dict, message) -> None:
         footage = {}
 
     state["footage"] = footage
+    if state.get("mode") == "bundle":
+        await asyncio.to_thread(_save_video, state)
+        await _redraw_line(state, message)
+        return
     # The operator may have moved on (rendered, cancelled) while this ran —
     # only refresh a card that is still open.
     if state.get("mode") != "plan":
@@ -1077,6 +1109,16 @@ async def _write_headlines(state: dict, message) -> None:
     state["headline_opts"] = opts
     state["headline_failed"] = opts is None
     state["headline_task"] = None
+    if state.get("mode") == "bundle":
+        # No step waits for a tap in a bundle: the model's pick IS the
+        # headline unless the operator taps another (or typed their own).
+        if opts and state.get("cap_src") != "edited":
+            pick = opts.get("pick", 0)
+            state.update(text=opts["headlines"][pick], cap_src="AI",
+                         headline_pick=pick)
+        await asyncio.to_thread(_save_video, state)
+        await _redraw_line(state, message)
+        return
     if state.get("mode") != "plan":
         return
     try:
@@ -1114,6 +1156,9 @@ async def _await_footage(state: dict) -> dict:
 
 async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
     """Taps on the plan card / its editor / the publish picker ("b:<verb>")."""
+    if state.get("mode") == "bundle":
+        await _on_bundle_line(q, context, state, verb)
+        return
     if verb == "noop":
         await q.answer("Add brands/<group>/<name>/logo.png to enable this brand.",
                        show_alert=True)
@@ -1267,6 +1312,18 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
         await redraw()
         return
 
+    if verb == "bundle":
+        # 📦 Bundle: open one (or, should one have opened meanwhile, join it)
+        # with this video in it.
+        if state["gate_kind"] != "video":
+            await q.answer("Bundles are for single videos.", show_alert=True)
+            return
+        await q.answer()
+        bndl = await _open_bundle_for(state)
+        _pending.pop(q.message.message_id, None)
+        await _join_bundle(context.bot, bndl, state, q.message)
+        return
+
     if verb == "dl":
         with _busy("sending a download"):
             await _do_download(q, context, state)
@@ -1381,29 +1438,31 @@ def _preselect(state: dict) -> set:
     return {i for i, p in enumerate(state["platforms"]) if p["platform"] in keys}
 
 
-async def _do_render(q, context, state: dict) -> None:
-    """Render one variant per selected brand (headline translated per brand
-    language, translation cached), send each back into the group, then open
-    the publish picker on a fresh message. All brands render in ONE ffmpeg
-    pass (the blur-fill canvas is built once and split per brand); if that
-    combined pass fails it falls back to one render per brand, so a single
-    failed brand is still reported and skipped — never fatal for the others."""
-    brands = [state["brands"][i] for i in sorted(state["sel_brands"])]
-    await q.edit_message_text(
-        "⏳ rendering " + ", ".join(b["name"] for b in brands) + " …")
-    # Settle the analysis before the headline is burned in — normally already
-    # done, since it started when this picker opened.
-    await _await_footage(state)
+class _RenderSetupError(Exception):
+    """The source video couldn't be fetched or probed — nothing rendered."""
 
+
+async def _render_video(bot, chat, state: dict, brands: list, tag: str,
+                        label: str = "") -> tuple[list, list, list, float]:
+    """Render `state`'s video once per brand in `brands` (headline translated
+    per brand language), send each back into `chat` as a preview. Returns
+    (renders, failures, warnings, duration). All brands render in ONE ffmpeg
+    pass (batched — see branding.RENDER_BATCH); if that fails it falls back to
+    one render per brand, so a single bad brand is reported and skipped, never
+    fatal for the others. `tag` makes the output filenames unique; `label`
+    goes on each preview after the brand name ("video 2" in a bundle).
+
+    Raises _RenderSetupError when the source can't be read at all. Shared by
+    the single-post Render and the bundle Render, which calls it once per
+    video with that video's accounts."""
+    # Settle the analysis before the headline is burned in — normally already
+    # done, since it started when the card opened.
+    await _await_footage(state)
     try:
-        src = await _ensure_local_video(context.bot, state)
+        src = await _ensure_local_video(bot, state)
         _, _, duration = await asyncio.to_thread(shorts_format.probe, src)
     except Exception as exc:
-        log.error("brand render setup failed: %s", exc)
-        _pending.pop(q.message.message_id, None)
-        _cleanup(state)
-        await q.edit_message_text(f"❌ can't read the video: {str(exc)[:300]}")
-        return
+        raise _RenderSetupError(str(exc)) from exc
 
     media_dir = os.path.join(config.TG_DATA_DIR, "media")
     renders, failures, warnings = [], [], []
@@ -1419,8 +1478,7 @@ async def _do_render(q, context, state: dict) -> None:
                 cache[lang] = (await asyncio.to_thread(
                     translator.translate, state["text"], lang,
                     config.SOURCE_LANG) if lang else state["text"])
-            out = os.path.join(
-                media_dir, f"brand_{q.message.message_id}_{b['name']}.mp4")
+            out = os.path.join(media_dir, f"brand_{tag}_{b['name']}.mp4")
             jobs.append({"brand": b, "headline": cache[lang],
                          "logo_path": b["logo"], "out_path": out})
         except Exception as exc:
@@ -1463,6 +1521,7 @@ async def _do_render(q, context, state: dict) -> None:
     # disagree about what's available).
     for r in renders:
         b, path = r["brand"], r["path"]
+        name = b["name"] + (f" · {label}" if label else "")
         try:
             size = os.path.getsize(path)
             if size > _BOT_UPLOAD_LIMIT and await mtproto.ensure_ready():
@@ -1472,27 +1531,45 @@ async def _do_render(q, context, state: dict) -> None:
                 # deletes through the BOT, which can't remove your own posts.
                 # The caption must keep _PREVIEW_MARK: on_message recognises
                 # this message by it while send_video is still returning.
-                await mtproto.send_video(q.message.chat.id, path,
-                                         _PREVIEW_MARK + b['name'],
+                await mtproto.send_video(chat.id, path, _PREVIEW_MARK + name,
                                          branding.OUT_W, branding.OUT_H,
                                          int(duration))
             elif size > _BOT_UPLOAD_LIMIT:
-                _track(await q.message.chat.send_message(
-                    f"🏷 {b['name']}: rendered ({mtproto.human_size(size)} — "
+                _track(await chat.send_message(
+                    f"🏷 {name}: rendered ({mtproto.human_size(size)} — "
                     f"too big to send back, {mtproto.unavailable_reason()}; "
                     "publishing still works)"))
             else:
                 with open(path, "rb") as fh:
                     # width/height matter: without them Telegram sizes the
                     # inline player from defaults and plays the clip squashed.
-                    sent = _track(await q.message.chat.send_video(
-                        video=fh, caption=f"🏷 {b['name']}",
+                    sent = _track(await chat.send_video(
+                        video=fh, caption=f"🏷 {name}",
                         width=branding.OUT_W, height=branding.OUT_H,
                         duration=int(duration)))
                     r["preview_id"] = sent.message_id
         except Exception as exc:  # Telegram send only — the render already succeeded
             log.error("brand preview send failed for %s: %s", b["name"], exc)
             warnings.append((b["name"], str(exc)[:200]))
+    return renders, failures, warnings, duration
+
+
+async def _do_render(q, context, state: dict) -> None:
+    """Render one variant per selected brand (`_render_video`), send each back
+    into the group, then open the publish picker on a fresh message."""
+    brands = [state["brands"][i] for i in sorted(state["sel_brands"])]
+    await q.edit_message_text(
+        "⏳ rendering " + ", ".join(b["name"] for b in brands) + " …")
+    try:
+        renders, failures, warnings, duration = await _render_video(
+            context.bot, q.message.chat, state, brands,
+            str(q.message.message_id))
+    except _RenderSetupError as exc:
+        log.error("brand render setup failed: %s", exc)
+        _pending.pop(q.message.message_id, None)
+        _cleanup(state)
+        await q.edit_message_text(f"❌ can't read the video: {str(exc)[:300]}")
+        return
 
     if not renders:
         _pending.pop(q.message.message_id, None)
@@ -1824,6 +1901,24 @@ async def _ig_captions(source_text: str, pairs: list, footage: dict | None = Non
         return {}
 
 
+async def _log_reel(state: dict, brand: dict, media_id) -> None:
+    """One published Reel into queue_store's reel log: bundle history (which
+    account has had which video) and the weekly report's raw numbers. Never
+    raises — the reel is already up."""
+    try:
+        meta = state.get("bundle") or {}
+        key = state.get("video_key") or meta.get("video_key") or ""
+        if not key:
+            return
+        followers = await asyncio.to_thread(ig_graph.followers, brand["ig"])
+        await asyncio.to_thread(
+            queue_store.log_reel, key, brand["name"], brand["ig"],
+            str(media_id) if media_id else None, meta.get("id"),
+            meta.get("copy_count"), followers)
+    except Exception:
+        log.exception("reel log failed for %s", brand.get("name"))
+
+
 async def _do_publish(message, bot, state: dict) -> None:
     """_publish_pairs under the busy marker — a deploy waits for it."""
     with _busy("publishing"):
@@ -1853,16 +1948,18 @@ async def _publish_pairs(message, bot, state: dict) -> None:
             pass
 
     # Before the loop: one footage-backed expansion shared by every IG and YT
-    # pair, informed by the operator's info: reply when there is one.
-    ig_caps = await _ig_captions(state.get("text", ""), pairs,
-                                 state.get("footage") or {},
-                                 state.get("info", ""),
-                                 cache=state.setdefault("caption_cache", {}),
-                                 source=state.get("source"))
+    # pair, informed by the operator's info: reply when there is one. A
+    # bundle post carries its captions already — written at render time.
+    ig_caps = state.get("captions") or await _ig_captions(
+        state.get("text", ""), pairs, state.get("footage") or {},
+        state.get("info", ""), cache=state.setdefault("caption_cache", {}),
+        source=state.get("source"))
 
     lines = []
+    failed = set()   # platform keys with a ❌ — what a Retry re-sends
     for p in pairs:
         r, b = p["render"], p["render"]["brand"]
+        before = len(lines)
         try:
             if p["platform"] == "tg":
                 posted, errors, links = await publisher.publish(
@@ -1918,6 +2015,8 @@ async def _publish_pairs(message, bot, state: dict) -> None:
                     drop()
                 if result.get("status") == "success":
                     lines.append(f"✅ {p['label']}")
+                    if r.get("kind", "video") == "video":
+                        await _log_reel(state, b, result.get("id"))
                 else:
                     lines.append(f"❌ {p['label']}: "
                                  f"{result.get('error', 'unknown error')}")
@@ -1950,13 +2049,605 @@ async def _publish_pairs(message, bot, state: dict) -> None:
         except Exception as exc:
             log.error("brand publish failed for %s: %s", p["label"], exc)
             lines.append(f"❌ {p['label']}: {str(exc)[:200]}")
+        if any(line.startswith("❌") for line in lines[before:]):
+            failed.add(p["platform"])
+    state["failed_platforms"] = sorted(failed)
 
     if state.get("auto_published"):
         lines.insert(0, f"⏱ auto-published after {_AUTO_PUBLISH_S // 60} min idle")
     if state.get("note"):
         lines.insert(0, state["note"])
-    _cleanup(state)
+    if not (failed and state.get("bundle")):
+        _cleanup(state)
     await message.edit_text("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# Bundle mode (modules/telegram/bundle.py)                                    #
+# --------------------------------------------------------------------------- #
+#
+# 📦 Bundle on a video's plan card opens a bundle; while one is open every new
+# single video joins it with no tap, as a one-line message that its `info:`
+# reply goes to. Each video stays exactly a single post — its own info, its
+# own AI headlines (the model's pick is taken unless another is tapped), its
+# own source post, renders and captions. 🎬 Render bundle spreads the videos
+# across EVERY active account (bundle.assign), renders each account's version
+# and writes its caption; 🚀 Publish turns the timetable into scheduled posts
+# (the `scheduled` table, one row per account). Bundle and video state live in
+# queue_store, so an open or rendered bundle survives a restart; callbacks on
+# the bundle's own messages ("u:…") are routed by bundle id from the DB.
+
+_BUNDLE_DIR = os.path.join(config.TG_DATA_DIR, "media", "bundles")
+
+# The part of a video's state a bundle persists — everything its render and
+# caption are made from. The rest (brands, pickers, tasks) is rebuilt.
+_VIDEO_KEYS = ("text", "cap_src", "info", "source", "footage",
+               "headline_opts", "headline_pick", "media", "files", "origin",
+               "video_key")
+
+
+def _video_key(state: dict) -> str:
+    """What makes two posts "the same video" for bundle history: the source
+    post's URL (query stripped), or Telegram's file_unique_id."""
+    url = ((state.get("source") or {}).get("url") or "").strip()
+    if url:
+        return url.split("?")[0].rstrip("/")
+    media = (state.get("media") or [{}])[0]
+    uid = media.get("file_unique_id") or media.get("file_id") or ""
+    return f"tg:{uid}" if uid else ""
+
+
+def _persistable(state: dict) -> dict:
+    return {k: state.get(k) for k in _VIDEO_KEYS}
+
+
+def _save_video(state: dict) -> None:
+    if state.get("bundle_video"):
+        queue_store.save_bundle_video(state["bundle_video"],
+                                      state=_persistable(state))
+
+
+def _bundle_state(row: dict, bundle_id: int, platforms) -> dict:
+    """A video's state rebuilt from its bundle_videos row (after a restart, or
+    for a video no longer in _pending)."""
+    state = dict(row["state"])
+    state.setdefault("files", [])
+    state.setdefault("media", [])
+    state.update(sel_tg=set(), sel_yt=set(), sel_tw=set(), sel_em=set())
+    _init_plan(state, "video")
+    state.update(mode="bundle", bundle_id=bundle_id, bundle_video=row["id"],
+                 plan_platforms=set(platforms), watching=False)
+    state["text"] = state.get("text") or ""
+    return state
+
+
+def _move_into(state: dict, folder: str) -> None:
+    """Move the video's downloaded files into `folder`, out of reach of the
+    nightly 24 h media sweep (it never recurses into a subdirectory)."""
+    os.makedirs(folder, exist_ok=True)
+    moved = {}
+    for path in list(state.get("files") or ()):
+        if os.path.dirname(os.path.abspath(path)) == os.path.abspath(folder):
+            continue
+        new = os.path.join(folder, os.path.basename(path))
+        try:
+            os.replace(path, new)
+            moved[path] = new
+        except OSError as exc:
+            log.warning("bundle: couldn't move %s: %s", path, exc)
+    state["files"] = [moved.get(p, p) for p in state.get("files") or ()]
+    for m in state.get("media") or ():
+        if m.get("path") in moved:
+            m["path"] = moved[m["path"]]
+
+
+def _line_body(state: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """A bundle video's one-line message: the bundle's size, this video's
+    headline and what it still needs, its AI headline options."""
+    ids = [v["id"] for v in queue_store.bundle_videos(state["bundle_id"])]
+    n = ids.index(state["bundle_video"]) + 1 if state["bundle_video"] in ids \
+        else len(ids)
+    view = dict(state, headline_task_running=_task_running(
+        state.get("headline_task")))
+    lines = [bundle.line_text(state["bundle_id"], len(ids), n, view)]
+    if state.get("info") or _task_running(state.get("headline_task")):
+        lines += _headline_lines(state)
+    opts = (state.get("headline_opts") or {}).get("headlines", [])
+    return "\n\n".join(lines), bundle.line_keyboard(
+        len(opts), state.get("headline_pick"))
+
+
+async def _redraw_line(state: dict, message) -> None:
+    body, markup = _line_body(state)
+    try:
+        await message.edit_text(body, reply_markup=markup)
+    except Exception:  # "message is not modified", or deleted
+        pass
+
+
+async def _join_bundle(bot, bndl: dict, state: dict, message) -> None:
+    """Put a single-video post into the open bundle; `message` becomes its
+    line (a reply to it carries the video's info)."""
+    if state.get("mode") != "plan":
+        _init_plan(state, "video")
+    state.update(mode="bundle", bundle_id=bndl["id"],
+                 plan_platforms=set(bndl["platforms"]))
+    state["video_key"] = _video_key(state)
+    _move_into(state, os.path.join(_BUNDLE_DIR, str(bndl["id"])))
+    state["bundle_video"] = await asyncio.to_thread(
+        queue_store.add_bundle_video, bndl["id"], _persistable(state),
+        message.message_id)
+    _pending[message.message_id] = state
+    log.info("bundle #%d: video %d joined (%s)", bndl["id"],
+             state["bundle_video"], state["video_key"])
+    await _redraw_line(state, message)
+    _start_watching(bot, state, message)
+
+
+async def _open_bundle_for(state: dict) -> dict:
+    """The chat's open bundle, opened now (with this card's platforms) when
+    there is none."""
+    bndl = await asyncio.to_thread(queue_store.current_bundle, CHAT_ID)
+    if bndl is None:
+        keys = sorted(_plan_keys(state)) or ["ig"]
+        bid = await asyncio.to_thread(queue_store.open_bundle, CHAT_ID, keys)
+        bndl = await asyncio.to_thread(queue_store.get_bundle, bid)
+        log.info("bundle #%d opened on %s", bid, ", ".join(keys))
+    return bndl
+
+
+async def _on_bundle_line(q, context, state: dict, verb: str) -> None:
+    """Taps on a bundle video's line ("b:…" — it lives in _pending)."""
+    if verb.startswith("h:"):
+        opts = (state.get("headline_opts") or {}).get("headlines", [])
+        i = int(verb.split(":", 1)[1])
+        if i >= len(opts):
+            await q.answer("Those options were replaced — pick again.",
+                           show_alert=True)
+            return
+        await q.answer()
+        state.update(text=opts[i], cap_src="AI", headline_pick=i)
+        await asyncio.to_thread(_save_video, state)
+        await _redraw_line(state, q.message)
+        return
+    if verb == "bx":
+        await q.answer()
+        await asyncio.to_thread(queue_store.save_bundle_video,
+                                state["bundle_video"], status="removed")
+        _pending.pop(q.message.message_id, None)
+        _cleanup(state)
+        n = len(await asyncio.to_thread(queue_store.bundle_videos,
+                                        state["bundle_id"]))
+        await q.edit_message_text(f"🗑 removed from bundle #{state['bundle_id']}"
+                                  f" — {n} video{'s' if n != 1 else ''} left")
+        return
+    if verb == "bgo":
+        await _render_bundle(q, context, state["bundle_id"])
+        return
+    await q.answer()
+
+
+def _bundle_accounts() -> list:
+    """The active accounts' brand dicts, in BUNDLE_ACCOUNTS order (only those
+    that can render — a brand without a logo can't)."""
+    brands = {b["name"]: b for b in branded.available_brands(config.BRANDS)}
+    return [brands[n] for n in config.BUNDLE_ACCOUNTS
+            if n in brands and brands[n]["has_logo"]]
+
+
+def _history(accounts: list, keys: dict) -> dict:
+    """{account: {video id it already published}} for this bundle's videos."""
+    raw = queue_store.published_videos(accounts)
+    return {a: {vid for vid, key in keys.items() if key and key in raw.get(a, ())}
+            for a in accounts}
+
+
+def _platform_labels(keys) -> list:
+    names = dict(branded.PLATFORMS)
+    return [names.get(k, k) for k in keys]
+
+
+async def _render_pairs(bot, chat, bid: int, states: dict, assignment: dict,
+                        plan: dict, platforms) -> None:
+    """Render and caption every (video, account) pair of `assignment` that
+    `plan["renders"]` doesn't have yet — per video, exactly the single-post
+    pipeline (`_render_video`, `_ig_captions`) for that video's accounts."""
+    accounts = {b["name"]: b for b in _bundle_accounts()}
+    folder = os.path.join(_BUNDLE_DIR, str(bid))
+    for vid, state in states.items():
+        have = plan["renders"].setdefault(vid, {})
+        want = [accounts[a] for a, v in assignment.items()
+                if v == vid and a not in have and a in accounts]
+        if not want:
+            continue
+        n = plan["videos"][vid]["n"]
+        try:
+            renders, failures, warnings, duration = await _render_video(
+                bot, chat, state, want, f"b{bid}v{vid}", f"video {n}")
+        except _RenderSetupError as exc:
+            plan["failures"].append(f"❌ video {n}: can't read the video — "
+                                    f"{str(exc)[:200]}")
+            continue
+        plan["failures"] += [f"❌ {name} (video {n}): {err}"
+                             for name, err in failures]
+        offered = [p for p in branded.platforms_for(renders, duration)
+                   if p["platform"] in platforms]
+        pairs = branded.expand(offered, set(range(len(offered))))
+        caps = await _ig_captions(
+            state["text"], pairs, state.get("footage") or {},
+            state.get("info", ""), cache=state.setdefault("caption_cache", {}),
+            source=state.get("source"))
+        os.makedirs(folder, exist_ok=True)
+        for r in renders:
+            new = os.path.join(folder, os.path.basename(r["path"]))
+            try:
+                os.replace(r["path"], new)
+            except OSError:
+                new = r["path"]
+            have[r["brand"]["name"]] = {
+                "path": new, "headline": r["headline"], "duration": duration,
+                "caption": caps.get(r["brand"]["name"], "")}
+
+
+def _slots_for(plan: dict) -> list:
+    rendered = {a: v for a, v in plan["assignment"].items()
+                if a in plan["renders"].get(v, {})}
+    return bundle.timetable(
+        rendered, gap=(config.BUNDLE_GAP_MIN_S, config.BUNDLE_GAP_MAX_S),
+        max_copies=config.BUNDLE_MAX_COPIES,
+        window=config.BUNDLE_COPY_WINDOW_S)
+
+
+def _summary(bid: int, plan: dict, platforms, start=None,
+             scheduled: bool = False) -> str:
+    start = start or (dt.datetime.now().astimezone()
+                      + dt.timedelta(seconds=config.BUNDLE_FIRST_POST_S))
+    heads = {v: (d["state"].get("text") or "") for v, d in plan["videos"].items()}
+    return bundle.summary_text(bid, heads, plan["slots"], start,
+                               _platform_labels(platforms),
+                               plan["notes"] + plan["failures"], scheduled)
+
+
+async def _render_bundle(q, context, bid: int) -> None:
+    """🎬 Render bundle: check every video is ready, assign, render, caption,
+    and post the one summary with 🚀 Publish / 🔀 Reshuffle."""
+    bndl = await asyncio.to_thread(queue_store.get_bundle, bid)
+    if bndl is None or bndl["status"] != "open":
+        await q.answer(f"Bundle #{bid} is "
+                       f"{bndl['status'] if bndl else 'gone'}.", show_alert=True)
+        return
+    rows = await asyncio.to_thread(queue_store.bundle_videos, bid)
+    if not rows:
+        await q.answer("The bundle is empty.", show_alert=True)
+        return
+    states = {}
+    for row in rows:
+        st = _pending.get(row["card_id"])
+        if st is None or st.get("bundle_video") != row["id"]:
+            st = _bundle_state(row, bid, bndl["platforms"])
+        states[str(row["id"])] = st
+    order = list(states)
+    need = [i + 1 for i, v in enumerate(order)
+            if not (states[v].get("info") or "").strip()]
+    if need:
+        await q.answer("Waiting for an info: reply on video "
+                       + ", ".join(map(str, need)) + ".", show_alert=True)
+        return
+    busy = [i + 1 for i, v in enumerate(order)
+            if _task_running(states[v].get("headline_task"))]
+    if busy:
+        await q.answer("Headlines are still being written for video "
+                       + ", ".join(map(str, busy)) + " — tap again in a moment.",
+                       show_alert=True)
+        return
+    if not await asyncio.to_thread(queue_store.claim_bundle, bid, "open",
+                                   "rendering"):
+        await q.answer()
+        return
+    await q.answer()
+    accounts = [b["name"] for b in _bundle_accounts()]
+    keys = {v: states[v].get("video_key") or "" for v in order}
+    hist = await asyncio.to_thread(_history, accounts, keys)
+    assignment, carried = bundle.assign(order, accounts, hist)
+    notes = []
+    if carried:
+        new_bid = await asyncio.to_thread(queue_store.open_bundle, CHAT_ID,
+                                          bndl["platforms"])
+        for v in carried:
+            await asyncio.to_thread(queue_store.save_bundle_video, int(v),
+                                    bundle_id=new_bid)
+            states[v]["bundle_id"] = new_bid
+            order.remove(v)
+        notes.append(f"↪️ {len(carried)} video{'s' if len(carried) != 1 else ''}"
+                     f" carried over to the next bundle (#{new_bid})")
+    for v in order:
+        states[v]["mode"] = "rendering"
+        _pending.pop(next((r["card_id"] for r in rows if str(r["id"]) == v),
+                          None), None)
+    for a in bundle.clashes(assignment, hist):
+        notes.append(f"⚠️ {a} has posted video "
+                     f"{order.index(assignment[a]) + 1} before — no other "
+                     "way to fill every account")
+    chat = q.message.chat
+    status = _track(await chat.send_message(
+        f"⏳ rendering bundle #{bid}: {len(order)} video"
+        f"{'s' if len(order) != 1 else ''} → {len(assignment)} accounts …"))
+    plan = {"assignment": assignment, "renders": {}, "notes": notes,
+            "failures": [], "slots": [],
+            "videos": {v: {"n": i + 1, "state": _persistable(states[v])}
+                       for i, v in enumerate(order)}}
+    try:
+        with _busy("rendering a bundle"):
+            await _render_pairs(context.bot, chat, bid, states, assignment,
+                                plan, bndl["platforms"])
+    except Exception as exc:
+        log.exception("bundle #%d render failed", bid)
+        plan["failures"].append(f"❌ render stopped: {str(exc)[:200]}")
+    plan["slots"] = _slots_for(plan)
+    for v in order:   # the source files now belong to the plan, not a picker
+        plan["videos"][v]["state"] = _persistable(states[v])
+    await asyncio.to_thread(queue_store.update_bundle, bid, plan=plan,
+                            status="ready", message_id=status.message_id)
+    if not plan["slots"]:
+        await status.edit_text(_summary(bid, plan, bndl["platforms"])
+                               + "\n❌ nothing rendered — nothing to publish",
+                               reply_markup=bundle.open_keyboard(bid))
+        await asyncio.to_thread(queue_store.claim_bundle, bid, "ready", "open")
+        return
+    if config.BUNDLE_AUTO_PUBLISH:
+        await _publish_bundle(context, bid, status)
+        return
+    await status.edit_text(_summary(bid, plan, bndl["platforms"]),
+                           reply_markup=bundle.ready_keyboard(bid))
+
+
+async def _reshuffle_bundle(q, context, bid: int) -> None:
+    """🔀 Reshuffle: a new random assignment; only the pairs never rendered
+    before are rendered (the old ones stay on disk until publish/cancel)."""
+    if not await asyncio.to_thread(queue_store.claim_bundle, bid, "ready",
+                                   "rendering"):
+        await q.answer("This bundle can't be reshuffled now.", show_alert=True)
+        return
+    await q.answer()
+    bndl = await asyncio.to_thread(queue_store.get_bundle, bid)
+    plan = bndl["plan"]
+    order = list(plan["videos"])
+    states = {v: _bundle_state({"id": int(v), "state": plan["videos"][v]["state"]},
+                               bid, bndl["platforms"]) for v in order}
+    accounts = [b["name"] for b in _bundle_accounts()]
+    keys = {v: states[v].get("video_key") or "" for v in order}
+    hist = await asyncio.to_thread(_history, accounts, keys)
+    old = plan["assignment"]
+    for _ in range(10):   # a re-draw that changes nothing is no reshuffle
+        assignment, _carried = bundle.assign(order, accounts, hist)
+        if assignment != old or len(order) == 1:
+            break
+    plan.update(assignment=assignment, failures=[])
+    await q.edit_message_text(f"⏳ reshuffling bundle #{bid} …")
+    try:
+        with _busy("rendering a bundle"):
+            await _render_pairs(context.bot, q.message.chat, bid, states,
+                                assignment, plan, bndl["platforms"])
+    except Exception as exc:
+        log.exception("bundle #%d reshuffle failed", bid)
+        plan["failures"].append(f"❌ render stopped: {str(exc)[:200]}")
+    plan["slots"] = _slots_for(plan)
+    await asyncio.to_thread(queue_store.update_bundle, bid, plan=plan,
+                            status="ready")
+    await q.edit_message_text(_summary(bid, plan, bndl["platforms"]),
+                              reply_markup=bundle.ready_keyboard(bid))
+
+
+def _unused_files(plan: dict, used: set) -> list:
+    """Every render and source file of a plan that `used` doesn't contain."""
+    paths = [r["path"] for per in plan["renders"].values() for r in per.values()]
+    for d in plan["videos"].values():
+        paths += list(d["state"].get("files") or ())
+    return [p for p in paths if p not in used]
+
+
+async def _publish_bundle(context, bid: int, message) -> None:
+    """🚀 Publish: one scheduled post per account at its timetable slot."""
+    if not await asyncio.to_thread(queue_store.claim_bundle, bid, "ready",
+                                   "scheduled"):
+        return
+    bndl = await asyncio.to_thread(queue_store.get_bundle, bid)
+    plan = bndl["plan"]
+    brands = {b["name"]: b for b in branded.available_brands(config.BRANDS)}
+    copies = bundle.copies({a: v for _, a, v in plan["slots"]})
+    start = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+        seconds=config.BUNDLE_FIRST_POST_S)
+    notes, used = [], set()
+    for at, account, vid in plan["slots"]:
+        b, r = brands.get(account), plan["renders"][vid][account]
+        if b is None:
+            notes.append(f"⚠️ {account}: no longer configured — skipped")
+            continue
+        when = start + dt.timedelta(seconds=at)
+        if b.get("ig") and "ig" in bndl["platforms"]:
+            quota = await asyncio.to_thread(ig_graph.publishing_quota, b["ig"])
+            if quota and quota[0] >= quota[1]:
+                when += dt.timedelta(hours=24)
+                notes.append(f"⏭ {account}: Instagram quota full "
+                             f"({quota[0]}/{quota[1]}) — rolled to "
+                             f"{schedule.fmt(when)}")
+        render = {"brand": b, "path": r["path"], "headline": r["headline"],
+                  "kind": "video"}
+        offered = [p for p in branded.platforms_for([render], r["duration"])
+                   if p["platform"] in bndl["platforms"]]
+        if not offered:
+            notes.append(f"⚠️ {account}: none of the bundle's platforms set "
+                         "up — skipped")
+            continue
+        vstate = plan["videos"][vid]["state"]
+        st = {"text": vstate.get("text", ""), "info": vstate.get("info", ""),
+              "footage": vstate.get("footage") or {},
+              "source": vstate.get("source") or {},
+              "video_key": vstate.get("video_key", ""),
+              "renders": [render], "platforms": offered,
+              "sel_platforms": set(range(len(offered))),
+              "captions": {account: r.get("caption", "")} if r.get("caption") else {},
+              "bundle": {"id": bid, "video_key": vstate.get("video_key", ""),
+                         "copy_count": copies.get(vid), "account": account,
+                         "video": plan["videos"][vid]["n"]}}
+        sched_id = await asyncio.to_thread(
+            queue_store.add_scheduled, when, CHAT_ID, message.message_id,
+            schedule.to_payload(st), bid)
+        if context.job_queue is not None:
+            _arm_scheduled(context.job_queue, sched_id, when)
+        used.add(r["path"])
+    _remove_files(_unused_files(plan, used))
+    plan["notes"] = plan["notes"] + notes
+    await asyncio.to_thread(queue_store.update_bundle, bid, plan=plan)
+    log.info("bundle #%d scheduled: %d posts", bid, len(used))
+    await message.edit_text(
+        _summary(bid, plan, bndl["platforms"],
+                 start.astimezone(), scheduled=True),
+        reply_markup=bundle.scheduled_keyboard(bid))
+
+
+async def _cancel_bundle(q, bid: int) -> None:
+    """✕ on an open or rendered bundle: nothing has been scheduled yet."""
+    bndl = await asyncio.to_thread(queue_store.get_bundle, bid)
+    status = bndl["status"] if bndl else "gone"
+    if status not in ("open", "ready") or not await asyncio.to_thread(
+            queue_store.claim_bundle, bid, status, "cancelled"):
+        await q.answer(f"Bundle #{bid} is {status}.", show_alert=True)
+        return
+    await q.answer()
+    for row in await asyncio.to_thread(queue_store.bundle_videos, bid):
+        st = _pending.pop(row["card_id"], None)
+        if st is not None:
+            _cleanup(st)
+        _remove_files(row["state"].get("files") or ())
+    if bndl["plan"]:
+        _remove_files(_unused_files(bndl["plan"], set()))
+    log.info("bundle #%d cancelled", bid)
+    await q.edit_message_text(f"✕ bundle #{bid} closed — nothing was published")
+
+
+async def _cancel_bundle_posts(q, context, bid: int) -> None:
+    """✕ on a scheduled bundle: cancel every post still waiting."""
+    n = 0
+    for row in await asyncio.to_thread(queue_store.scheduled_for_bundle, bid,
+                                       "pending"):
+        if not queue_store.claim_scheduled(row["id"], "pending", "cancelled"):
+            continue
+        n += 1
+        if context.job_queue is not None:
+            for job in context.job_queue.get_jobs_by_name(
+                    _sched_job_name(row["id"])):
+                job.schedule_removal()
+        _remove_files(r["path"] for r in row["payload"]["renders"])
+    await q.answer(f"{n} post{'s' if n != 1 else ''} cancelled.", show_alert=True)
+    try:
+        await q.edit_message_text(q.message.text + f"\n✕ {n} waiting post"
+                                  f"{'s' if n != 1 else ''} cancelled")
+    except BadRequest:
+        pass
+
+
+async def _on_bundle_callback(q, context) -> None:
+    """"u:<verb>:<bundle id>" — DB-routed, so it works after a restart."""
+    try:
+        _, verb, bid = q.data.split(":", 2)
+        bid = int(bid)
+    except ValueError:
+        await q.answer()
+        return
+    if verb == "go":
+        await _render_bundle(q, context, bid)
+    elif verb == "pub":
+        await q.answer()
+        await _publish_bundle(context, bid, q.message)
+    elif verb == "rs":
+        await _reshuffle_bundle(q, context, bid)
+    elif verb == "x":
+        await _cancel_bundle(q, bid)
+    elif verb == "xs":
+        await _cancel_bundle_posts(q, context, bid)
+    else:
+        await q.answer()
+
+
+async def cmd_bundle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/bundle — the open bundle (or the rendered one waiting for Publish)
+    with its buttons, for when the operator scrolled away from them."""
+    msg = update.effective_message
+    bndl = await asyncio.to_thread(queue_store.current_bundle, CHAT_ID)
+    if bndl is not None:
+        rows = await asyncio.to_thread(queue_store.bundle_videos, bndl["id"])
+        views = [dict(_pending.get(r["card_id"]) or r["state"]) for r in rows]
+        _track(await msg.reply_text(bundle.open_text(bndl["id"], views),
+                                    reply_markup=bundle.open_keyboard(bndl["id"])))
+        return
+    ready = await asyncio.to_thread(queue_store.bundles_with_status, "ready")
+    if ready:
+        b = ready[-1]
+        _track(await msg.reply_text(_summary(b["id"], b["plan"], b["platforms"]),
+                                    reply_markup=bundle.ready_keyboard(b["id"])))
+        return
+    _track(await msg.reply_text("📦 no open bundle — tap 📦 Bundle on a "
+                                "video's card to start one"))
+
+
+def _restore_bundles(app) -> None:
+    """Startup: open bundles' video lines back into _pending (their info
+    replies and taps keep working); a render a restart cut off goes back to
+    open, with a note."""
+    for bndl in queue_store.bundles_with_status("rendering"):
+        queue_store.claim_bundle(bndl["id"], "rendering", "open")
+        app.create_task(app.bot.send_message(
+            CHAT_ID, f"⚠️ bundle #{bndl['id']}'s render was interrupted by a "
+            "restart — /bundle, then 🎬 Render bundle again"))
+    for bndl in queue_store.bundles_with_status("open"):
+        for row in queue_store.bundle_videos(bndl["id"]):
+            if row["card_id"]:
+                _pending[row["card_id"]] = _bundle_state(
+                    row, bndl["id"], bndl["platforms"])
+        log.info("bundle #%d restored (open)", bndl["id"])
+
+
+# --------------------------------------------------------------------------- #
+# Reel insights and the weekly report                                          #
+# --------------------------------------------------------------------------- #
+
+# A permission problem is reported to the group once per process, not per reel.
+_insights_warned = False
+
+
+async def _insights_job(context) -> None:
+    """Hourly: Reels insights (views, reach, shares, saves, comments) and the
+    account's follower count at 24 h and 72 h after each logged reel."""
+    global _insights_warned
+    for window, hours in (("24h", 24), ("72h", 72)):
+        rows = await asyncio.to_thread(queue_store.reels_due,
+                                       f"insights_{window}", hours)
+        for r in rows:
+            data, why = await asyncio.to_thread(ig_graph.reel_insights,
+                                                r["media_id"], r["account"])
+            fol = await asyncio.to_thread(ig_graph.followers, r["account"])
+            await asyncio.to_thread(queue_store.save_insights, r["id"], window,
+                                    data if data is not None else {"error": why},
+                                    fol)
+            if data is None and not _insights_warned:
+                _insights_warned = True
+                log.error("reel insights unreadable for %s: %s", r["account"], why)
+                await context.bot.send_message(
+                    CHAT_ID, f"⚠️ can't read Reels insights for {r['account']}: "
+                    f"{why}\nThe token needs the instagram_business_manage_"
+                    "insights permission; the weekly report will lack views "
+                    "until it has it.")
+
+
+async def _weekly_report_job(context) -> None:
+    """Mondays: last week's reels per account / bundle / copy count, then the
+    Account status reminder."""
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
+    rows = await asyncio.to_thread(queue_store.reels_since, since)
+    _track(await context.bot.send_message(
+        CHAT_ID, bundle.report_text(rows, "last 7 days")))
+    _track(await context.bot.send_message(CHAT_ID, bundle.REMINDER))
 
 
 # --------------------------------------------------------------------------- #
@@ -2068,7 +2759,23 @@ async def _run_scheduled(bot, sched_id: int) -> None:
             queue_store.claim_scheduled(sched_id, "running", "failed")
         else:
             await _do_publish(msg, bot, state)
-            queue_store.claim_scheduled(sched_id, "running", "done")
+            failed = state.get("failed_platforms") or []
+            if state.get("bundle") and failed:
+                # Only the platforms that failed go again on 🔁 Retry.
+                payload = row["payload"]
+                payload["selected"] = [j for j, p in enumerate(payload["platforms"])
+                                       if p["platform"] in failed]
+                queue_store.set_scheduled_payload(sched_id, payload)
+                queue_store.claim_scheduled(sched_id, "running", "failed")
+                account = state["bundle"].get("account", "this account")
+                _track(await bot.send_message(
+                    CHAT_ID, f"❌ bundle #{state['bundle'].get('id')}: "
+                    f"{account} failed on " + ", ".join(failed),
+                    reply_to_message_id=msg.message_id,
+                    allow_sending_without_reply=True,
+                    reply_markup=bundle.retry_keyboard(sched_id, account)))
+            else:
+                queue_store.claim_scheduled(sched_id, "running", "done")
     except Exception:
         log.exception("scheduled #%d failed", sched_id)
         queue_store.claim_scheduled(sched_id, "running", "failed")
@@ -2080,6 +2787,26 @@ async def _run_scheduled(bot, sched_id: int) -> None:
             chat_id=CHAT_ID, message_id=row["message_id"])
     except Exception:  # card deleted (weekly wipe) — the results still landed
         pass
+
+
+async def _on_schedule_retry(q, context) -> None:
+    """🔁 Retry ("s:<id>:r") on a failed bundle post: the failed platforms
+    only, now. DB-routed like Cancel."""
+    try:
+        sched_id = int(q.data.split(":")[1])
+    except (IndexError, ValueError):
+        await q.answer()
+        return
+    if not queue_store.claim_scheduled(sched_id, "failed", "pending"):
+        await q.answer("Nothing to retry — it already went, or is going.",
+                       show_alert=True)
+        return
+    await q.answer()
+    try:
+        await q.edit_message_text(q.message.text + "\n🔁 retrying …")
+    except BadRequest:
+        pass
+    context.application.create_task(_run_scheduled(context.bot, sched_id))
 
 
 async def _on_schedule_cancel(q, context) -> None:
@@ -2277,9 +3004,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await q.answer()
         return
 
-    # Scheduled posts live in the DB, not in _pending — routed before it.
+    # Scheduled posts and bundles live in the DB, not in _pending — routed
+    # before it.
     if (q.data or "").startswith("s:"):
-        await _on_schedule_cancel(q, context)
+        if q.data.endswith(":r"):
+            await _on_schedule_retry(q, context)
+        else:
+            await _on_schedule_cancel(q, context)
+        return
+    if (q.data or "").startswith(f"{bundle.NS}:"):
+        await _on_bundle_callback(q, context)
         return
 
     state = _pending.get(q.message.message_id)
@@ -2525,6 +3259,14 @@ async def _on_start(app) -> None:
             log.info("IG token refresh scheduled daily for %s (tokens older than %d d)",
                      ", ".join(config.IG_GRAPH_ACCOUNTS), IG_TOKEN_MAX_AGE_DAYS)
         _restore_scheduled(app)
+        _restore_bundles(app)
+        app.job_queue.run_repeating(_insights_job, interval=3600, first=300,
+                                    name="reel-insights")
+        app.job_queue.run_daily(_weekly_report_job,
+                                time=dt.time(9, 0, tzinfo=local_tz),
+                                days=(cleanup.MONDAY,), name="weekly-report")
+        log.info("bundles restored; reel insights hourly; weekly report "
+                 "Mondays 09:00 %s", local_tz)
     else:
         log.warning("no job queue — weekly cleanup and scheduled posts NOT "
                     "scheduled (install python-telegram-bot[job-queue])")
@@ -2579,6 +3321,7 @@ def main() -> None:
     app.add_handler(CommandHandler("asks", cmd_asks, filters=control))
     app.add_handler(CommandHandler("next", cmd_next, filters=control))
     app.add_handler(CommandHandler("scheduled", cmd_scheduled, filters=control))
+    app.add_handler(CommandHandler("bundle", cmd_bundle, filters=control))
     # Chat filter limits the bot to the control group; ~COMMAND skips /commands.
     app.add_handler(MessageHandler(control & ~filters.COMMAND, on_message))
     app.add_handler(CallbackQueryHandler(on_callback))

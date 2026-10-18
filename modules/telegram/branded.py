@@ -340,7 +340,7 @@ def _design_row(layouts: list, layout) -> list:
 
 
 def plan_keyboard(layouts: list = (), layout=None, n_headlines: int = 0,
-                  chosen=None) -> InlineKeyboardMarkup:
+                  chosen=None, bundle: bool = False) -> InlineKeyboardMarkup:
     """Render / Change / Download / Post as-is / Cancel, with the design row
     right on the card when a photo post has more than one design to choose
     from, and a 1-N row when AI headline options are on offer (`chosen` is
@@ -353,6 +353,9 @@ def plan_keyboard(layouts: list = (), layout=None, n_headlines: int = 0,
         rows.insert(0, [InlineKeyboardButton(
             f"{'● ' if i == chosen else ''}{i + 1}", callback_data=f"b:h:{i}")
             for i in range(n_headlines)])
+    if bundle:
+        # Starts a bundle with this video (or joins the one just opened).
+        rows.append([InlineKeyboardButton("📦 Bundle", callback_data="b:bundle")])
     rows.append([InlineKeyboardButton("⬇ Download", callback_data="b:dl")])
     rows.append([InlineKeyboardButton("📤 Post as-is", callback_data="b:asis"),
                  InlineKeyboardButton("✕ Cancel", callback_data="b:cancel")])

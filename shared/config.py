@@ -432,6 +432,30 @@ BRANDS = _parse_brands(os.environ.get("BRANDS", ""), os.environ)
 
 
 # --------------------------------------------------------------------------- #
+# Bundle mode (modules/telegram/bundle.py, hosted by news_bot.py)             #
+# --------------------------------------------------------------------------- #
+
+# The ACTIVE accounts a bundle spreads its videos across, by brand name — take
+# one out to pause it, no code change. Blank = every brand with an Instagram
+# account connected (europamonitor, Telegram-only, is therefore not in it).
+BUNDLE_ACCOUNTS = [
+    a.strip() for a in os.environ.get("BUNDLE_ACCOUNTS", "").split(",") if a.strip()
+] or [b["name"] for b in BRANDS if b["ig"]]
+# Skip the 🚀 Publish tap: a rendered bundle is scheduled straight away.
+BUNDLE_AUTO_PUBLISH = os.environ.get("BUNDLE_AUTO_PUBLISH", "0").strip().lower() in (
+    "1", "true", "yes", "on")
+# The random gap between two consecutive bundle posts, in seconds (2-8 min).
+BUNDLE_GAP_MIN_S = _int_env("BUNDLE_GAP_MIN_S", 120)
+BUNDLE_GAP_MAX_S = _int_env("BUNDLE_GAP_MAX_S", 480)
+# Never more than BUNDLE_MAX_COPIES posts of one video in BUNDLE_COPY_WINDOW_S
+# — this outranks the gap, so a one-video bundle (ten copies) takes ~2.5 h.
+BUNDLE_MAX_COPIES = _int_env("BUNDLE_MAX_COPIES", 2)
+BUNDLE_COPY_WINDOW_S = _int_env("BUNDLE_COPY_WINDOW_S", 1800)
+# The first bundle post goes out this long after 🚀 Publish — room to cancel.
+BUNDLE_FIRST_POST_S = _int_env("BUNDLE_FIRST_POST_S", 120)
+
+
+# --------------------------------------------------------------------------- #
 # Telegram autopilot (modules/telegram/autopilot.py, hosted by news_bot.py)   #
 # --------------------------------------------------------------------------- #
 
