@@ -146,3 +146,20 @@ def test_render_hook_crop_and_cut(tmp_path, audio):
     w, h, duration = shorts_format.probe(str(out))
     assert (w, h) == (288, 510)          # 320*0.9, 568*0.9 rounded to even
     assert abs(duration - 7) < 0.15      # 2 s hook + 5 s kept
+
+
+# --- ▶ Preview edit ---------------------------------------------------------
+
+def _callbacks(markup):
+    return [b.callback_data for row in markup.inline_keyboard for b in row]
+
+
+def test_preview_button_only_while_there_is_an_edit():
+    assert "b:pv" not in _callbacks(branded.plan_keyboard(bundle=True))
+    assert "b:pv" in _callbacks(branded.plan_keyboard(bundle=True, preview=True))
+
+
+def test_bundle_line_offers_the_same_preview():
+    from modules.telegram import bundle
+    assert "b:pv" not in _callbacks(bundle.line_keyboard())
+    assert "b:pv" in _callbacks(bundle.line_keyboard(preview=True))

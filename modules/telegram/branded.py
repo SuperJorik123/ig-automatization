@@ -345,12 +345,19 @@ def _design_row(layouts: list, layout) -> list:
             for lay, label in layouts]
 
 
+# Sends the edited clip alone (no branding) — on the plan card and on a
+# bundle video's line, only while the post has an `edit:`.
+PREVIEW_EDIT_BUTTON = InlineKeyboardButton("▶ Preview edit", callback_data="b:pv")
+
+
 def plan_keyboard(layouts: list = (), layout=None, n_headlines: int = 0,
-                  chosen=None, bundle: bool = False) -> InlineKeyboardMarkup:
+                  chosen=None, bundle: bool = False,
+                  preview: bool = False) -> InlineKeyboardMarkup:
     """Render / Change / Download / Post as-is / Cancel, with the design row
     right on the card when a photo post has more than one design to choose
     from, and a 1-N row when AI headline options are on offer (`chosen` is
-    the one currently set, marked ●)."""
+    the one currently set, marked ●). `preview`: the post has an `edit:`, so
+    ▶ Preview edit is offered under Render."""
     rows = [[InlineKeyboardButton("🎬 Render", callback_data="b:go"),
              InlineKeyboardButton("✏️ Change", callback_data="b:edit")]]
     if len(layouts) > 1:
@@ -359,6 +366,8 @@ def plan_keyboard(layouts: list = (), layout=None, n_headlines: int = 0,
         rows.insert(0, [InlineKeyboardButton(
             f"{'● ' if i == chosen else ''}{i + 1}", callback_data=f"b:h:{i}")
             for i in range(n_headlines)])
+    if preview:
+        rows.append([PREVIEW_EDIT_BUTTON])
     if bundle:
         # Starts a bundle with this video (or joins the one just opened).
         rows.append([InlineKeyboardButton("📦 Bundle", callback_data="b:bundle")])

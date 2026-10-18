@@ -442,26 +442,81 @@ async def _on_edit_reply(state: dict, value: str, reply, msg) -> None:
         pass
 
 
+async def _preview_edit(q, context, state: dict) -> None:
+    """▶ Preview edit: the edited clip on its own — no branding, nothing
+    published — as a reply to the card. Made by _edited_source, so the
+    🎬 Render after it reuses the same file instead of editing twice."""
+    if not state.get("edit"):
+        await q.answer("No edit on this video — reply `edit: …` first.",
+                       show_alert=True)
+        return
+    if state.get("previewing"):
+        await q.answer("Already making the preview…")
+        return
+    if await _video_too_big(state):
+        await q.answer("Too large to fetch for a preview.", show_alert=True)
+        return
+    await q.answer("✂️ making the preview…")
+    state["previewing"] = True
+    chat = q.message.chat
+    try:
+        with _busy("previewing an edit"):
+            src = await _ensure_local_video(context.bot, state)
+            _, _, duration = await asyncio.to_thread(shorts_format.probe, src)
+            path, duration = await _edited_source(state, src, duration)
+            w, h, _ = await asyncio.to_thread(shorts_format.probe, path)
+            caption = "✂️ edit preview — " + video_edit.describe(
+                state["edit"]).removeprefix("✂️ edit: ")
+            size = os.path.getsize(path)
+            if size > _BOT_UPLOAD_LIMIT and await mtproto.ensure_ready():
+                # Not _track()ed: a Telethon message the bot can't delete.
+                await mtproto.send_video(chat.id, path, _PREVIEW_MARK + caption,
+                                         w, h, int(duration))
+            elif size > _BOT_UPLOAD_LIMIT:
+                _track(await q.message.reply_text(
+                    f"✂️ the edited clip is {mtproto.human_size(size)} — too "
+                    f"big to send back ({mtproto.unavailable_reason()}); "
+                    "🎬 Render still works"))
+            else:
+                with open(path, "rb") as fh:
+                    _track(await q.message.reply_video(
+                        video=fh, caption=caption, width=w, height=h,
+                        duration=int(duration)))
+    except _EditError as exc:
+        _track(await q.message.reply_text(
+            f"✂️ the edit failed: {str(exc)[:300]}\n\n{video_edit.SYNTAX}"))
+    except Exception as exc:
+        log.error("edit preview failed: %s", exc)
+        _track(await q.message.reply_text(
+            f"✂️ couldn't make the preview: {str(exc)[:300]}"))
+    finally:
+        state["previewing"] = False
+
+
 async def _edited_source(state: dict, src: str, duration: float) -> tuple:
     """(path, duration) of the clip the brands render from: `src` itself, or
     its edited copy when the post has an `edit:`. The copy is made once per
-    edit and reused by a second render of the same post."""
+    edit and reused by a second render of the same post. Per-post lock: a
+    🎬 Render tapped while ▶ Preview edit is still making the copy waits for
+    it and reuses it, rather than writing the same file twice at once."""
     spec = state.get("edit")
     if video_edit.is_noop(spec or {}):
         return src, duration
-    k = video_edit.key(spec)
-    done = state.get("edited") or {}
-    if done.get("key") == k and os.path.exists(done.get("path") or ""):
-        return done["path"], done["duration"]
-    out = os.path.splitext(src)[0] + f"_edit_{k}.mp4"
-    try:
-        await asyncio.to_thread(video_edit.render, src, spec, out, duration)
-        _, _, new_duration = await asyncio.to_thread(shorts_format.probe, out)
-    except (ValueError, RuntimeError) as exc:
-        raise _EditError(str(exc)) from exc
-    state["files"].append(out)
-    state["edited"] = {"key": k, "path": out, "duration": new_duration}
-    return out, new_duration
+    lock = state.setdefault("edit_lock", asyncio.Lock())
+    async with lock:
+        k = video_edit.key(spec)
+        done = state.get("edited") or {}
+        if done.get("key") == k and os.path.exists(done.get("path") or ""):
+            return done["path"], done["duration"]
+        out = os.path.splitext(src)[0] + f"_edit_{k}.mp4"
+        try:
+            await asyncio.to_thread(video_edit.render, src, spec, out, duration)
+            _, _, new_duration = await asyncio.to_thread(shorts_format.probe, out)
+        except (ValueError, RuntimeError) as exc:
+            raise _EditError(str(exc)) from exc
+        state["files"].append(out)
+        state["edited"] = {"key": k, "path": out, "duration": new_duration}
+        return out, new_duration
 
 
 def _headline_lines(state: dict) -> list:
@@ -488,7 +543,8 @@ def _plan_markup(state: dict) -> InlineKeyboardMarkup:
         return branded.plan_keyboard(layouts, state.get("layout"),
                                      len(opts.get("headlines", ())),
                                      state.get("headline_pick"),
-                                     bundle=state["gate_kind"] == "video")
+                                     bundle=state["gate_kind"] == "video",
+                                     preview=bool(state.get("edit")))
     return branded.plan_edit_keyboard(
         state["brands"], state["sel_brands"], state.get("custom_brands", False),
         layouts, state.get("layout"), _plan_available(state),
@@ -1408,6 +1464,10 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
             await _do_download(q, context, state)
         return
 
+    if verb == "pv":
+        await _preview_edit(q, context, state)
+        return
+
     if verb == "go":
         # "b:go" is the 🎬 Render button. Validate BEFORE answering: a query
         # can only be answered once, so an alert sent after a bare q.answer()
@@ -2249,7 +2309,7 @@ def _line_body(state: dict) -> tuple[str, InlineKeyboardMarkup]:
         lines += _headline_lines(state)
     opts = (state.get("headline_opts") or {}).get("headlines", [])
     return "\n\n".join(lines), bundle.line_keyboard(
-        len(opts), state.get("headline_pick"))
+        len(opts), state.get("headline_pick"), preview=bool(state.get("edit")))
 
 
 async def _redraw_line(state: dict, message) -> None:
@@ -2318,6 +2378,9 @@ async def _on_bundle_line(q, context, state: dict, verb: str) -> None:
         return
     if verb == "bgo":
         await _render_bundle(q, context, state["bundle_id"])
+        return
+    if verb == "pv":
+        await _preview_edit(q, context, state)
         return
     await q.answer()
 
