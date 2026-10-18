@@ -60,9 +60,9 @@ def test_filter_graph_contains_fixed_design_constants():
     assert "scale=135:240:force_original_aspect_ratio=increase" in graph
     assert "gblur=sigma=4" in graph                        # blur-fill canvas
     assert "scale=1080:1920:out_color_matrix=bt709:out_range=tv[bg]" in graph
-    # The clip fits 1080x1708: a 9:16 one shrinks to 89 % so the blur frames
-    # it; wider clips are width-bound and unchanged.
-    assert ("scale=1080:1708:force_original_aspect_ratio=decrease"
+    # The clip is fit to the whole canvas: a 9:16 one fills it (the
+    # 2026-10-18 shrink-to-89 % framing was reverted the same day).
+    assert ("scale=1080:1920:force_original_aspect_ratio=decrease"
             ":force_divisible_by=2:flags=lanczos") in graph
     assert "scale=205:-1:flags=lanczos[logo0]" in graph    # logo width
     # Top-right margins, matched to the reference render — not equal.
@@ -126,7 +126,7 @@ def test_encode_args_quality_profile():
 
 def test_clip_is_sharpened_and_converted_to_bt709(monkeypatch):
     graph = branding.blurfill_chain()
-    fg = graph[graph.index("[0:v]scale=1080:1708"):graph.index("[fg]")]
+    fg = graph[graph.index("[0:v]scale=1080:1920:force"):graph.index("[fg]")]
     assert "out_color_matrix=bt709" in fg
     assert "unsharp=5:5:0.5:5:5:0" in fg                  # luma only
     monkeypatch.setattr(branding, "SHARPEN", 0.0)

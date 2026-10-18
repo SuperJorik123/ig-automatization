@@ -6,8 +6,9 @@ pass, building the shared blur-fill canvas once and splitting it per brand
 (the per-brand encodes still dominate — see the speed-knob comments below).
 
 The geometry is FIXED (same size and position every time): 1080x1920 canvas
-(blur-fill, the same treatment shorts_format gives horizontal videos; a clip
-taller than ~0.63:1 is shrunk to 89 % of the height so the blur frames it), logo scaled to 205 px
+(blur-fill, the same treatment shorts_format gives horizontal videos — the
+clip is fit to the whole canvas, so a 9:16 input fills it and only wider or
+narrower ones show blur above/below or beside), logo scaled to 205 px
 wide sitting 82 px from the right edge and 102 px from the top, headline at
 a box whose bottom edge sits at 79 % of frame height (clear of Instagram's UI
 in the bottom 20 %) — semi-bold, in a banner box of fixed width (matched to
@@ -147,14 +148,6 @@ _BT709 = ":out_color_matrix=bt709:out_range=tv"
 # skips the full-res Gaussian — ~12 % of the render.
 BLUR_W, BLUR_H = 135, 240
 BLUR_SIGMA = 4
-# The clip's box on the canvas: full width, but only FG_SCALE of the height.
-# A 9:16 clip used to fill the whole canvas, which made the blur-fill
-# invisible — an Instagram repost came out as the same frame upscaled. Fitting
-# into 1080x1708 shrinks every clip taller than ~0.63:1 to 89 % (a 9:16 one
-# to 961x1708), so the blurred frame shows round it, while 16:9, 1:1 and 4:5
-# clips are width-bound and come out exactly as before.
-FG_SCALE = 0.89
-FG_H = int(OUT_H * FG_SCALE) // 2 * 2       # 1708 — even, for yuv420p
 
 STYLE_FILE = "style.json"   # optional, next to the brand's logo.png
 
@@ -439,7 +432,7 @@ def blurfill_chain(out_label: str = "[canvas]") -> str:
         f"[0:v]scale={BLUR_W}:{BLUR_H}:force_original_aspect_ratio=increase,"
         f"crop={BLUR_W}:{BLUR_H},gblur=sigma={BLUR_SIGMA},"
         f"scale={OUT_W}:{OUT_H}{_BT709}[bg];"
-        f"[0:v]scale={OUT_W}:{FG_H}:force_original_aspect_ratio=decrease"
+        f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease"
         f":force_divisible_by=2:flags=lanczos{_BT709}{sharpen}[fg];"
         # setsar=1: the fit scales leave a fractional compensating SAR (e.g.
         # 4321:4320) in the header, and players that honor it show the frame
