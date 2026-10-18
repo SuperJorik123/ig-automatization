@@ -69,6 +69,9 @@ SYNTAX = ("edit: 23-26 (hook — those seconds first, then the whole clip), "
 _TIME = r"\d+(?::\d{1,2}){0,2}(?:[.,]\d+)?"
 _RANGE_RE = re.compile(rf"^({_TIME})\s*(?:-|–|—|to)\s*({_TIME})$")
 _AMOUNT_RE = re.compile(rf"^({_TIME})\s*(%|s|sec|secs|seconds?)?$")
+# Clauses end at a comma/semicolon/newline OR where the next keyword starts —
+# operators type "hook 0:18-0:21 crop left 1% crop right 2%" with no commas.
+_CLAUSE_RE = re.compile(r"[,;\n]+|\s+(?=(?:hook|crop|cut|trim)\b)", re.I)
 
 
 def _seconds(token: str) -> float:
@@ -142,7 +145,7 @@ def parse(text: str) -> dict:
     Raises ValueError naming the clause it couldn't read."""
     spec = {"hook": None, "crop": {}, "cut_start": None, "cut_end": None,
             "cuts": []}
-    clauses = [c.strip() for c in re.split(r"[,;\n]+", text or "") if c.strip()]
+    clauses = [c.strip() for c in _CLAUSE_RE.split(text or "") if c.strip()]
     if not clauses:
         return {}
     for clause in clauses:

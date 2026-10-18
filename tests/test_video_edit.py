@@ -27,6 +27,17 @@ def test_a_headline_that_starts_with_edit_is_still_a_headline():
 
 # --- parse ------------------------------------------------------------------
 
+def test_clauses_need_no_commas():
+    # Typed in the control group exactly like this (2026-10-18).
+    spec = ve.parse("hook 0:18-0:21 crop left 1% crop right 2%")
+    assert spec["hook"] == [18, 21]
+    assert spec["crop"] == {"left": 0.01, "right": 0.02}
+    spec = ve.parse("23-26 cut end 2 crop top 8% left 5%")
+    assert spec["hook"] == [23, 26]
+    assert spec["cut_end"] == {"s": 2}
+    assert spec["crop"] == {"top": 0.08, "left": 0.05}
+
+
 def test_a_bare_range_is_the_hook():
     assert ve.parse("23-26")["hook"] == [23, 26]
     assert ve.parse("hook 0:23 - 0:26")["hook"] == [23, 26]
