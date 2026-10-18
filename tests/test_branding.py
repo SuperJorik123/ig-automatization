@@ -59,12 +59,12 @@ def test_filter_graph_contains_fixed_design_constants():
     # the old full-res gblur sigma=30, ~12 % cheaper (measured on the VPS).
     assert "scale=135:240:force_original_aspect_ratio=increase" in graph
     assert "gblur=sigma=4" in graph                        # blur-fill canvas
-    assert "scale=1080:1920[bg]" in graph                  # upscaled back
+    assert "scale=1080:1920:out_color_matrix=bt709:out_range=tv[bg]" in graph
     # The clip fits 1080x1708: a 9:16 one shrinks to 89 % so the blur frames
     # it; wider clips are width-bound and unchanged.
     assert ("scale=1080:1708:force_original_aspect_ratio=decrease"
-            ":force_divisible_by=2[fg]") in graph
-    assert "scale=205:-1[logo0]" in graph                  # logo width
+            ":force_divisible_by=2:flags=lanczos") in graph
+    assert "scale=205:-1:flags=lanczos[logo0]" in graph    # logo width
     # Top-right margins, matched to the reference render — not equal.
     assert "overlay=W-w-82:102" in graph
     assert "fontsize=49" in graph
@@ -102,8 +102,8 @@ def test_filter_graph_multi_builds_the_canvas_once():
     assert graph.count("gblur") == 1                       # shared canvas
     assert "split=2[c0][c1]" in graph
     # Each branch: its own logo input, textfile, style, labeled output.
-    assert "[1:v]scale=205:-1[logo0]" in graph
-    assert "[2:v]scale=205:-1[logo1]" in graph
+    assert "[1:v]scale=205:-1:flags=lanczos[logo0]" in graph
+    assert "[2:v]scale=205:-1:flags=lanczos[logo1]" in graph
     assert "textfile='/t/a.txt'" in graph
     assert "textfile='/t/b.txt'" in graph
     assert "fontsize=60" in graph
@@ -113,6 +113,24 @@ def test_filter_graph_multi_builds_the_canvas_once():
 def test_encode_args_use_the_speed_preset():
     i = branding.ENCODE_ARGS.index("-preset")
     assert branding.ENCODE_ARGS[i + 1] == branding.PRESET == "superfast"
+
+
+def test_encode_args_quality_profile():
+    args = branding.ENCODE_ARGS
+    assert args[args.index("-crf") + 1] == str(branding.CRF) == "18"
+    for flag in ("-colorspace", "-color_primaries", "-color_trc"):
+        assert args[args.index(flag) + 1] == "bt709"
+    assert args[args.index("-b:a") + 1] == "192k"
+    assert args[args.index("-ar") + 1] == "48000"
+
+
+def test_clip_is_sharpened_and_converted_to_bt709(monkeypatch):
+    graph = branding.blurfill_chain()
+    fg = graph[graph.index("[0:v]scale=1080:1708"):graph.index("[fg]")]
+    assert "out_color_matrix=bt709" in fg
+    assert "unsharp=5:5:0.5:5:5:0" in fg                  # luma only
+    monkeypatch.setattr(branding, "SHARPEN", 0.0)
+    assert "unsharp" not in branding.blurfill_chain()
 
 
 # --- load_style ------------------------------------------------------------

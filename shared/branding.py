@@ -123,7 +123,24 @@ FADE_DUR = 1.5              # s of smooth fade-out after that
 # single biggest lever: superfast is ~2x veryfast at the same CRF, paying in
 # file size (~1.5x) rather than visible quality. ultrafast would be another
 # ~35 % faster but disables enough coding tools to soften the picture.
-PRESET = "superfast"
+PRESET = os.environ.get("BRAND_PRESET") or "superfast"
+
+# ---- quality knobs (2026-10-18) ---------------------------------------------
+# Instagram re-encodes every upload, so what we hand it is a master: the
+# cleaner it is, the less its encoder spends on our compression noise.
+# CRF 18 is near-transparent for x264 (21 was visibly soft on faces and
+# on-screen text); files come out ~1.5-2x bigger, which the Graph API's
+# fetch doesn't care about.
+CRF = int(os.environ.get("BRAND_CRF") or 18)
+# Luma-only unsharp mask on the clip AFTER it is scaled into the canvas — most
+# sources are 720p tweets upscaled to 1080 wide, and this is the "HD export"
+# crispness phone editors add. 0 disables. Past ~0.8 it halos edges and
+# makes the source's compression blocks stand out.
+SHARPEN = float(os.environ.get("BRAND_SHARPEN") or 0.5)
+# Every render is tagged BT.709 and converted to it on the way in (an SD
+# source can be BT.601): untagged video is guessed at by players, and
+# Instagram's guess sometimes shifts the colours.
+_BT709 = ":out_color_matrix=bt709:out_range=tv"
 # The blur-fill background is computed on a 1/8-scale copy and upscaled back:
 # blurring 135x240 and stretching to 1080x1920 is visually identical to
 # gblur sigma=30 at full resolution (the upscale is itself a low-pass) and
@@ -415,12 +432,15 @@ def blurfill_chain(out_label: str = "[canvas]") -> str:
     (empty string = the graph's unlabeled final output, for callers that
     want the bare canvas, e.g. shorts_format)."""
     sar = ",setsar=1" if out_label else ""
+    # The background is blurred anyway, so its scalers stay the cheap default;
+    # the clip itself gets lanczos (sharper than bicubic on an upscale).
+    sharpen = f",unsharp=5:5:{SHARPEN:g}:5:5:0" if SHARPEN > 0 else ""
     return (
         f"[0:v]scale={BLUR_W}:{BLUR_H}:force_original_aspect_ratio=increase,"
         f"crop={BLUR_W}:{BLUR_H},gblur=sigma={BLUR_SIGMA},"
-        f"scale={OUT_W}:{OUT_H}[bg];"
+        f"scale={OUT_W}:{OUT_H}{_BT709}[bg];"
         f"[0:v]scale={OUT_W}:{FG_H}:force_original_aspect_ratio=decrease"
-        f":force_divisible_by=2[fg];"
+        f":force_divisible_by=2:flags=lanczos{_BT709}{sharpen}[fg];"
         # setsar=1: the fit scales leave a fractional compensating SAR (e.g.
         # 4321:4320) in the header, and players that honor it show the frame
         # very slightly off-square. The canvas is the display shape; pin it.
@@ -438,7 +458,7 @@ def _brand_chain(i: int, font_path: str, text_path: str,
     font_size = style["font_size"]
     box = f"{style['background']}@{style['background_alpha']}"
     return (
-        f"[{logo_input}:v]scale={LOGO_W}:-1[logo{i}];"
+        f"[{logo_input}:v]scale={LOGO_W}:-1:flags=lanczos[logo{i}];"
         f"[{canvas_label}][logo{i}]overlay="
         f"W-w-{LOGO_MARGIN_X}:{LOGO_MARGIN_Y}[branded{i}];"
         # The banner lives on its own transparent layer: drawtext's alpha=
@@ -494,12 +514,15 @@ RENDER_BATCH = int(os.environ.get("BRAND_RENDER_BATCH") or 4)
 
 
 # The per-output half of the encode command, identical for every render here
-# and in shorts_format: x264 at the speed preset above, faststart for
-# streaming players.
+# and in shorts_format: x264 at the preset/CRF above, BT.709 tags matching the
+# conversion in blurfill_chain, 192k/48 kHz audio, faststart for streaming
+# players.
 ENCODE_ARGS = [
-    "-c:v", "libx264", "-preset", PRESET, "-crf", "21",
+    "-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
     "-pix_fmt", "yuv420p",
-    "-c:a", "aac", "-b:a", "128k",
+    "-colorspace", "bt709", "-color_primaries", "bt709",
+    "-color_trc", "bt709", "-color_range", "tv",
+    "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
     "-movflags", "+faststart",
 ]
 

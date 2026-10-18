@@ -55,7 +55,10 @@ MAX_CROP_SIDE = 0.40  # per side
 MAX_CROP_AXIS = 0.60  # top+bottom, left+right: at least 40 % of the frame stays
 MAX_CUTS = 4          # middle cuts — each one is another input/segment
 FADE_S = 0.03         # audio fade at every join, so a jump cut doesn't click
-CRF = 18              # an intermediate: branding re-encodes it once more
+# An intermediate: branding re-encodes it once more, so it is kept visually
+# lossless (CRF 12) rather than paying a second lossy generation before
+# Instagram's own re-encode — a bigger file, but it lives minutes.
+CRF = 12
 
 SIDES = ("top", "bottom", "left", "right")
 
