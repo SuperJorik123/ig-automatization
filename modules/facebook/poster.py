@@ -415,6 +415,101 @@ def whoami(account: str) -> dict:
                          "access_token": token})
 
 
+# --------------------------------------------------------------------------- #
+# numbers — the latest Reel, for the news bot's /report                        #
+# --------------------------------------------------------------------------- #
+
+# The number Facebook itself shows as "Views" is the Video node's `views`
+# field (= fb_reels_total_plays, replays included), read with the listing.
+# These are the fallbacks, tried in order, each its own call because an
+# unknown metric fails the whole request. blue_reels_play_count is LAST on
+# purpose: it leaves replays out and reads ~55-60 % of the visible count
+# (wswire 2026-11-02: 45,705 vs the 77,938 Facebook showed).
+REEL_VIEW_METRICS = ("fb_reels_total_plays", "blue_reels_play_count")
+
+
+def _insight(video_id: str, token: str, metric: str):
+    body = _call("GET", f"{API}/{video_id}/video_insights",
+                 params={"metric": metric, "access_token": token})
+    for item in body.get("data") or ():
+        if item.get("name") == metric:
+            return (item.get("values") or [{}])[0].get("value")
+    return None
+
+
+def _summary_count(video_id: str, token: str, edge: str) -> int | None:
+    body = _call("GET", f"{API}/{video_id}",
+                 params={"fields": f"{edge}.summary(true).limit(0)",
+                         "access_token": token})
+    count = ((body.get(edge) or {}).get("summary") or {}).get("total_count")
+    return int(count) if count is not None else None
+
+
+def latest_reel(account: str) -> tuple[dict | None, str]:
+    """The Page's most recent Reel: ({url, posted_at, caption, views, likes,
+    comments, shares}, "") — (None, "no reels yet") or (None, why). Each
+    number is read on its own and is None when that read fails (views need
+    the read_insights permission on top of pages_read_engagement), so one
+    missing permission blanks one column, not the row. Never raises."""
+    try:
+        token, page_id = _creds(account)
+    except Exception as exc:
+        return None, str(exc)[:300]
+    body = None
+    for fields in ("id,description,created_time,permalink_url,views",
+                   "id,description,created_time,permalink_url"):
+        try:
+            body = _call("GET", f"{API}/{page_id}/video_reels",
+                         params={"fields": fields, "limit": 1,
+                                 "access_token": token})
+            break
+        except Exception as exc:
+            why = str(exc)[:300]
+    if body is None:
+        return None, why
+    reels = body.get("data") or []
+    if not reels:
+        return None, "no reels yet"
+    reel = reels[0]
+    vid = reel["id"]
+    url = reel.get("permalink_url") or f"/reel/{vid}"
+    if url.startswith("/"):
+        url = "https://www.facebook.com" + url
+
+    views = reel.get("views")
+    for metric in (() if isinstance(views, (int, float)) else REEL_VIEW_METRICS):
+        try:
+            views = _insight(vid, token, metric)
+        except Exception as exc:
+            log.info("[FB:%s] reel metric %s unavailable: %s", account, metric, exc)
+            continue
+        if views is not None:
+            break
+    counts = {}
+    for edge in ("likes", "comments"):
+        try:
+            counts[edge] = _summary_count(vid, token, edge)
+        except Exception as exc:
+            log.info("[FB:%s] reel %s unavailable: %s", account, edge, exc)
+            counts[edge] = None
+    shares = None
+    try:
+        social = _insight(vid, token, "post_video_social_actions")
+        if isinstance(social, dict):
+            shares = social.get("SHARE", social.get("share"))
+    except Exception:
+        pass
+    return {
+        "url": url,
+        "posted_at": reel.get("created_time") or "",
+        "caption": reel.get("description") or "",
+        "views": views if isinstance(views, (int, float)) else None,
+        "likes": counts["likes"],
+        "comments": counts["comments"],
+        "shares": shares,
+    }, ""
+
+
 def delete_post(post_id: str, account: str) -> dict:
     """Remove a post. Used to clear test posts off a live Page; not part of
     any publish path."""

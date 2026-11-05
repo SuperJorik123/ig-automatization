@@ -82,7 +82,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
+from telegram import (BotCommand, BotCommandScopeChat, InlineKeyboardButton,  # noqa: E402
+                      InlineKeyboardMarkup, Update)
 from telegram.error import BadRequest  # noqa: E402
 from telegram.ext import (  # noqa: E402
     Application,
@@ -104,7 +105,8 @@ from modules.telegram import (  # noqa: E402
 )
 from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.twitter import publisher as tw_publisher  # noqa: E402
-from modules.telegram import branded, bundle, groups, headlines, schedule, translator  # noqa: E402
+from modules.telegram import branded, bundle, groups, headlines, schedule, spellfix, translator  # noqa: E402
+from modules.telegram import report as reach_report  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
@@ -1289,6 +1291,26 @@ async def _await_footage(state: dict) -> dict:
     return state.get("footage") or {}
 
 
+async def _spellfix_headline(state: dict, chat) -> None:
+    """Fix typos in the headline right before it is burned in
+    (modules/telegram/spellfix.py). Rewrites state["text"], so the
+    translations, the banner and the IG caption all get the fixed one, and
+    tells the group when it changed a word. Checked once per headline: a
+    re-render of the same text costs nothing."""
+    text = state.get("text") or ""
+    if not text.strip() or state.get("spellchecked") == text:
+        return
+    fixed = await asyncio.to_thread(spellfix.correct, text)
+    state["spellchecked"] = fixed
+    if fixed == text:
+        return
+    state["text"] = fixed
+    log.info("headline spell-fixed: %r -> %r", text, fixed)
+    with contextlib.suppress(Exception):  # a note only — the render goes on
+        _track(await chat.send_message(
+            f"✏️ spelling fixed: {text}\n→ {fixed}"))
+
+
 async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
     """Taps on the plan card / its editor / the publish picker ("b:<verb>")."""
     if state.get("mode") == "bundle":
@@ -1603,6 +1625,7 @@ async def _render_video(bot, chat, state: dict, brands: list, tag: str,
     # Settle the analysis before the headline is burned in — normally already
     # done, since it started when the card opened.
     await _await_footage(state)
+    await _spellfix_headline(state, chat)
     try:
         src = await _ensure_local_video(bot, state)
         _, _, duration = await asyncio.to_thread(shorts_format.probe, src)
@@ -1815,6 +1838,7 @@ async def _do_render_card(q, context, state: dict) -> None:
     await q.edit_message_text(
         "⏳ composing " + ", ".join(b["name"] for b in brands) + " …")
     await _await_footage(state)
+    await _spellfix_headline(state, q.message.chat)
 
     try:
         photos = await _ensure_local_photos(context.bot, state)
@@ -2728,6 +2752,37 @@ async def _on_bundle_callback(q, context) -> None:
         await q.answer()
 
 
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/report — every account's latest reel on Instagram, Facebook and
+    YouTube with its views / likes / comments (modules/telegram/report.py).
+    Read live from the platforms, so it takes a few seconds."""
+    msg = update.effective_message
+    note = _track(await msg.reply_text("📊 collecting the latest reel of every "
+                                       "account …"))
+    try:
+        results = await asyncio.to_thread(reach_report.collect, config.BRANDS)
+        pages = reach_report.render(results)
+    except Exception as exc:  # collect never raises; render is pure — belt and braces
+        log.error("report failed: %s", exc)
+        await note.edit_text(f"❌ report failed: {str(exc)[:300]}")
+        return
+    await note.edit_text(pages[0], parse_mode="HTML",
+                         disable_web_page_preview=True)
+    for page in pages[1:]:
+        _track(await msg.chat.send_message(page, parse_mode="HTML",
+                                           disable_web_page_preview=True))
+
+
+# What the group's command menu (the "/" button) offers. /autopilot and /next
+# still work but are left out: unattended posting is prohibited (CLAUDE.md).
+_MENU = [
+    BotCommand("report", "📊 latest reel of every account: views, likes, comments"),
+    BotCommand("bundle", "the open bundle with its buttons"),
+    BotCommand("scheduled", "posts waiting to go out"),
+    BotCommand("queue", "what's in the news queue"),
+]
+
+
 async def cmd_bundle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/bundle — the open bundle (or the rendered one waiting for Publish)
     with its buttons, for when the operator scrolled away from them."""
@@ -3390,6 +3445,10 @@ async def _on_start(app) -> None:
     the weekly cleanup, and connect the big-file client so its state is known
     (and logged) before the first post rather than discovered mid-upload."""
     autopilot.schedule(app)
+    try:
+        await app.bot.set_my_commands(_MENU, scope=BotCommandScopeChat(CHAT_ID))
+    except Exception as exc:  # a missing menu is cosmetic; the commands still work
+        log.warning("command menu not set: %s", exc)
     if app.job_queue is not None and config.HEALTHCHECK_URL_NEWSBOT:
         app.job_queue.run_repeating(_heartbeat_job, interval=heartbeat.INTERVAL_S,
                                     first=10, name="heartbeat")
@@ -3480,6 +3539,7 @@ def main() -> None:
     app.add_handler(CommandHandler("next", cmd_next, filters=control))
     app.add_handler(CommandHandler("scheduled", cmd_scheduled, filters=control))
     app.add_handler(CommandHandler("bundle", cmd_bundle, filters=control))
+    app.add_handler(CommandHandler("report", cmd_report, filters=control))
     # Chat filter limits the bot to the control group; ~COMMAND skips /commands.
     app.add_handler(MessageHandler(control & ~filters.COMMAND, on_message))
     app.add_handler(CallbackQueryHandler(on_callback))

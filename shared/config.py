@@ -420,6 +420,8 @@ def _parse_brands(raw: str, env):
             "group": group or folder_group,
             "tg": (env.get(f"BRAND_{key}_TG") or "").strip(),
             "yt": (env.get(f"BRAND_{key}_YT") or "").strip(),
+            # Public @handle for the /report command's YouTube numbers.
+            "yt_handle": (env.get(f"BRAND_{key}_YT_HANDLE") or "").strip(),
             "tw": (env.get(f"BRAND_{key}_TW") or "").strip(),
             "ig": (env.get(f"BRAND_{key}_IG") or "").strip(),
             "fb": (env.get(f"BRAND_{key}_FB") or "").strip(),

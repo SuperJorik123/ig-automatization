@@ -47,3 +47,7 @@ Thumbs.db
 # Client newsroom bot runtime state (SQLite store)
 modules/newsroom/data/
 .gstack/
+
+# find_original: Chrome login/consent profile + per-run downloads
+tools/find_original/chrome-profile/
+tools/find_original/runs/

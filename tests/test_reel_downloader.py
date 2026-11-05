@@ -9,6 +9,20 @@ import pytest
 from shared import config, reel_downloader
 
 
+@pytest.fixture(autouse=True)
+def _offline(monkeypatch):
+    """No real HTTP: a short Reddit link would otherwise be resolved over the
+    network. Tests that need a response patch requests.get themselves."""
+    import requests
+
+    def offline(*a, **kw):
+        raise requests.ConnectionError("offline test")
+    monkeypatch.setattr(requests, "get", offline)
+    # Route the curl_cffi leg through requests.get too, so one patch covers it.
+    monkeypatch.setattr(reel_downloader, "_reddit_get",
+                        lambda url, **kw: requests.get(url, **kw))
+
+
 def fake_gdl(files, stderr=""):
     """subprocess.run stand-in: stages `files` ({name: bytes | dict}) into the
     directory the -D flag points at, exactly as the gallery-dl CLI would."""
@@ -398,3 +412,90 @@ def test_reddit_context_never_raises(monkeypatch):
 
     assert reel_downloader.reddit_context("https://redd.it/abc") == ""
     assert reel_downloader.reddit_context("https://x.com/a/status/1") == ""
+
+
+def test_share_links_are_resolved_before_yt_dlp(monkeypatch):
+    # yt-dlp's Reddit extractor ignores /s/ links; the generic one 403s.
+    import requests
+    monkeypatch.setattr(requests, "get", lambda url, **kw: FakeResp(
+        "https://www.reddit.com/r/x/comments/1xe3an2/title/?share_id=1"))
+    seen = []
+    monkeypatch.setattr(reel_downloader, "_download_media",
+                        lambda url, dest, kind: seen.append(url) or ("/v.mp4", "", {}))
+
+    reel_downloader.fetch("https://www.reddit.com/r/x/s/wcBrSdrixQ", "/s.mp4")
+
+    assert seen == ["https://www.reddit.com/r/x/comments/1xe3an2/title/"]
+
+
+def test_resolving_leaves_other_urls_alone_and_never_raises(monkeypatch):
+    import requests
+
+    def boom(*a, **kw):
+        raise requests.ConnectionError("down")
+    monkeypatch.setattr(requests, "get", boom)
+
+    for url in ("https://www.reddit.com/r/x/comments/abc",
+                "https://x.com/a/status/1",
+                "https://www.reddit.com/r/x/s/wcBrSdrixQ"):
+        assert reel_downloader.resolve_reddit_url(url) == url
+
+
+def _video_post(**extra):
+    return [{"data": {"children": [{"data": {
+        "title": "Reporter averts two phone snatchings", "author": "op_user",
+        "secure_media": {"reddit_video": {
+            "hls_url": "https://v.redd.it/h9o/HLSPlaylist.m3u8?a=1"}},
+        **extra}}]}}, {"data": {"children": []}}]
+
+
+def _blocked_ydl(seen):
+    """YoutubeDL whose Reddit extractor is IP-blocked; any other URL works."""
+    class BlockedYDL(FakeYDL):
+        def extract_info(self, url, download):
+            seen.append(url)
+            if "reddit.com" in url:
+                raise reel_downloader.yt_dlp.utils.DownloadError(
+                    "ERROR: [Reddit] 1xe: Your IP address is unable to access the Reddit API")
+            return super().extract_info(url, download)
+    return BlockedYDL
+
+
+def test_a_blocked_reddit_extractor_falls_back_to_the_posts_own_json(tmp_path, monkeypatch):
+    import requests
+    seen = []
+    monkeypatch.setattr(reel_downloader.yt_dlp, "YoutubeDL", _blocked_ydl(seen))
+    monkeypatch.setattr(requests, "get", lambda url, **kw: FakeResp(url, _video_post()))
+
+    path, caption, info = reel_downloader._download_media(
+        "https://www.reddit.com/r/x/comments/1xe/t/", str(tmp_path / "r.mp4"))
+
+    assert seen[1] == "https://v.redd.it/h9o/HLSPlaylist.m3u8?a=1"
+    assert FakeYDL.opts["format"] == "bv*+ba/b"  # audio still muxed in
+    assert os.path.exists(path)
+    assert caption == "Reporter averts two phone snatchings"
+    assert reel_downloader._author("reddit", info) == "op_user"
+
+
+def test_a_photo_post_falls_back_to_the_i_redd_it_file(tmp_path, monkeypatch):
+    import requests
+    seen = []
+    monkeypatch.setattr(reel_downloader.yt_dlp, "YoutubeDL", _blocked_ydl(seen))
+    post = _video_post(secure_media=None, url="https://i.redd.it/abc.jpg")
+    monkeypatch.setattr(requests, "get", lambda url, **kw: FakeResp(url, post))
+
+    reel_downloader._download_media(
+        "https://www.reddit.com/r/x/comments/1xe/t/", str(tmp_path / "r.jpg"), kind="post")
+
+    assert seen[1] == "https://i.redd.it/abc.jpg"
+
+
+def test_when_the_fallback_fails_too_the_cookie_hint_is_raised(tmp_path, monkeypatch):
+    jar = tmp_path / "jar.txt"
+    jar.write_text("")
+    monkeypatch.setattr(config, "REDDIT_COOKIES_FILE", str(jar))
+    monkeypatch.setattr(reel_downloader.yt_dlp, "YoutubeDL", _blocked_ydl([]))
+
+    with pytest.raises(RuntimeError, match="export a fresh cookies.txt"):
+        reel_downloader._download_media(
+            "https://www.reddit.com/r/x/comments/1xe/t/", str(tmp_path / "r.mp4"))
