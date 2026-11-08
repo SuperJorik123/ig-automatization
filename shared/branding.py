@@ -6,8 +6,9 @@ pass, building the shared blur-fill canvas once and splitting it per brand
 (the per-brand encodes still dominate — see the speed-knob comments below).
 
 The geometry is FIXED (same size and position every time): 1080x1920 canvas
-(blur-fill, the same treatment shorts_format gives horizontal videos; a clip
-taller than ~0.63:1 is shrunk to 89 % of the height so the blur frames it), logo scaled to 205 px
+(blur-fill, the same treatment shorts_format gives horizontal videos — the
+clip is fit to the whole canvas, so a 9:16 input fills it and only wider or
+narrower ones show blur above/below or beside), logo scaled to 205 px
 wide sitting 82 px from the right edge and 102 px from the top, headline at
 a box whose bottom edge sits at 79 % of frame height (clear of Instagram's UI
 in the bottom 20 %) — semi-bold, in a banner box of fixed width (matched to
@@ -34,11 +35,10 @@ import json
 import logging
 import os
 import re
-import subprocess
 import textwrap
 import unicodedata
 
-from shared import renderlock
+from shared import ffrun, renderlock
 
 log = logging.getLogger(__name__)
 
@@ -123,21 +123,30 @@ FADE_DUR = 1.5              # s of smooth fade-out after that
 # single biggest lever: superfast is ~2x veryfast at the same CRF, paying in
 # file size (~1.5x) rather than visible quality. ultrafast would be another
 # ~35 % faster but disables enough coding tools to soften the picture.
-PRESET = "superfast"
+PRESET = os.environ.get("BRAND_PRESET") or "superfast"
+
+# ---- quality knobs (2026-10-18) ---------------------------------------------
+# Instagram re-encodes every upload, so what we hand it is a master: the
+# cleaner it is, the less its encoder spends on our compression noise.
+# CRF 18 is near-transparent for x264 (21 was visibly soft on faces and
+# on-screen text); files come out ~1.5-2x bigger, which the Graph API's
+# fetch doesn't care about.
+CRF = int(os.environ.get("BRAND_CRF") or 18)
+# Luma-only unsharp mask on the clip AFTER it is scaled into the canvas — most
+# sources are 720p tweets upscaled to 1080 wide, and this is the "HD export"
+# crispness phone editors add. 0 disables. Past ~0.8 it halos edges and
+# makes the source's compression blocks stand out.
+SHARPEN = float(os.environ.get("BRAND_SHARPEN") or 0.5)
+# Every render is tagged BT.709 and converted to it on the way in (an SD
+# source can be BT.601): untagged video is guessed at by players, and
+# Instagram's guess sometimes shifts the colours.
+_BT709 = ":out_color_matrix=bt709:out_range=tv"
 # The blur-fill background is computed on a 1/8-scale copy and upscaled back:
 # blurring 135x240 and stretching to 1080x1920 is visually identical to
 # gblur sigma=30 at full resolution (the upscale is itself a low-pass) and
 # skips the full-res Gaussian — ~12 % of the render.
 BLUR_W, BLUR_H = 135, 240
 BLUR_SIGMA = 4
-# The clip's box on the canvas: full width, but only FG_SCALE of the height.
-# A 9:16 clip used to fill the whole canvas, which made the blur-fill
-# invisible — an Instagram repost came out as the same frame upscaled. Fitting
-# into 1080x1708 shrinks every clip taller than ~0.63:1 to 89 % (a 9:16 one
-# to 961x1708), so the blurred frame shows round it, while 16:9, 1:1 and 4:5
-# clips are width-bound and come out exactly as before.
-FG_SCALE = 0.89
-FG_H = int(OUT_H * FG_SCALE) // 2 * 2       # 1708 — even, for yuv420p
 
 STYLE_FILE = "style.json"   # optional, next to the brand's logo.png
 
@@ -415,12 +424,15 @@ def blurfill_chain(out_label: str = "[canvas]") -> str:
     (empty string = the graph's unlabeled final output, for callers that
     want the bare canvas, e.g. shorts_format)."""
     sar = ",setsar=1" if out_label else ""
+    # The background is blurred anyway, so its scalers stay the cheap default;
+    # the clip itself gets lanczos (sharper than bicubic on an upscale).
+    sharpen = f",unsharp=5:5:{SHARPEN:g}:5:5:0" if SHARPEN > 0 else ""
     return (
         f"[0:v]scale={BLUR_W}:{BLUR_H}:force_original_aspect_ratio=increase,"
         f"crop={BLUR_W}:{BLUR_H},gblur=sigma={BLUR_SIGMA},"
-        f"scale={OUT_W}:{OUT_H}[bg];"
-        f"[0:v]scale={OUT_W}:{FG_H}:force_original_aspect_ratio=decrease"
-        f":force_divisible_by=2[fg];"
+        f"scale={OUT_W}:{OUT_H}{_BT709}[bg];"
+        f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease"
+        f":force_divisible_by=2:flags=lanczos{_BT709}{sharpen}[fg];"
         # setsar=1: the fit scales leave a fractional compensating SAR (e.g.
         # 4321:4320) in the header, and players that honor it show the frame
         # very slightly off-square. The canvas is the display shape; pin it.
@@ -438,7 +450,7 @@ def _brand_chain(i: int, font_path: str, text_path: str,
     font_size = style["font_size"]
     box = f"{style['background']}@{style['background_alpha']}"
     return (
-        f"[{logo_input}:v]scale={LOGO_W}:-1[logo{i}];"
+        f"[{logo_input}:v]scale={LOGO_W}:-1:flags=lanczos[logo{i}];"
         f"[{canvas_label}][logo{i}]overlay="
         f"W-w-{LOGO_MARGIN_X}:{LOGO_MARGIN_Y}[branded{i}];"
         # The banner lives on its own transparent layer: drawtext's alpha=
@@ -494,14 +506,45 @@ RENDER_BATCH = int(os.environ.get("BRAND_RENDER_BATCH") or 4)
 
 
 # The per-output half of the encode command, identical for every render here
-# and in shorts_format: x264 at the speed preset above, faststart for
-# streaming players.
+# and in shorts_format: x264 at the preset/CRF above, BT.709 tags matching the
+# conversion in blurfill_chain, 192k/48 kHz audio, faststart for streaming
+# players.
 ENCODE_ARGS = [
-    "-c:v", "libx264", "-preset", PRESET, "-crf", "21",
+    "-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
     "-pix_fmt", "yuv420p",
-    "-c:a", "aac", "-b:a", "128k",
+    "-colorspace", "bt709", "-color_primaries", "bt709",
+    "-color_trc", "bt709", "-color_range", "tv",
+    "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
     "-movflags", "+faststart",
 ]
+
+# The retry after a hang. ffmpeg's default AAC method looped for ever on a clip
+# in the 176-208k band (2026-11-04); twoloop finished the same audio.
+SAFE_AUDIO_ARGS = ["-aac_coder", "twoloop"]
+
+
+def _encode_args(safe_audio: bool) -> list:
+    if not safe_audio:
+        return ENCODE_ARGS
+    at = ENCODE_ARGS.index("-b:a")
+    return ENCODE_ARGS[:at] + SAFE_AUDIO_ARGS + ENCODE_ARGS[at:]
+
+
+def run_encode(build, source: str, outputs: int = 1,
+               safe_audio: bool = False) -> tuple:
+    """Run the ffmpeg command `build(encode_args)` under a time limit; on a
+    hang, once more with the safe audio method. Returns (process, whether the
+    safe method was used). `safe_audio=True` starts there, so a later batch of
+    the same clip doesn't wait out the limit again. Raises ffrun.Timeout when
+    the retry hangs too."""
+    limit = ffrun.limit_s(ffrun.duration_of(source), outputs)
+    if not safe_audio:
+        try:
+            return ffrun.run(build(ENCODE_ARGS), limit), False
+        except ffrun.Timeout:
+            log.warning("render of %s hung — retrying with %s", source,
+                        " ".join(SAFE_AUDIO_ARGS))
+    return ffrun.run(build(_encode_args(True)), limit), True
 
 
 def _prepare_job(headline: str, logo_path: str, out_path: str,
@@ -543,16 +586,16 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
     job = _prepare_job(headline, logo_path, out_path, style)
     try:
         with renderlock.render_slot():
-            proc = subprocess.run(
-                [
+            proc, _ = run_encode(
+                lambda encode: [
                     "ffmpeg", "-y", "-v", "error",
                     "-i", video_path, "-i", logo_path,
                     "-filter_complex",
                     _filter_graph(job["font"], job["text_path"], job["style"]),
-                    *ENCODE_ARGS,
+                    *encode,
                     out_path,
                 ],
-                capture_output=True, text=True,
+                video_path,
             )
         if proc.returncode != 0:
             try:
@@ -560,6 +603,12 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
             except OSError:
                 pass
             raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-300:]}")
+    except ffrun.Timeout:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise
     finally:
         try:
             os.remove(job["text_path"])
@@ -568,27 +617,32 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
     return out_path
 
 
-def _render_pass(video_path: str, prepared: list[dict]) -> None:
+def _render_pass(video_path: str, prepared: list[dict],
+                 safe_audio: bool = False) -> bool:
     """One ffmpeg invocation for `prepared` (already validated by
     `_prepare_job`): the source decoded and the blur-fill canvas built once,
     split N ways, each branch adding its own logo + banner and encoding its
     own output. Raises RuntimeError with ffmpeg's stderr tail on a failure;
-    the caller owns the cleanup of the outputs."""
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path]
-    for p in prepared:
-        cmd += ["-i", p["logo_path"]]
-    cmd += ["-filter_complex", _filter_graph_multi(prepared)]
-    for i, p in enumerate(prepared):
-        # "0:a?" — map the source audio when there is one, silently skip
-        # when there isn't (screen recordings often ship without).
-        cmd += ["-map", f"[v{i}]", "-map", "0:a?",
-                *ENCODE_ARGS, p["out_path"]]
+    the caller owns the cleanup of the outputs. Returns whether the pass
+    needed the safe audio method (see `run_encode`)."""
+    def build(encode: list) -> list:
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path]
+        for p in prepared:
+            cmd += ["-i", p["logo_path"]]
+        cmd += ["-filter_complex", _filter_graph_multi(prepared)]
+        for i, p in enumerate(prepared):
+            # "0:a?" — map the source audio when there is one, silently skip
+            # when there isn't (screen recordings often ship without).
+            cmd += ["-map", f"[v{i}]", "-map", "0:a?", *encode, p["out_path"]]
+        return cmd
+
     # The slot is taken per batch, not once around the whole set: between two
     # batches is exactly where another process's render should get its turn.
     with renderlock.render_slot():
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc, used_safe = run_encode(build, video_path, len(prepared), safe_audio)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-300:]}")
+    return used_safe
 
 
 def render_branded_multi(video_path: str, jobs: list[dict],
@@ -618,9 +672,11 @@ def render_branded_multi(video_path: str, jobs: list[dict],
         for job in jobs:
             prepared.append(_prepare_job(job["headline"], job["logo_path"],
                                          job["out_path"], job.get("style")))
+        safe_audio = False
         for start in range(0, len(prepared), size):
             try:
-                _render_pass(video_path, prepared[start:start + size])
+                safe_audio = _render_pass(video_path, prepared[start:start + size],
+                                          safe_audio)
             except Exception:
                 for p in prepared:
                     try:

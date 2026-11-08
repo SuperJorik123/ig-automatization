@@ -88,7 +88,7 @@ FACEBOOK_FIELDS = {
 _BRAND_KEYS = {"lang", "group", "notes", "telegram", "youtube", "twitter",
                "instagram", "facebook", "$schema", "_comment"}
 _TELEGRAM_KEYS = {"channel"}
-_YOUTUBE_KEYS = {"channel"}
+_YOUTUBE_KEYS = {"channel", "handle"}
 _TWITTER_KEYS = set(TWITTER_FIELDS) | {"account"}
 _INSTAGRAM_KEYS = set(INSTAGRAM_FIELDS) | {"account"}
 _FACEBOOK_KEYS = set(FACEBOOK_FIELDS) | {"account"}
@@ -177,6 +177,10 @@ def env_from_brands(brands: dict, existing=None) -> dict:
             # folder holding that channel's OAuth — Google's own files, which
             # stay on disk; the JSON only points at them.
             _put(out, f"BRAND_{key}_YT", youtube.get("channel") or name)
+            # The channel's PUBLIC handle (@name) — only the /report command
+            # reads it (modules/youtube/stats.py); the folder name above is
+            # not a handle.
+            _put(out, f"BRAND_{key}_YT_HANDLE", youtube.get("handle"))
 
         twitter = brand.get("twitter") or {}
         _check_keys(f"{where}: twitter", twitter, _TWITTER_KEYS)

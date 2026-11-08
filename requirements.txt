@@ -9,6 +9,8 @@ python-multipart>=0.0.9
 # Instagram media fetcher
 yt-dlp>=2026.7.4      # older builds get "empty media response" on public IG reels
 gallery-dl>=1.27      # photo fallback for IG/Twitter links (shared/reel_downloader.py)
+selenium>=4.20         # tools/find_original (reverse image search via a real Chrome)
+curl_cffi>=0.7         # lets yt-dlp impersonate Chrome — TikTok refuses it otherwise
 
 # Telegram bots (IG trigger bot + news broadcaster). The [job-queue] extra
 # pulls in APScheduler — without it Application.job_queue is None and the

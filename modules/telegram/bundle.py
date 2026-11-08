@@ -212,12 +212,17 @@ def line_text(bundle_id: int, n_videos: int, n: int, video: dict) -> str:
     ])
 
 
-def line_keyboard(n_headlines: int = 0, chosen=None) -> InlineKeyboardMarkup:
+def line_keyboard(n_headlines: int = 0, chosen=None,
+                  preview: bool = False) -> InlineKeyboardMarkup:
     rows = []
     if n_headlines:
         rows.append([InlineKeyboardButton(
             f"{'● ' if i == chosen else ''}{i + 1}", callback_data=f"b:h:{i}")
             for i in range(n_headlines)])
+    if preview:
+        # Same verb as the plan card's (branded.PREVIEW_EDIT_BUTTON).
+        rows.append([InlineKeyboardButton("▶ Preview edit",
+                                          callback_data="b:pv")])
     rows.append([InlineKeyboardButton("🎬 Render bundle", callback_data="b:bgo"),
                  InlineKeyboardButton("🗑 Remove this one", callback_data="b:bx")])
     return InlineKeyboardMarkup(rows)

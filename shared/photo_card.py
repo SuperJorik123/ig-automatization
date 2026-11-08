@@ -484,12 +484,16 @@ def render_card(hero_path: str, headline: str, logo_path: str, out_path: str,
     lx = (W - lw) // 2
     gap = round(LOGO_GAP_PAD * W)
 
-    # 3 — divider, two segments around the logo
+    # 3 — divider, two segments around the logo. A fully transparent logo is
+    # a no-logo brand (brands/GMN/nologo): one unbroken rule, no empty gap.
     m = round(DIVIDER_MARGIN * W)
     t = DIVIDER_THICKNESS
-    draw.rectangle((m, ly - t // 2, lx - gap, ly + t // 2), fill=(255, 255, 255, 255))
-    draw.rectangle((lx + lw + gap, ly - t // 2, W - m, ly + t // 2), fill=(255, 255, 255, 255))
-    canvas.alpha_composite(logo, (lx, ly - lh // 2))
+    if logo.getchannel("A").getbbox() is None:
+        draw.rectangle((m, ly - t // 2, W - m, ly + t // 2), fill=(255, 255, 255, 255))
+    else:
+        draw.rectangle((m, ly - t // 2, lx - gap, ly + t // 2), fill=(255, 255, 255, 255))
+        draw.rectangle((lx + lw + gap, ly - t // 2, W - m, ly + t // 2), fill=(255, 255, 255, 255))
+        canvas.alpha_composite(logo, (lx, ly - lh // 2))
 
     # 5 — headline
     text = " ".join(headline.split()).upper()

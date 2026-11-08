@@ -66,7 +66,6 @@ import logging
 import mimetypes
 import os
 import re
-import subprocess
 import sys
 import tempfile
 
@@ -77,7 +76,7 @@ if _ROOT not in sys.path:
 
 from openai import OpenAI  # noqa: E402
 
-from shared import config  # noqa: E402
+from shared import config, ffrun  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -191,7 +190,7 @@ def _analysis_copy(path: str):
             # IG_VISION_MAX_S = 0 sends the whole clip; a positive value trims.
             trim = (["-t", str(int(config.IG_VISION_MAX_S))]
                     if int(config.IG_VISION_MAX_S) > 0 else [])
-            proc = subprocess.run(
+            proc = ffrun.run(
                 ["ffmpeg", "-y", "-v", "error", "-i", path, *trim,
                  # The SHORT edge goes to `edge`, whichever way round the clip
                  # is (scaling the width alone made a 1920x1080 clip 480x270);
@@ -203,7 +202,7 @@ def _analysis_copy(path: str):
                  "-pix_fmt", "yuv420p",
                  "-c:a", "aac", "-ac", "1", "-b:a", "64k",
                  "-movflags", "+faststart", out],
-                capture_output=True, text=True)
+                ffrun.limit_s(ffrun.duration_of(path)))
             if proc.returncode != 0:
                 last_err = proc.stderr.strip()[-300:]
                 continue

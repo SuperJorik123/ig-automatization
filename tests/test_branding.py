@@ -9,6 +9,7 @@ import subprocess
 import pytest
 
 from shared import branding
+from shared import ffrun
 
 
 # --- wrap_headline ---------------------------------------------------------
@@ -59,12 +60,12 @@ def test_filter_graph_contains_fixed_design_constants():
     # the old full-res gblur sigma=30, ~12 % cheaper (measured on the VPS).
     assert "scale=135:240:force_original_aspect_ratio=increase" in graph
     assert "gblur=sigma=4" in graph                        # blur-fill canvas
-    assert "scale=1080:1920[bg]" in graph                  # upscaled back
-    # The clip fits 1080x1708: a 9:16 one shrinks to 89 % so the blur frames
-    # it; wider clips are width-bound and unchanged.
-    assert ("scale=1080:1708:force_original_aspect_ratio=decrease"
-            ":force_divisible_by=2[fg]") in graph
-    assert "scale=205:-1[logo0]" in graph                  # logo width
+    assert "scale=1080:1920:out_color_matrix=bt709:out_range=tv[bg]" in graph
+    # The clip is fit to the whole canvas: a 9:16 one fills it (the
+    # 2026-10-18 shrink-to-89 % framing was reverted the same day).
+    assert ("scale=1080:1920:force_original_aspect_ratio=decrease"
+            ":force_divisible_by=2:flags=lanczos") in graph
+    assert "scale=205:-1:flags=lanczos[logo0]" in graph    # logo width
     # Top-right margins, matched to the reference render — not equal.
     assert "overlay=W-w-82:102" in graph
     assert "fontsize=49" in graph
@@ -102,8 +103,8 @@ def test_filter_graph_multi_builds_the_canvas_once():
     assert graph.count("gblur") == 1                       # shared canvas
     assert "split=2[c0][c1]" in graph
     # Each branch: its own logo input, textfile, style, labeled output.
-    assert "[1:v]scale=205:-1[logo0]" in graph
-    assert "[2:v]scale=205:-1[logo1]" in graph
+    assert "[1:v]scale=205:-1:flags=lanczos[logo0]" in graph
+    assert "[2:v]scale=205:-1:flags=lanczos[logo1]" in graph
     assert "textfile='/t/a.txt'" in graph
     assert "textfile='/t/b.txt'" in graph
     assert "fontsize=60" in graph
@@ -113,6 +114,24 @@ def test_filter_graph_multi_builds_the_canvas_once():
 def test_encode_args_use_the_speed_preset():
     i = branding.ENCODE_ARGS.index("-preset")
     assert branding.ENCODE_ARGS[i + 1] == branding.PRESET == "superfast"
+
+
+def test_encode_args_quality_profile():
+    args = branding.ENCODE_ARGS
+    assert args[args.index("-crf") + 1] == str(branding.CRF) == "18"
+    for flag in ("-colorspace", "-color_primaries", "-color_trc"):
+        assert args[args.index(flag) + 1] == "bt709"
+    assert args[args.index("-b:a") + 1] == "192k"
+    assert args[args.index("-ar") + 1] == "48000"
+
+
+def test_clip_is_sharpened_and_converted_to_bt709(monkeypatch):
+    graph = branding.blurfill_chain()
+    fg = graph[graph.index("[0:v]scale=1080:1920:force"):graph.index("[fg]")]
+    assert "out_color_matrix=bt709" in fg
+    assert "unsharp=5:5:0.5:5:5:0" in fg                  # luma only
+    monkeypatch.setattr(branding, "SHARPEN", 0.0)
+    assert "unsharp" not in branding.blurfill_chain()
 
 
 # --- load_style ------------------------------------------------------------
@@ -314,7 +333,7 @@ def test_render_writes_rows_separated_by_cr_only(tmp_path, monkeypatch):
     """ffmpeg 8's drawtext DRAWS a LF (as a missing-glyph box) while still
     breaking the row on it — the separator has to be a bare CR."""
     seen = {}
-    real = branding.subprocess.run
+    real = ffrun.subprocess.run
 
     src = str(tmp_path / "src.mp4")
     logo = str(tmp_path / "logo.png")
@@ -331,7 +350,7 @@ def test_render_writes_rows_separated_by_cr_only(tmp_path, monkeypatch):
             seen["bytes"] = fh.read()
         return real(cmd, *a, **kw)
 
-    monkeypatch.setattr(branding.subprocess, "run", capture)
+    monkeypatch.setattr(ffrun.subprocess, "run", capture)
     branding.render_branded(src, "word " * 40, logo, out)
 
     assert b"\n" not in seen["bytes"]
@@ -425,6 +444,8 @@ def _stub_ffmpeg(monkeypatch, fail_on=None):
             self.stderr = "out of memory" if rc else ""
 
     def fake_run(cmd, **kw):
+        if cmd[0] == "ffprobe":
+            return _Proc(0)
         runs.append(cmd)
         if fail_on is not None and len(runs) - 1 == fail_on:
             return _Proc(1)
@@ -433,7 +454,7 @@ def _stub_ffmpeg(monkeypatch, fail_on=None):
                 fh.write(b"fake mp4")
         return _Proc(0)
 
-    monkeypatch.setattr(branding.subprocess, "run", fake_run)
+    monkeypatch.setattr(ffrun.subprocess, "run", fake_run)
     return runs
 
 

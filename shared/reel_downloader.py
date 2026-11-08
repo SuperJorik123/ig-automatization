@@ -89,7 +89,7 @@ def is_supported_url(text: str) -> bool:
 def download_media(url: str, dest_path: str, kind: str = "reel") -> tuple[str, str]:
     """`_download_media` without yt-dlp's info dict — (absolute path, caption),
     for the callers that only want the file and its text."""
-    path, caption, _ = _download_media(url, dest_path, kind)
+    path, caption, _ = _download_media(resolve_reddit_url(url), dest_path, kind)
     return path, caption
 
 
@@ -143,13 +143,20 @@ def _download_media(url: str, dest_path: str, kind: str = "reel") -> tuple[str, 
         if "empty media response" in str(exc):
             hint = (" — if the post IS public in a logged-out browser, yt-dlp "
                     "is outdated: py -m pip install -U yt-dlp, then restart the bot")
-        elif is_reddit_url(url) and "authentication is required" in str(exc):
+        elif is_reddit_url(url) and ("authentication is required" in str(exc)
+                                     or "unable to access the Reddit API" in str(exc)):
+            # yt-dlp's extractor opens an API session that Reddit blocks for
+            # this IP even with good cookies, while the post's plain .json
+            # still answers (2026-10) — read the media URL from that.
+            direct = _reddit_direct(url, opts)
+            if direct:
+                return direct
             # Lead with the fix: the bot shows only the first 300 chars, and
             # yt-dlp's own message is longer than that.
             raise RuntimeError(
                 f"Reddit needs a logged-in session — put a cookies.txt at "
                 f"{config.REDDIT_COOKIES_FILE}" if not reddit_cookies(url) else
-                "Reddit rejected the saved cookies (expired or logged out) — "
+                "Reddit refused the download (cookies expired or logged out?) — "
                 "export a fresh cookies.txt") from exc
         raise RuntimeError(f"yt-dlp failed for {url!r}: {exc}{hint}") from exc
     if not os.path.exists(path):
@@ -174,6 +181,92 @@ _REDDIT_UA = "windows:ig-automatization:1.0"
 REDDIT_CONTEXT_MAX = 1500
 
 
+def resolve_reddit_url(url: str) -> str:
+    """The /comments/<id>/ URL behind a Reddit share link (r/<sub>/s/<code>),
+    redd.it or v.redd.it link; any other URL comes back unchanged.
+
+    yt-dlp's Reddit extractor only matches /comments/ URLs — a share link
+    falls through to the generic extractor, which fetches the page itself and
+    dies on Reddit's "403 Blocked" without ever trying the cookies-aware
+    path. The redirect lands on the /comments/ URL even when the page 403s.
+    Never raises: on any failure the original URL is returned."""
+    if not is_reddit_url(url) or REDDIT_POST_ID_RE.search(url):
+        return url
+    try:
+        import requests
+        r = requests.get(url, headers={"User-Agent": _REDDIT_UA}, timeout=20)
+        if REDDIT_POST_ID_RE.search(r.url):
+            return r.url.split("?", 1)[0]
+    except Exception as exc:
+        log.warning("reddit share link not resolved for %s: %s", url, exc)
+    return url
+
+
+def _reddit_listing(url: str, **params):
+    """The post's /comments/<id>.json listing ([post, comments]), sent with
+    the saved cookies; None when `url` names no post. Raises on HTTP or
+    network trouble — callers decide what a failure means."""
+    import http.cookiejar
+    m = REDDIT_POST_ID_RE.search(resolve_reddit_url(url))
+    if m is None:
+        return None
+    jar = http.cookiejar.MozillaCookieJar()
+    if reddit_cookies(url):
+        jar.load(config.REDDIT_COOKIES_FILE, ignore_discard=True,
+                 ignore_expires=True)
+    r = _reddit_get(f"https://www.reddit.com/comments/{m.group(1)}.json",
+                    params={"raw_json": 1, **params},
+                    cookies={c.name: c.value for c in jar},
+                    headers={"User-Agent": _REDDIT_UA}, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def _reddit_get(url: str, **kw):
+    """GET through curl_cffi with a Chrome TLS fingerprint when it is
+    installed, plain requests otherwise. Reddit answers "403 Blocked" to
+    every Python TLS client — requests, urllib, yt-dlp — with good cookies
+    and any headers, while curl gets 200 (VPS, 2026-10)."""
+    try:
+        from curl_cffi import requests as cffi
+    except ImportError:
+        import requests
+        return requests.get(url, **kw)
+    return cffi.get(url, impersonate="chrome", **kw)
+
+
+def _reddit_direct(url: str, opts: dict):
+    """`_download_media`'s result for a Reddit post fetched around yt-dlp's
+    Reddit extractor: the media URL comes from the post's own .json (which
+    Reddit still serves where the extractor's API session is blocked) and
+    yt-dlp downloads that — the HLS playlist for a video, so the audio
+    stream comes too, or the i.redd.it file for a photo. Info carries the
+    title and the author like the extractor's would. None on any failure,
+    so the caller raises its own (clearer) error."""
+    try:
+        listing = _reddit_listing(url)
+        if listing is None:
+            return None
+        post = listing[0]["data"]["children"][0]["data"]
+        video = (post.get("secure_media") or post.get("media") or {}).get("reddit_video") or {}
+        media = video.get("hls_url") or video.get("fallback_url")
+        if not media and re.match(r"https://i\.redd\.it/", post.get("url") or ""):
+            media = post["url"]
+        if not media:
+            return None
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(media, download=True)
+            path = ydl.prepare_filename(info)
+        if not os.path.exists(path):
+            return None
+    except Exception as exc:
+        log.warning("reddit direct download failed for %s: %s", url, exc)
+        return None
+    info = {**info, "title": post.get("title") or "",
+            "uploader": post.get("author") or ""}
+    return os.path.abspath(path), info["title"].strip(), info
+
+
 def reddit_context(url: str) -> str:
     """What the Reddit post SAYS about its media, as a block for the
     caption's `info:` — the subreddit, flair, title, the body text and the
@@ -188,26 +281,9 @@ def reddit_context(url: str) -> str:
     if not is_reddit_url(url):
         return ""
     try:
-        import http.cookiejar
-        import requests
-        jar = http.cookiejar.MozillaCookieJar()
-        if reddit_cookies(url):
-            jar.load(config.REDDIT_COOKIES_FILE, ignore_discard=True,
-                     ignore_expires=True)
-        headers = {"User-Agent": _REDDIT_UA}
-        m = REDDIT_POST_ID_RE.search(url)
-        if m is None:
-            # Share link (/s/<code>), redd.it or v.redd.it: the redirect
-            # lands on the /comments/<id>/ URL even when the page 403s.
-            r = requests.get(url, cookies=jar, headers=headers, timeout=20)
-            m = REDDIT_POST_ID_RE.search(r.url)
-            if m is None:
-                return ""
-        r = requests.get(f"https://www.reddit.com/comments/{m.group(1)}.json",
-                         params={"limit": 50, "sort": "top", "raw_json": 1},
-                         cookies=jar, headers=headers, timeout=20)
-        r.raise_for_status()
-        listing = r.json()
+        listing = _reddit_listing(url, limit=50, sort="top")
+        if listing is None:
+            return ""
         post = listing[0]["data"]["children"][0]["data"]
         lines = [f"Reddit post in r/{post.get('subreddit', '?')} "
                  "(the uploader's own words — unverified):"]
@@ -337,6 +413,7 @@ def fetch(url: str, dest_stub: str) -> tuple[list[str], str, dict]:
     Returns (paths, caption, source): one path for a video, up to MAX_PHOTOS
     for a photo carousel; `source` is the post the media came from
     (`source_post`)."""
+    url = resolve_reddit_url(url)
     try:
         path, caption, info = _download_media(url, dest_stub, kind="reel")
         return [path], caption, source_post(url, caption, info)

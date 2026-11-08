@@ -16,7 +16,6 @@ Requires ffmpeg + ffprobe on PATH.
 import json
 import logging
 import os
-import subprocess
 import sys
 
 # Repo root on sys.path so `from shared import …` resolves when run directly.
@@ -24,7 +23,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from shared import branding, renderlock  # noqa: E402
+from shared import branding, ffrun, renderlock  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ def probe(path: str) -> tuple[int, int, float]:
         "-show_entries", "format=duration",
         "-of", "json", path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = ffrun.run(cmd, ffrun.PROBE_S)
     if proc.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {proc.stderr.strip()[-300:]}")
     info = json.loads(proc.stdout)
@@ -78,16 +77,23 @@ def ensure_short(path: str) -> tuple[str, bool]:
     # background, speed preset) — one place tunes both renderers.
     filters = branding.blurfill_chain(out_label="")
     log.info("re-rendering %s (%dx%d horizontal) to %dx%d vertical", path, w, h, OUT_W, OUT_H)
-    with renderlock.render_slot():
-        proc = subprocess.run(
-            [
-                "ffmpeg", "-y", "-v", "error", "-i", path,
-                "-filter_complex", filters,
-                *branding.ENCODE_ARGS,
-                out,
-            ],
-            capture_output=True, text=True,
-        )
+    try:
+        with renderlock.render_slot():
+            proc, _ = branding.run_encode(
+                lambda encode: [
+                    "ffmpeg", "-y", "-v", "error", "-i", path,
+                    "-filter_complex", filters,
+                    *encode,
+                    out,
+                ],
+                path,
+            )
+    except ffrun.Timeout:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        raise
     if proc.returncode != 0:
         try:
             os.remove(out)

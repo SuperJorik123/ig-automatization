@@ -58,6 +58,20 @@ def test_render_card_default_size_with_two_insets(tmp_path):
     assert max(px) < 20
 
 
+def test_blank_logo_draws_one_unbroken_divider(tmp_path):
+    # The no-logo brand ships a fully transparent logo.png: the rule must
+    # run straight through the middle instead of breaking round nothing.
+    blank = tmp_path / "blank.png"
+    Image.new("RGBA", (400, 150), (0, 0, 0, 0)).save(blank)
+    hero = _photo(tmp_path / "hero.jpg", color=(20, 20, 20))
+    out = photo_card.render_card(hero, "Short", str(blank),
+                                 str(tmp_path / "card.jpg"), cutout=False)
+    im = Image.open(out).convert("L")
+    y = round(photo_card.DIVIDER_Y * im.height)
+    assert min(im.getpixel((x, y)) for x in range(im.width // 2 - 60,
+                                                  im.width // 2 + 60)) > 200
+
+
 def test_render_card_square_no_insets(tmp_path):
     hero = _photo(tmp_path / "hero.jpg", (1600, 900))
     out = photo_card.render_card(hero, "Short", _logo(tmp_path / "logo.png"),

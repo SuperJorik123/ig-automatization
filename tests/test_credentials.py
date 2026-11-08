@@ -243,3 +243,17 @@ def test_example_template_is_valid_and_skipped_by_the_loader():
     env = credentials.env_from_brands({"_example": doc})
     assert env["BRAND__EXAMPLE_TG"] == "@YourChannel"
     assert "_example" not in credentials.load(credentials.ACCOUNTS_DIR)
+
+
+def test_youtube_handle_reaches_the_brand_for_the_report():
+    from shared import config
+    env = credentials.env_from_brands(
+        {"mir": {"lang": "en", "youtube": {"channel": "mirfolder",
+                                           "handle": "@MirNews"}}})
+    assert env["BRAND_MIR_YT"] == "mirfolder"
+    assert env["BRAND_MIR_YT_HANDLE"] == "@MirNews"
+    brand = config._parse_brands(env["BRANDS"], env)[0]
+    assert brand["yt"] == "mirfolder" and brand["yt_handle"] == "@MirNews"
+    # No handle -> no var, and the brand's handle is blank.
+    env = credentials.env_from_brands({"mir": {"youtube": {"channel": "m"}}})
+    assert "BRAND_MIR_YT_HANDLE" not in env

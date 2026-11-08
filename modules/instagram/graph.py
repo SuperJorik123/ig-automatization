@@ -274,6 +274,42 @@ def reel_insights(media_id: str, account: str) -> tuple[dict | None, str]:
         return None, str(exc)[:300]
 
 
+def latest_reel(account: str) -> tuple[dict | None, str]:
+    """The account's most recent Reel with its numbers, for the /report
+    command: ({url, posted_at, caption, views, likes, comments, shares,
+    saves, reach}, "") — (None, "no reels yet") or (None, why). Read from
+    the account itself, not from the bot's reel_log, so a reel posted by hand
+    counts too. A missing insights permission still returns likes/comments
+    (those come with the media) with views None. Never raises."""
+    try:
+        token, user_id = _creds(account)
+        body = _call("GET", f"{API}/{user_id}/media",
+                     params={"fields": "id,media_type,media_product_type,"
+                                       "timestamp,permalink,caption,"
+                                       "like_count,comments_count",
+                             "limit": 25, "access_token": token})
+    except Exception as exc:
+        return None, str(exc)[:300]
+    items = body.get("data") or []
+    media = (next((m for m in items if m.get("media_product_type") == "REELS"), None)
+             or next((m for m in items if m.get("media_type") == "VIDEO"), None))
+    if media is None:
+        return None, "no reels yet"
+    insights, _ = reel_insights(media["id"], account)
+    insights = insights or {}
+    return {
+        "url": media.get("permalink") or "",
+        "posted_at": media.get("timestamp") or "",
+        "caption": media.get("caption") or "",
+        "views": insights.get("views"),
+        "likes": media.get("like_count"),
+        "comments": media.get("comments_count", insights.get("comments")),
+        "shares": insights.get("shares"),
+        "saves": insights.get("saved"),
+        "reach": insights.get("reach"),
+    }, ""
+
+
 def publishing_quota(account: str) -> tuple[int, int] | None:
     """(posts used, posts allowed) in the rolling 24 h — Instagram's own
     count (100 a day per account) — or None when it can't be read."""
