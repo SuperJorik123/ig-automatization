@@ -9,6 +9,7 @@ import subprocess
 import pytest
 
 from shared import branding
+from shared import ffrun
 
 
 # --- wrap_headline ---------------------------------------------------------
@@ -332,7 +333,7 @@ def test_render_writes_rows_separated_by_cr_only(tmp_path, monkeypatch):
     """ffmpeg 8's drawtext DRAWS a LF (as a missing-glyph box) while still
     breaking the row on it — the separator has to be a bare CR."""
     seen = {}
-    real = branding.subprocess.run
+    real = ffrun.subprocess.run
 
     src = str(tmp_path / "src.mp4")
     logo = str(tmp_path / "logo.png")
@@ -349,7 +350,7 @@ def test_render_writes_rows_separated_by_cr_only(tmp_path, monkeypatch):
             seen["bytes"] = fh.read()
         return real(cmd, *a, **kw)
 
-    monkeypatch.setattr(branding.subprocess, "run", capture)
+    monkeypatch.setattr(ffrun.subprocess, "run", capture)
     branding.render_branded(src, "word " * 40, logo, out)
 
     assert b"\n" not in seen["bytes"]
@@ -443,6 +444,8 @@ def _stub_ffmpeg(monkeypatch, fail_on=None):
             self.stderr = "out of memory" if rc else ""
 
     def fake_run(cmd, **kw):
+        if cmd[0] == "ffprobe":
+            return _Proc(0)
         runs.append(cmd)
         if fail_on is not None and len(runs) - 1 == fail_on:
             return _Proc(1)
@@ -451,7 +454,7 @@ def _stub_ffmpeg(monkeypatch, fail_on=None):
                 fh.write(b"fake mp4")
         return _Proc(0)
 
-    monkeypatch.setattr(branding.subprocess, "run", fake_run)
+    monkeypatch.setattr(ffrun.subprocess, "run", fake_run)
     return runs
 
 

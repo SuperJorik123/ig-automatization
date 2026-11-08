@@ -110,7 +110,7 @@ from modules.telegram import report as reach_report  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
-from shared import branding, photo_card, public_media, video_edit, vision  # noqa: E402
+from shared import branding, ffrun, photo_card, public_media, video_edit, vision  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1603,6 +1603,11 @@ class _RenderSetupError(Exception):
     """The source video couldn't be fetched or probed — nothing rendered."""
 
 
+class _RenderHung(_RenderSetupError):
+    """ffmpeg hung twice and was killed. A single post goes back to its plan
+    card; a bundle reports it like any other unreadable video."""
+
+
 class _EditError(_RenderSetupError):
     """The operator's `edit:` couldn't be applied to this clip. A single post
     goes back to its plan card (the edit is the operator's to fix, the post
@@ -1669,6 +1674,10 @@ async def _render_video(bot, chat, state: dict, brands: list, tag: str,
                 state["files"].append(path)
                 renders.append({"brand": j["brand"], "path": path,
                                 "headline": j["headline"]})
+        except ffrun.Timeout as exc:
+            # A hang isn't one brand's fault: going brand-by-brand would sit
+            # out the limit once per brand.
+            raise _RenderHung(str(exc)) from exc
         except Exception as exc:
             log.warning("combined brand render failed (%s) — retrying "
                         "brand-by-brand", str(exc)[:200])
@@ -1739,6 +1748,13 @@ async def _do_render(q, context, state: dict) -> None:
         state["mode"] = "plan"
         await q.edit_message_text(
             _plan_text(state) + f"\n\n❌ the edit failed: {str(exc)[:300]}",
+            reply_markup=_plan_markup(state))
+        return
+    except _RenderHung as exc:
+        state["mode"] = "plan"
+        await q.edit_message_text(
+            _plan_text(state) + f"\n\n❌ the render failed: {str(exc)[:300]}. "
+            "Nothing was published.",
             reply_markup=_plan_markup(state))
         return
     except _RenderSetupError as exc:

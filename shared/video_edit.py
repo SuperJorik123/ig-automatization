@@ -36,7 +36,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import sys
 
 # Repo root on sys.path so `from shared import …` resolves when run directly.
@@ -44,7 +43,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from shared import renderlock  # noqa: E402
+from shared import ffrun, renderlock  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -292,10 +291,9 @@ def key(spec: dict) -> str:
 
 
 def _has_audio(path: str) -> bool:
-    proc = subprocess.run(
+    proc = ffrun.run(
         ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
-         "stream=index", "-of", "csv=p=0", path],
-        capture_output=True, text=True)
+         "stream=index", "-of", "csv=p=0", path], ffrun.PROBE_S)
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
@@ -352,8 +350,15 @@ def render(src: str, spec: dict, out: str, duration: float) -> str:
     cmd = build_command(src, plan, out, _has_audio(src))
     log.info("editing %s: %d segment(s), crop %s → %.1fs", src,
              len(plan["segments"]), plan["crop"] or "none", plan["duration"])
-    with renderlock.render_slot():
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        with renderlock.render_slot():
+            proc = ffrun.run(cmd, ffrun.limit_s(plan["duration"]))
+    except ffrun.Timeout:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        raise
     if proc.returncode != 0 or not os.path.exists(out):
         try:
             os.remove(out)

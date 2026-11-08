@@ -35,11 +35,10 @@ import json
 import logging
 import os
 import re
-import subprocess
 import textwrap
 import unicodedata
 
-from shared import renderlock
+from shared import ffrun, renderlock
 
 log = logging.getLogger(__name__)
 
@@ -519,6 +518,34 @@ ENCODE_ARGS = [
     "-movflags", "+faststart",
 ]
 
+# The retry after a hang. ffmpeg's default AAC method looped for ever on a clip
+# in the 176-208k band (2026-11-04); twoloop finished the same audio.
+SAFE_AUDIO_ARGS = ["-aac_coder", "twoloop"]
+
+
+def _encode_args(safe_audio: bool) -> list:
+    if not safe_audio:
+        return ENCODE_ARGS
+    at = ENCODE_ARGS.index("-b:a")
+    return ENCODE_ARGS[:at] + SAFE_AUDIO_ARGS + ENCODE_ARGS[at:]
+
+
+def run_encode(build, source: str, outputs: int = 1,
+               safe_audio: bool = False) -> tuple:
+    """Run the ffmpeg command `build(encode_args)` under a time limit; on a
+    hang, once more with the safe audio method. Returns (process, whether the
+    safe method was used). `safe_audio=True` starts there, so a later batch of
+    the same clip doesn't wait out the limit again. Raises ffrun.Timeout when
+    the retry hangs too."""
+    limit = ffrun.limit_s(ffrun.duration_of(source), outputs)
+    if not safe_audio:
+        try:
+            return ffrun.run(build(ENCODE_ARGS), limit), False
+        except ffrun.Timeout:
+            log.warning("render of %s hung — retrying with %s", source,
+                        " ".join(SAFE_AUDIO_ARGS))
+    return ffrun.run(build(_encode_args(True)), limit), True
+
 
 def _prepare_job(headline: str, logo_path: str, out_path: str,
                  style: dict | None) -> dict:
@@ -559,16 +586,16 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
     job = _prepare_job(headline, logo_path, out_path, style)
     try:
         with renderlock.render_slot():
-            proc = subprocess.run(
-                [
+            proc, _ = run_encode(
+                lambda encode: [
                     "ffmpeg", "-y", "-v", "error",
                     "-i", video_path, "-i", logo_path,
                     "-filter_complex",
                     _filter_graph(job["font"], job["text_path"], job["style"]),
-                    *ENCODE_ARGS,
+                    *encode,
                     out_path,
                 ],
-                capture_output=True, text=True,
+                video_path,
             )
         if proc.returncode != 0:
             try:
@@ -576,6 +603,12 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
             except OSError:
                 pass
             raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-300:]}")
+    except ffrun.Timeout:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise
     finally:
         try:
             os.remove(job["text_path"])
@@ -584,27 +617,32 @@ def render_branded(video_path: str, headline: str, logo_path: str, out_path: str
     return out_path
 
 
-def _render_pass(video_path: str, prepared: list[dict]) -> None:
+def _render_pass(video_path: str, prepared: list[dict],
+                 safe_audio: bool = False) -> bool:
     """One ffmpeg invocation for `prepared` (already validated by
     `_prepare_job`): the source decoded and the blur-fill canvas built once,
     split N ways, each branch adding its own logo + banner and encoding its
     own output. Raises RuntimeError with ffmpeg's stderr tail on a failure;
-    the caller owns the cleanup of the outputs."""
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path]
-    for p in prepared:
-        cmd += ["-i", p["logo_path"]]
-    cmd += ["-filter_complex", _filter_graph_multi(prepared)]
-    for i, p in enumerate(prepared):
-        # "0:a?" — map the source audio when there is one, silently skip
-        # when there isn't (screen recordings often ship without).
-        cmd += ["-map", f"[v{i}]", "-map", "0:a?",
-                *ENCODE_ARGS, p["out_path"]]
+    the caller owns the cleanup of the outputs. Returns whether the pass
+    needed the safe audio method (see `run_encode`)."""
+    def build(encode: list) -> list:
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path]
+        for p in prepared:
+            cmd += ["-i", p["logo_path"]]
+        cmd += ["-filter_complex", _filter_graph_multi(prepared)]
+        for i, p in enumerate(prepared):
+            # "0:a?" — map the source audio when there is one, silently skip
+            # when there isn't (screen recordings often ship without).
+            cmd += ["-map", f"[v{i}]", "-map", "0:a?", *encode, p["out_path"]]
+        return cmd
+
     # The slot is taken per batch, not once around the whole set: between two
     # batches is exactly where another process's render should get its turn.
     with renderlock.render_slot():
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc, used_safe = run_encode(build, video_path, len(prepared), safe_audio)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-300:]}")
+    return used_safe
 
 
 def render_branded_multi(video_path: str, jobs: list[dict],
@@ -634,9 +672,11 @@ def render_branded_multi(video_path: str, jobs: list[dict],
         for job in jobs:
             prepared.append(_prepare_job(job["headline"], job["logo_path"],
                                          job["out_path"], job.get("style")))
+        safe_audio = False
         for start in range(0, len(prepared), size):
             try:
-                _render_pass(video_path, prepared[start:start + size])
+                safe_audio = _render_pass(video_path, prepared[start:start + size],
+                                          safe_audio)
             except Exception:
                 for p in prepared:
                     try:
