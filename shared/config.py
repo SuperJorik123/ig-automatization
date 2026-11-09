@@ -589,6 +589,10 @@ NR_POLL_S = _int_env("NR_POLL_S", 300)
 # then; a single timeout is noise, three consecutive ones is an outage.
 NR_FETCH_ALERT_AFTER = max(1, _int_env("NR_FETCH_ALERT_AFTER", 3))
 
+# Good polls in a row before a site that already alerted can alert again, so a
+# flapping site is one email and not one per flap. 12 polls = 1 h at NR_POLL_S=300.
+NR_FETCH_REARM_AFTER = max(1, _int_env("NR_FETCH_REARM_AFTER", 12))
+
 # Delay between publishing a post and ordering its reactions. Reactions
 # appearing in the same second as the post is the most legible bot tell there
 # is; 20 minutes reads as organic.

@@ -232,11 +232,62 @@ def test_http_error_raises_runtime_error(get):
         wp.fetch_recent(SITE)
 
 
-def test_non_json_body_raises_runtime_error(get):
+def test_non_json_body_raises_runtime_error(get, monkeypatch):
+    monkeypatch.setattr(wp, "JSON_RETRY_DELAY_S", 0)
     get.response = FakeResponse(bad_json=True)
 
     with pytest.raises(RuntimeError, match="non-JSON"):
         wp.fetch_recent(SITE)
+
+
+class SequencedGet:
+    """requests.get that answers from a list, one response per call."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.count = 0
+
+    def __call__(self, url, params=None, timeout=None, headers=None):
+        self.count += 1
+        return self.responses.pop(0)
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch):
+    monkeypatch.setattr(wp, "JSON_RETRY_DELAY_S", 0)
+
+
+def test_non_json_body_is_retried_and_the_second_answer_used(monkeypatch, no_retry_wait):
+    # abudhabitimes, 2026-11: PHP notices printed ahead of the JSON on an
+    # uncached render, while the request right after it comes back clean.
+    fake = SequencedGet(FakeResponse(bad_json=True, text="<br />\n<b>Deprecated</b>"),
+                        FakeResponse([_post(7)]))
+    monkeypatch.setattr(wp.requests, "get", fake)
+
+    got = wp.fetch_recent(SITE)
+
+    assert [a["wp_id"] for a in got] == [7]
+    assert fake.count == 2
+
+
+def test_non_json_twice_raises_and_shows_what_the_site_sent(monkeypatch, no_retry_wait):
+    fake = SequencedGet(FakeResponse(bad_json=True, text="<b>Deprecated</b> one"),
+                        FakeResponse(bad_json=True, text="<b>Deprecated</b> two"))
+    monkeypatch.setattr(wp.requests, "get", fake)
+
+    with pytest.raises(RuntimeError, match="non-JSON.*Deprecated"):
+        wp.fetch_recent(SITE)
+    assert fake.count == 2
+
+
+def test_http_error_is_not_retried(monkeypatch, no_retry_wait):
+    # The retry is for a garbled 200. Hammering a 403/500 helps nobody.
+    fake = SequencedGet(FakeResponse(status=500, text="boom"))
+    monkeypatch.setattr(wp.requests, "get", fake)
+
+    with pytest.raises(RuntimeError, match="500"):
+        wp.fetch_recent(SITE)
+    assert fake.count == 1
 
 
 def test_wordpress_error_object_raises_runtime_error(get):

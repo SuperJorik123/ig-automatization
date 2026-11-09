@@ -119,12 +119,21 @@ def _now() -> datetime:
 # recovery is logged so the thread has an end.
 _fetch_failures: dict[str, int] = {}
 
+# Sites already emailed about, and their good polls in a row since. A site that
+# flaps (three failures, one good poll, three more) is ONE problem: the alert
+# re-arms only after NR_FETCH_REARM_AFTER good polls in a row. In memory on
+# purpose — a restart costs at most one extra email.
+_fetch_alerted: set[str] = set()
+_fetch_healthy: dict[str, int] = {}
+
 
 def _note_fetch_failure(name: str, exc: Exception) -> None:
     streak = _fetch_failures.get(name, 0) + 1
     _fetch_failures[name] = streak
+    _fetch_healthy.pop(name, None)
     threshold = config.NR_FETCH_ALERT_AFTER
-    if streak == threshold:
+    if streak == threshold and name not in _fetch_alerted:
+        _fetch_alerted.add(name)
         log.error("%s: fetch failed %d times in a row (%s between polls) — "
                   "last error: %s", name, streak,
                   f"{config.NR_POLL_S}s", exc)
@@ -136,6 +145,13 @@ def _note_fetch_success(name: str) -> None:
     streak = _fetch_failures.pop(name, 0)
     if streak >= config.NR_FETCH_ALERT_AFTER:
         log.info("%s: reachable again after %d failed poll(s)", name, streak)
+    if name in _fetch_alerted:
+        _fetch_healthy[name] = _fetch_healthy.get(name, 0) + 1
+        if _fetch_healthy[name] >= config.NR_FETCH_REARM_AFTER:
+            _fetch_alerted.discard(name)
+            _fetch_healthy.pop(name, None)
+            log.info("%s: healthy for %d polls — outage closed, alert re-armed",
+                     name, config.NR_FETCH_REARM_AFTER)
 
 
 async def tick(bot, site: dict, job_queue=None) -> str:

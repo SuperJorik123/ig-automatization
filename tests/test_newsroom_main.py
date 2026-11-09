@@ -458,6 +458,8 @@ def test_fetch_failures_alert_only_on_the_third_in_a_row(main, monkeypatch, capl
     monkeypatch.setattr(main.wp, "fetch_recent", flaky)
     monkeypatch.setattr(main.config, "NR_FETCH_ALERT_AFTER", 3)
     main._fetch_failures.clear()
+    main._fetch_alerted.clear()
+    main._fetch_healthy.clear()
 
     with caplog.at_level(logging.INFO, logger="newsroom"):
         for _ in range(2):
@@ -489,6 +491,98 @@ def test_fetch_failures_alert_only_on_the_third_in_a_row(main, monkeypatch, capl
         for _ in range(2):
             run(main.tick(FakeBot(), _site()))
         assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+def _fetch_script(main, monkeypatch):
+    """Make wp.fetch_recent fail or succeed per `state["fail"]`."""
+    state = {"fail": True}
+
+    def fetch(site, limit=20):
+        if state["fail"]:
+            raise RuntimeError("acme: non-JSON response")
+        return []
+
+    monkeypatch.setattr(main.wp, "fetch_recent", fetch)
+    monkeypatch.setattr(main.config, "NR_FETCH_ALERT_AFTER", 3)
+    monkeypatch.setattr(main.config, "NR_FETCH_REARM_AFTER", 4)
+    main._fetch_failures.clear()
+    main._fetch_alerted.clear()
+    main._fetch_healthy.clear()
+    return state
+
+
+def _ticks(main, n):
+    for _ in range(n):
+        run(main.tick(FakeBot(), _site()))
+
+
+def _error_count(caplog):
+    return len([r for r in caplog.records if r.levelno == logging.ERROR])
+
+
+def test_a_flapping_site_emails_once(main, monkeypatch, caplog):
+    """The abudhabitimes pattern: three failures, one good poll, three more,
+    all day. That is one problem and one email, not fifteen."""
+    state = _fetch_script(main, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="newsroom"):
+        for _ in range(5):
+            state["fail"] = True
+            _ticks(main, 3)
+            state["fail"] = False
+            _ticks(main, 1)
+
+    assert _error_count(caplog) == 1
+
+
+def test_alert_rearms_only_after_a_full_healthy_run(main, monkeypatch, caplog):
+    state = _fetch_script(main, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="newsroom"):
+        _ticks(main, 3)
+        assert _error_count(caplog) == 1
+
+        # One short of the healthy run: still the same outage.
+        state["fail"] = False
+        _ticks(main, 3)
+        state["fail"] = True
+        _ticks(main, 3)
+        assert _error_count(caplog) == 1
+
+        # A full healthy run closes it, so the next outage does email.
+        state["fail"] = False
+        _ticks(main, 4)
+        state["fail"] = True
+        _ticks(main, 3)
+        assert _error_count(caplog) == 2
+
+
+def test_a_failure_restarts_the_healthy_run(main, monkeypatch, caplog):
+    state = _fetch_script(main, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="newsroom"):
+        _ticks(main, 3)
+        for _ in range(3):  # 3 good polls never add up to 4 across failures
+            state["fail"] = False
+            _ticks(main, 3)
+            state["fail"] = True
+            _ticks(main, 1)
+        state["fail"] = True
+        _ticks(main, 3)
+
+    assert _error_count(caplog) == 1
+
+
+def test_alert_state_is_per_site(main, monkeypatch, caplog):
+    _fetch_script(main, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="newsroom"):
+        for _ in range(3):
+            main._note_fetch_failure("one", RuntimeError("x"))
+        for _ in range(3):
+            main._note_fetch_failure("two", RuntimeError("x"))
+
+    assert _error_count(caplog) == 2
 
 
 # --------------------------------------------------------------------------- #

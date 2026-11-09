@@ -23,6 +23,7 @@ Blocking (uses `requests`) — async callers wrap it in asyncio.to_thread.
 import html
 import logging
 import re
+import time
 
 import requests
 
@@ -36,6 +37,13 @@ TIMEOUT = 20
 # publishing burst between two five-minute polls, and the ones already stored
 # cost nothing to re-see.
 PER_PAGE = 20
+
+# A 200 whose body will not parse gets one more try, a moment later. A site with
+# PHP's display_errors on prints notices ahead of the JSON on an uncached render
+# and answers cleanly right after: abudhabitimes failed most polls this way in
+# 2026-11, and every immediate re-request came back clean.
+JSON_ATTEMPTS = 2
+JSON_RETRY_DELAY_S = 2
 
 # Tags whose content is NOT part of the prose. Dropped with their inner text
 # before the rest of the markup is stripped, otherwise a stylesheet or a
@@ -138,24 +146,33 @@ def fetch_recent(site: dict, limit: int = PER_PAGE) -> list:
         "status": "publish",
         "_embed": "1",
     }
-    try:
-        resp = requests.get(url, params=params, timeout=TIMEOUT,
-                            headers={"User-Agent": "newsroom-bot/1.0"})
-    except requests.RequestException as exc:
-        raise RuntimeError(f"{site['name']}: request failed: {exc}") from exc
+    for attempt in range(1, JSON_ATTEMPTS + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=TIMEOUT,
+                                headers={"User-Agent": "newsroom-bot/1.0"})
+        except requests.RequestException as exc:
+            raise RuntimeError(f"{site['name']}: request failed: {exc}") from exc
 
-    if resp.status_code != 200:
-        # A REST API disabled by a plugin or a security rule answers 401/403;
-        # the body is the useful part, so a slice of it goes into the message.
-        raise RuntimeError(
-            f"{site['name']}: HTTP {resp.status_code} from {url} — "
-            f"{resp.text.strip()[:200]}"
-        )
+        if resp.status_code != 200:
+            # A REST API disabled by a plugin or a security rule answers 401/403;
+            # the body is the useful part, so a slice of it goes into the message.
+            raise RuntimeError(
+                f"{site['name']}: HTTP {resp.status_code} from {url} — "
+                f"{resp.text.strip()[:200]}"
+            )
 
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise RuntimeError(f"{site['name']}: non-JSON response from {url}") from exc
+        try:
+            payload = resp.json()
+            break
+        except ValueError as exc:
+            if attempt == JSON_ATTEMPTS:
+                raise RuntimeError(
+                    f"{site['name']}: non-JSON response from {url} — "
+                    f"{resp.text.strip()[:200]}"
+                ) from exc
+            log.info("%s: non-JSON response, retrying in %gs",
+                     site["name"], JSON_RETRY_DELAY_S)
+            time.sleep(JSON_RETRY_DELAY_S)
 
     if not isinstance(payload, list):
         # WordPress reports its own errors as an object, e.g.
