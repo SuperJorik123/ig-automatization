@@ -44,7 +44,22 @@ def _float_env(name: str, default: float) -> float:
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # .env lives at the repo root and is git-ignored (holds the bot token etc.).
-load_dotenv(os.path.join(ROOT_DIR, ".env"))
+# ENV_FILE points a process at a different one: the lite render bot runs from
+# the same checkout with ENV_FILE=.env.lite (its own token, group, data dir and
+# one brand) — see modules/telegram/news_bot.py "lite mode". Relative paths are
+# read against the repo root. Only that one file is loaded, so nothing of the
+# full bot's .env (posting keys included) reaches a lite process.
+ENV_FILE = os.environ.get("ENV_FILE", "").strip() or ".env"
+if not os.path.isabs(ENV_FILE):
+    ENV_FILE = os.path.join(ROOT_DIR, ENV_FILE)
+load_dotenv(ENV_FILE)
+
+# "full" (default) = the news bot with every feature; "lite" = the render-only
+# bot: video in, headline spell-fixed, optional edit:, branded render back into
+# its group, and nothing else — no publishing, scheduling, bundles, captions,
+# AI headlines or reports, and no posting credentials loaded at all.
+BOT_MODE = os.environ.get("BOT_MODE", "full").strip().lower() or "full"
+LITE = BOT_MODE == "lite"
 
 # credentials/accounts.json holds the PER-BRAND accounts (Telegram channel,
 # Twitter keys, Instagram Graph token, YouTube channel) as one JSON block per
@@ -53,7 +68,9 @@ load_dotenv(os.path.join(ROOT_DIR, ".env"))
 # posters' os.getenv lookups) is unchanged and cannot tell the difference.
 # Shared services (OpenRouter, BulkFollows, SMTP, bot tokens) stay in .env.
 # No file = nothing changes; a malformed one raises here, at startup.
-BRAND_ACCOUNTS = credentials.apply()
+# A lite bot never reads them: credentials/brands/ is shared by the checkout and
+# holds every brand's posting keys, which a render-only bot must not have.
+BRAND_ACCOUNTS = [] if LITE else credentials.apply()
 
 # Single shared media queue. posts/ stays at the repo root; posts/posted/
 # holds archives. Both server.py and the platform posters read/write here.
@@ -255,7 +272,18 @@ HASHTAG_CACHE_DAYS = _int_env("HASHTAG_CACHE_DAYS", 30)
 HASHTAG_LOOKUP_TIMEOUT_S = _int_env("HASHTAG_LOOKUP_TIMEOUT_S", 90)
 
 # Collector's working dir: SQLite queue + downloaded media + login session.
-TG_DATA_DIR = os.path.join(ROOT_DIR, "modules", "telegram", "data")
+# A second bot from the same checkout (the lite render bot) sets its own, or
+# the two would share a DB, a busy marker, a Telethon session and a media dir.
+TG_DATA_DIR = (os.environ.get("TG_DATA_DIR", "").strip()
+               or os.path.join(ROOT_DIR, "modules", "telegram", "data"))
+if not os.path.isabs(TG_DATA_DIR):
+    TG_DATA_DIR = os.path.join(ROOT_DIR, TG_DATA_DIR)
+
+# One render at a time across BOTH bots (shared/render_lock.py): the VPS has
+# ~1.9 GB of RAM and two ffmpeg renders at once can get the full bot's encode
+# OOM-killed. Must be the same path for both processes — leave it unset.
+RENDER_LOCK_PATH = (os.environ.get("RENDER_LOCK_PATH", "").strip()
+                    or os.path.join(ROOT_DIR, "data", "render.lock"))
 
 # BulkFollows (SMM panel) — orders placed per published Telegram post, and one
 # extra order per channel every BULKFOLLOWS_POST_THRESHOLD posts. The two

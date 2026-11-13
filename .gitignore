@@ -15,6 +15,7 @@ credentials/brands/*
 # Telegram news aggregator runtime state — the .session file is a LOGIN
 # CREDENTIAL; media + the SQLite queue are local runtime artefacts.
 modules/telegram/data/
+modules/telegram/data_lite/
 
 # Monitoring state (shared/monitoring/checks.py) — repo-root data/ only.
 /data/

@@ -1,0 +1,25 @@
+# /etc/systemd/system/render-bot.service — the LITE render bot (BOT_MODE=lite).
+# Same checkout and code as news-bot; everything that differs is in .env.lite
+# (template: deploy/render-bot.env.example).
+#
+#   cp deploy/render-bot.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now render-bot
+#   journalctl -u render-bot -f
+[Unit]
+Description=Lite render bot (render only, no publishing)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/ig-automatization2
+Environment=ENV_FILE=/opt/ig-automatization2/.env.lite
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/ig-automatization2/.venv/bin/python modules/telegram/news_bot.py
+# Lower CPU priority than news-bot: the render lock already keeps the two from
+# rendering at once, this only matters for the rest (downloads, probes).
+Nice=10
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

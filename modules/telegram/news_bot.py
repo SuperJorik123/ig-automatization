@@ -110,7 +110,7 @@ from modules.telegram import report as reach_report  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
-from shared import branding, ffrun, photo_card, public_media, video_edit, vision  # noqa: E402
+from shared import branding, ffrun, photo_card, public_media, render_lock, video_edit, vision  # noqa: E402
 from shared.monitoring import errmail, heartbeat  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -129,7 +129,29 @@ except ValueError as exc:
     raise SystemExit(
         f"TELEGRAM_CHAT_ID must be an integer, got {config.TELEGRAM_CHAT_ID!r}"
     ) from exc
-if not (config.TG_DESTINATIONS or config.YT_DESTINATIONS or config.TW_DESTINATIONS):
+def _lite_posting_config() -> list:
+    """Every posting credential or destination a lite bot can see. It must
+    see none: the render-only bot is handed to someone who renders videos, and
+    a key it never loads is a key it can't post with by mistake."""
+    found = [name for name, value in (
+        ("TG_DESTINATIONS", config.TG_DESTINATIONS),
+        ("YT_DESTINATIONS", config.YT_DESTINATIONS),
+        ("TW_DESTINATIONS", config.TW_DESTINATIONS),
+        ("IG_GRAPH_ACCOUNTS", config.IG_GRAPH_ACCOUNTS),
+    ) if value]
+    for b in config.BRANDS:
+        found += [f"BRAND_{b['name'].upper()}_{k.upper()}"
+                  for k in ("tg", "yt", "tw", "ig", "fb") if b.get(k)]
+    return found
+
+
+if config.LITE:
+    if not config.BRANDS:
+        raise SystemExit("lite mode: BRANDS is empty — set the one brand it renders")
+    if _lite_posting_config():
+        raise SystemExit("lite mode must not have posting accounts, found: "
+                         + ", ".join(_lite_posting_config()))
+elif not (config.TG_DESTINATIONS or config.YT_DESTINATIONS or config.TW_DESTINATIONS):
     raise SystemExit(
         "No destinations in .env — set TG_DESTINATIONS (chat_id:lang), "
         "YT_DESTINATIONS (yt_account:lang) and/or TW_DESTINATIONS (x_account:lang)"
@@ -349,7 +371,8 @@ def _init_plan(state: dict, kind: str) -> None:
                  # The analysis starts the moment the card is up; until it
                  # lands the card says so. Photos are never analysed — see
                  # _start_watching.
-                 watching=config.IG_VISION_ENABLED and kind != "photo")
+                 watching=(config.IG_VISION_ENABLED and kind != "photo"
+                           and not config.LITE))
     state["video_key"] = _video_key(state)
 
 
@@ -369,6 +392,8 @@ def _plan_keys(state: dict) -> list:
 def _plan_text(state: dict) -> str:
     """The card: headline, what the clip shows, the operator's info, the plan,
     and the two things a reply can do."""
+    if config.LITE:
+        return _lite_plan_text(state)
     head = state["text"].strip()
     lines = [f"📰 {head}" if head
              else "⚠️ no headline yet — reply to this message with it"]
@@ -396,6 +421,57 @@ def _plan_text(state: dict) -> str:
 
 _EDIT_HINT = ("↩️ reply `edit: 23-26, crop bottom 10%, cut end 2` to put a "
               "hook first, crop a banner off or cut time")
+
+
+# --------------------------------------------------------------------------- #
+# Lite mode (BOT_MODE=lite): the render-only bot                              #
+# --------------------------------------------------------------------------- #
+# Same code, same plan card, same render — minus everything that publishes or
+# writes captions. A video comes in, the headline can be replied to, `edit:`
+# and ▶ Preview edit work, 🎬 Render spell-fixes the headline and sends the
+# branded clip back into the group, and that's it. The gates are whitelists
+# (callbacks, message kinds), not hidden buttons, so a stale or hand-made
+# callback can't reach a full-bot path.
+
+_LITE_CALLBACKS = {"b:go", "b:pv", "b:cancel"}
+
+_LITE_VIDEO_ONLY = ("🎬 this bot renders videos only — send one video (or a "
+                    "video link) with the headline as its caption")
+
+
+def _lite_plan_text(state: dict) -> str:
+    head = state["text"].strip()
+    lines = [f"📰 {head}" if head
+             else "⚠️ no headline yet — reply to this message with it"]
+    lines += _edit_lines(state)
+    names = ", ".join(b["name"] for b in state["brands"]) or "—"
+    lines.append(f"{_PLAN_RULE}\n🏷 {names}\n{_PLAN_RULE}")
+    lines.append("↩️ reply to this message to replace the headline\n"
+                 + _EDIT_HINT)
+    return "\n\n".join(lines)
+
+
+def _lite_plan_markup(state: dict) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("🎬 Render", callback_data="b:go")]]
+    if state.get("edit"):
+        rows.append([branded.PREVIEW_EDIT_BUTTON])
+    rows.append([InlineKeyboardButton("✕ Cancel", callback_data="b:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+@contextlib.asynccontextmanager
+async def _render_slot(chat):
+    """Hold the cross-bot render lock (shared/render_lock.py) around an ffmpeg
+    or card render, telling the group when it has to wait for the other bot."""
+    async def waiting():
+        _track(await chat.send_message(
+            "⏳ the main bot is rendering — yours starts as soon as it is done"
+            if config.LITE else
+            "⏳ the render bot is finishing a video — yours starts right "
+            "after it (about a minute)"))
+    async with render_lock.hold(config.RENDER_LOCK_PATH,
+                                priority=not config.LITE, on_wait=waiting):
+        yield
 
 
 def _edit_lines(state: dict) -> list:
@@ -465,7 +541,8 @@ async def _preview_edit(q, context, state: dict) -> None:
         with _busy("previewing an edit"):
             src = await _ensure_local_video(context.bot, state)
             _, _, duration = await asyncio.to_thread(shorts_format.probe, src)
-            path, duration = await _edited_source(state, src, duration)
+            async with _render_slot(chat):
+                path, duration = await _edited_source(state, src, duration)
             w, h, _ = await asyncio.to_thread(shorts_format.probe, path)
             caption = "✂️ edit preview — " + video_edit.describe(
                 state["edit"]).removeprefix("✂️ edit: ")
@@ -538,6 +615,8 @@ def _task_running(task) -> bool:
 
 def _plan_markup(state: dict) -> InlineKeyboardMarkup:
     """🎬 Render / ✏️ Change, or — while editing — every choice on one screen."""
+    if config.LITE:
+        return _lite_plan_markup(state)
     layouts = (branded.card_layouts(_photo_count(state["media"]))
                if state["gate_kind"] == "photo" else [])
     if not state.get("editing"):
@@ -672,7 +751,7 @@ async def _gate(msg, text: str, media: list, files: list | None = None,
     leads there. State is the same _pending dict, mode-tagged."""
     state = {"text": text, "media": media, "files": list(files or ()),
              "sel_tg": set(), "sel_yt": set(), "sel_tw": set(), "sel_em": set()}
-    if kind == "video":
+    if kind == "video" and not config.LITE:
         bndl = await asyncio.to_thread(queue_store.current_bundle, CHAT_ID)
         if bndl is not None:
             line = _track(await msg.reply_text("📦 joining the bundle …"))
@@ -754,7 +833,13 @@ async def _handle_url(msg, text: str) -> None:
         "sel_tw": set(),
         "sel_em": set(),
     }
-    if config.BRANDS and is_video:
+    if config.LITE and not is_video:
+        for path in paths:
+            with contextlib.suppress(OSError):
+                os.remove(path)
+        await note.edit_text(_LITE_VIDEO_ONLY)
+        return
+    if config.BRANDS and is_video and not config.LITE:
         bndl = await asyncio.to_thread(queue_store.current_bundle, CHAT_ID)
         if bndl is not None:
             await _join_bundle(msg.get_bot(), bndl, state, note)
@@ -764,7 +849,7 @@ async def _handle_url(msg, text: str) -> None:
         await note.edit_text(_plan_text(state), reply_markup=_plan_markup(state))
         _pending[note.message_id] = state
         _start_watching(msg.get_bot(), state, note)
-        if _source_text(state):
+        if _source_text(state) and not config.LITE:
             # The source post is enough to write headline options from.
             _start_headlines(state, note)
         return
@@ -803,6 +888,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         field, value = branded.parse_reply(text)
         if field == "edit":
             await _on_edit_reply(state, value, reply, msg)
+            return
+        if config.LITE:
+            await _lite_reply(state, field, value, reply, msg)
             return
         if state.get("mode") == "bundle":
             # A bundle video's line: info starts its headlines (the model's
@@ -878,6 +966,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _handle_url(msg, text)
         return
 
+    if config.LITE:
+        if (msg.media_group_id is None and media_item is not None
+                and media_item["type"] == "video"):
+            await _gate(msg, text, [media_item])
+        else:
+            _track(await msg.reply_text(_LITE_VIDEO_ONLY))
+        return
+
     gid = msg.media_group_id
     if gid is None:
         if media_item and media_item["type"] == "video" and config.BRANDS:
@@ -899,6 +995,22 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if media_item:
         entry["media"].append(media_item)
     entry["task"] = asyncio.create_task(_flush_album(gid))
+
+
+async def _lite_reply(state: dict, field: str, value: str, reply, msg) -> None:
+    """A reply to an open lite card: a new headline, and nothing else."""
+    if field == "info":
+        _track(await msg.reply_text(
+            "ℹ️ this bot doesn't use info: — reply with the headline, or "
+            "`edit: …` to cut the clip"))
+        return
+    if state.get("mode") != "plan":
+        return  # rendering: the headline is being burned in
+    state.update(text=value, cap_src="edited")
+    try:
+        await reply.edit_text(_plan_text(state), reply_markup=_plan_markup(state))
+    except Exception:  # "message is not modified"
+        pass
 
 
 def _too_big_error(size: int) -> str:
@@ -1214,6 +1326,7 @@ def _start_watching(bot, state: dict, message) -> None:
     operator's `info:` alone — the search runs on those, exactly as it did
     before shared/vision existed — so the photos never go to the model."""
     if (state.get("vision_task") is not None or not config.IG_VISION_ENABLED
+            or config.LITE
             or state.get("gate_kind") == "photo" or state.get("card")):
         return
     state["vision_task"] = asyncio.create_task(
@@ -1638,64 +1751,68 @@ async def _render_video(bot, chat, state: dict, brands: list, tag: str,
         _, _, duration = await asyncio.to_thread(shorts_format.probe, src)
     except Exception as exc:
         raise _RenderSetupError(str(exc)) from exc
-    # The operator's `edit:` (hook / crop / cuts) — one pass, before the
-    # brands, so everything after this only sees a different input file.
-    src, duration = await _edited_source(state, src, duration)
+    # One render at a time across both bots (shared/render_lock.py): held
+    # from the edit through the branding pass, released before the previews
+    # go out — sending is network, not RAM.
+    async with _render_slot(chat):
+        # The operator's `edit:` (hook / crop / cuts) — one pass, before the
+        # brands, so everything after this only sees a different input file.
+        src, duration = await _edited_source(state, src, duration)
 
-    media_dir = os.path.join(config.TG_DATA_DIR, "media")
-    renders, failures, warnings = [], [], []
-    cache: dict[str, str] = {}
+        media_dir = os.path.join(config.TG_DATA_DIR, "media")
+        renders, failures, warnings = [], [], []
+        cache: dict[str, str] = {}
 
-    # Translate first: a brand whose headline can't be produced is reported
-    # and dropped here, before it can sink the combined render below.
-    jobs = []
-    for b in brands:
-        try:
-            lang = b["lang"]
-            if lang not in cache:
-                cache[lang] = (await asyncio.to_thread(
-                    translator.translate, state["text"], lang,
-                    config.SOURCE_LANG) if lang else state["text"])
-            out = os.path.join(media_dir, f"brand_{tag}_{b['name']}.mp4")
-            jobs.append({"brand": b, "headline": cache[lang],
-                         "logo_path": b["logo"], "out_path": out})
-        except Exception as exc:
-            log.error("brand render failed for %s: %s", b["name"], exc)
-            failures.append((b["name"], str(exc)[:200]))
+        # Translate first: a brand whose headline can't be produced is reported
+        # and dropped here, before it can sink the combined render below.
+        jobs = []
+        for b in brands:
+            try:
+                lang = b["lang"]
+                if lang not in cache:
+                    cache[lang] = (await asyncio.to_thread(
+                        translator.translate, state["text"], lang,
+                        config.SOURCE_LANG) if lang else state["text"])
+                out = os.path.join(media_dir, f"brand_{tag}_{b['name']}.mp4")
+                jobs.append({"brand": b, "headline": cache[lang],
+                             "logo_path": b["logo"], "out_path": out})
+            except Exception as exc:
+                log.error("brand render failed for %s: %s", b["name"], exc)
+                failures.append((b["name"], str(exc)[:200]))
 
-    # One ffmpeg pass for every brand. All-or-nothing by design, so a failure
-    # (one bad logo, one broken style.json) retries brand-by-brand — the slow
-    # path, but the one where the healthy brands still come out.
-    if jobs:
-        try:
-            paths = await asyncio.to_thread(
-                branding.render_branded_multi, src,
-                [{k: j[k] for k in ("headline", "logo_path", "out_path")}
-                 for j in jobs])
-            for j, path in zip(jobs, paths):
-                state["files"].append(path)
-                renders.append({"brand": j["brand"], "path": path,
-                                "headline": j["headline"]})
-        except ffrun.Timeout as exc:
-            # A hang isn't one brand's fault: going brand-by-brand would sit
-            # out the limit once per brand.
-            raise _RenderHung(str(exc)) from exc
-        except Exception as exc:
-            log.warning("combined brand render failed (%s) — retrying "
-                        "brand-by-brand", str(exc)[:200])
-            for j in jobs:
-                try:
-                    path = await asyncio.to_thread(
-                        branding.render_branded, src, j["headline"],
-                        j["logo_path"], j["out_path"])
-                except Exception as exc2:  # translator, ffmpeg — render failed
-                    log.error("brand render failed for %s: %s",
-                              j["brand"]["name"], exc2)
-                    failures.append((j["brand"]["name"], str(exc2)[:200]))
-                    continue
-                state["files"].append(path)
-                renders.append({"brand": j["brand"], "path": path,
-                                "headline": j["headline"]})
+        # One ffmpeg pass for every brand. All-or-nothing by design, so a failure
+        # (one bad logo, one broken style.json) retries brand-by-brand — the slow
+        # path, but the one where the healthy brands still come out.
+        if jobs:
+            try:
+                paths = await asyncio.to_thread(
+                    branding.render_branded_multi, src,
+                    [{k: j[k] for k in ("headline", "logo_path", "out_path")}
+                     for j in jobs])
+                for j, path in zip(jobs, paths):
+                    state["files"].append(path)
+                    renders.append({"brand": j["brand"], "path": path,
+                                    "headline": j["headline"]})
+            except ffrun.Timeout as exc:
+                # A hang isn't one brand's fault: going brand-by-brand would sit
+                # out the limit once per brand.
+                raise _RenderHung(str(exc)) from exc
+            except Exception as exc:
+                log.warning("combined brand render failed (%s) — retrying "
+                            "brand-by-brand", str(exc)[:200])
+                for j in jobs:
+                    try:
+                        path = await asyncio.to_thread(
+                            branding.render_branded, src, j["headline"],
+                            j["logo_path"], j["out_path"])
+                    except Exception as exc2:  # translator, ffmpeg — render failed
+                        log.error("brand render failed for %s: %s",
+                                  j["brand"]["name"], exc2)
+                        failures.append((j["brand"]["name"], str(exc2)[:200]))
+                        continue
+                    state["files"].append(path)
+                    renders.append({"brand": j["brand"], "path": path,
+                                    "headline": j["headline"]})
 
     # A render that succeeded is publishable regardless of whether the
     # preview send below works — a failed send must not knock it out of
@@ -1773,11 +1890,13 @@ async def _do_render(q, context, state: dict) -> None:
             "❌ all renders failed:\n"
             + "\n".join(f"{n}: {e}" for n, e in failures))
         return
-    _start_captions(q.message.chat, state, renders)
+    if not config.LITE:
+        _start_captions(q.message.chat, state, renders)
 
     state["mode"] = "publish"
     state["renders"] = renders
-    state["platforms"] = branded.platforms_for(renders, duration)
+    state["platforms"] = ([] if config.LITE
+                          else branded.platforms_for(renders, duration))
     state["sel_platforms"] = _preselect(state)
 
     summary = "🎨 rendered: " + ", ".join(r["brand"]["name"] for r in renders)
@@ -1795,6 +1914,7 @@ async def _do_render(q, context, state: dict) -> None:
         await q.edit_message_text(summary)
         if not state["platforms"]:
             _track(await q.message.chat.send_message(
+                "✅ done — the rendered video is above" if config.LITE else
                 "✅ rendered — these brands have no accounts set up "
                 "(credentials/brands/<name>.json), so there is nothing to "
                 "publish to; the files above are yours"))
@@ -1883,8 +2003,9 @@ async def _do_render_card(q, context, state: dict) -> None:
                     config.SOURCE_LANG) if lang else state["text"])
             out = os.path.join(
                 media_dir, f"card_{q.message.message_id}_{b['name']}.jpg")
-            await asyncio.to_thread(photo_card.render_card, hero, cache[lang],
-                                    b["logo"], out, insets, layout=layout)
+            async with _render_slot(q.message.chat):
+                await asyncio.to_thread(photo_card.render_card, hero, cache[lang],
+                                        b["logo"], out, insets, layout=layout)
         except Exception as exc:
             log.error("card render failed for %s: %s", b["name"], exc)
             failures.append((b["name"], str(exc)[:200]))
@@ -3310,6 +3431,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await q.answer()
         return
 
+    if config.LITE and q.data not in _LITE_CALLBACKS:
+        await q.answer("Not available in this bot.")
+        return
+
     # Scheduled posts and bundles live in the DB, not in _pending — routed
     # before it.
     if (q.data or "").startswith("s:"):
@@ -3537,9 +3662,11 @@ async def _on_start(app) -> None:
     """Queue the autopilot's first tick once the event loop is running, register
     the weekly cleanup, and connect the big-file client so its state is known
     (and logged) before the first post rather than discovered mid-upload."""
-    autopilot.schedule(app)
+    if not config.LITE:
+        autopilot.schedule(app)
     try:
-        await app.bot.set_my_commands(_MENU, scope=BotCommandScopeChat(CHAT_ID))
+        await app.bot.set_my_commands([] if config.LITE else _MENU,
+                                      scope=BotCommandScopeChat(CHAT_ID))
     except Exception as exc:  # a missing menu is cosmetic; the commands still work
         log.warning("command menu not set: %s", exc)
     if app.job_queue is not None and config.HEALTHCHECK_URL_NEWSBOT:
@@ -3561,6 +3688,7 @@ async def _on_start(app) -> None:
                                 name="media-sweep")
         log.info("media sweep scheduled: daily 04:30 %s (keeping < %dh)",
                  local_tz, config.TG_MEDIA_KEEP_H)
+    if app.job_queue is not None and not config.LITE:
         if config.IG_GRAPH_ACCOUNTS:
             # first=120 s: a fresh deploy checks the tokens right away, so a
             # broken refresh shows up in the log today, not in a week.
@@ -3577,7 +3705,7 @@ async def _on_start(app) -> None:
                                 days=(cleanup.MONDAY,), name="weekly-report")
         log.info("bundles restored; reel insights hourly; weekly report "
                  "Mondays 09:00 %s", local_tz)
-    else:
+    if app.job_queue is None:
         log.warning("no job queue — weekly cleanup and scheduled posts NOT "
                     "scheduled (install python-telegram-bot[job-queue])")
     if await mtproto.ensure_ready():
@@ -3614,7 +3742,9 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main() -> None:
-    errmail.install("news_bot")  # every logged ERROR -> one email to the operator
+    # every logged ERROR -> one email to the operator; the tag is the subject
+    # prefix, so the two bots' mails can be told apart in one inbox
+    errmail.install("lite-render-bot" if config.LITE else "news_bot")
     _write_busy()  # nothing is running yet: clear a marker a crash left behind
     _sweep_orphans()
     queue_store.init()  # the autopilot reads/writes the same DB as the collector
@@ -3626,6 +3756,15 @@ def main() -> None:
            .connect_timeout(15).read_timeout(30).write_timeout(60)
            .post_init(_on_start).post_shutdown(_on_shutdown).build())
     control = filters.Chat(CHAT_ID)
+    if config.LITE:
+        app.add_handler(MessageHandler(control & ~filters.COMMAND, on_message))
+        app.add_handler(CallbackQueryHandler(on_callback))
+        app.add_error_handler(on_error)
+        log.info("LITE render bot up: chat %s, brand(s) %s, data %s — render "
+                 "only, nothing is published", CHAT_ID,
+                 ", ".join(b["name"] for b in config.BRANDS), config.TG_DATA_DIR)
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+        return
     app.add_handler(CommandHandler("queue", cmd_queue, filters=control))
     app.add_handler(CommandHandler("autopilot", cmd_autopilot, filters=control))
     app.add_handler(CommandHandler("asks", cmd_asks, filters=control))

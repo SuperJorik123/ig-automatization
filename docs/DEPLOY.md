@@ -34,6 +34,7 @@ systemctl restart news-bot
 | `news-collector` | `modules/telegram/collector.py` | Needs a one-off interactive login (below) before it can be enabled. |
 | `news-dispatcher` | `modules/telegram/dispatcher.py` | The only process that scores. |
 | `news-bot` | `modules/telegram/news_bot.py` | Manual broadcaster + autopilot drip + weekly cleanup. |
+| `render-bot` | `modules/telegram/news_bot.py` with `ENV_FILE=.env.lite` | **Lite render bot** (since 2026-11-13): render only — video in, headline spell-fixed, optional `edit:`, PulseNews-branded clip back into its own group; nothing published, no posting credentials loaded. Unit file `deploy/render-bot.service`, env template `deploy/render-bot.env.example`, data in `modules/telegram/data_lite/`. Shares `data/render.lock` with news-bot so only one renders at a time (see "Lite render bot" below). |
 | `newsroom-bot` | `modules/newsroom/main.py` | The client's WordPress→Telegram bot. Same checkout and venv as the three above since 2026-09-03 (it was the `client/wp-newsbot` branch and `/opt/wp-newsbot` before); its own token (`NR_BOT_TOKEN`), its own SQLite store under `modules/newsroom/data/`, its own BulkFollows key. A code push restarts it together with the others — the store makes restarts safe (seen articles are never reposted). |
 
 All four are `Restart=always` and `WantedBy=multi-user.target`, so they come
@@ -41,6 +42,35 @@ back after a crash and after a reboot.
 
 **One bot token allows exactly one poller.** Never run `news_bot.py` locally
 while the VPS unit is up — both will fight over `getUpdates`.
+
+## Lite render bot
+
+A second instance of `news_bot.py` from the same checkout, for someone who
+only needs videos rendered: `BOT_MODE=lite` in `.env.lite` (template
+`deploy/render-bot.env.example`). In its group a video (or video link) opens
+the plan card with 🎬 Render / ▶ Preview edit / ✕ Cancel; a reply replaces the
+headline, `edit: …` cuts the clip, and Render spell-fixes the headline and
+sends the branded clip back. Every other callback, command and job is off, and
+`credentials/brands/` is not loaded — the bot refuses to start if `.env.lite`
+names any destination or brand account. Its error mails arrive as
+`[lite-render-bot] …`.
+
+Setup, once:
+
+```
+# .env.lite from the template: token, TELEGRAM_CHAT_ID, ALERT_* copied from .env
+cd /opt/ig-automatization2 && chmod 600 .env.lite
+ENV_FILE=.env.lite .venv/bin/python modules/telegram/mtproto.py --login --qr   # its own session, same account
+cp deploy/render-bot.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now render-bot
+journalctl -u render-bot -f
+```
+
+**Render lock.** Both bots take `data/render.lock` (`shared/render_lock.py`,
+`flock` — released by the kernel if a process dies) around every ffmpeg / card
+render, so the 1.9 GB box never runs two at once. A started render always
+finishes; when both are waiting the main bot goes first. Each side tells its
+group when it is waiting for the other.
 
 ## Sessions
 
@@ -259,12 +289,13 @@ them. From this PC, tar the tree without them and drop it over the old one:
 
 ```
 tar czf app.tar.gz --exclude=.git --exclude=__pycache__ --exclude=node_modules \
-    --exclude=.env --exclude='credentials/*' \
-    --exclude='posts/*' --exclude='modules/telegram/data/*' .
+    --exclude=.env --exclude='.env.*' --exclude='credentials/*' \
+    --exclude='posts/*' --exclude='modules/telegram/data/*' \
+    --exclude='modules/telegram/data_lite/*' .
 scp app.tar.gz root@193.36.38.133:/tmp/
 ssh root@193.36.38.133 'cd /opt/ig-automatization2 && tar xzf /tmp/app.tar.gz \
     && .venv/bin/pip install -q -r requirements.txt \
-    && sh deploy/restart_when_idle.sh news-bot newsroom-bot'   # collector/dispatcher: PROHIBITED, see Services
+    && sh deploy/restart_when_idle.sh news-bot render-bot newsroom-bot'   # collector/dispatcher: PROHIBITED, see Services
 ```
 
 `restart_when_idle.sh` waits while `modules/telegram/data/busy` exists — the
