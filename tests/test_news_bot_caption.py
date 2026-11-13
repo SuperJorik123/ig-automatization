@@ -369,6 +369,12 @@ class _Chat:
         self.sent.append((text, kw))
         return type("M", (), {"chat": self, "message_id": len(self.sent)})()
 
+    def get_bot(self):
+        return self
+
+    async def edit_message_caption(self, chat_id, message_id, caption):
+        self.edited = getattr(self, "edited", []) + [(message_id, caption)]
+
 
 def _render(name, group="JNN", ig=""):
     p = _pair(name)
@@ -381,7 +387,7 @@ def test_hand_posted_brands_get_their_caption_as_a_reply(calls):
     chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
     renders = [_render("eur24news"), _render("wswire", ig="wswire"),
                _render("mirnews", group="GMN")]
-    asyncio.run(news_bot._send_manual_captions(chat, state, renders))
+    asyncio.run(news_bot._send_captions(chat, state, renders))
     assert len(chat.sent) == 1
     text, kw = chat.sent[0]
     assert "eur24news" in text and "<pre>" in text
@@ -393,7 +399,7 @@ def test_the_publish_reuses_the_render_time_search(calls):
     """One expansion per post: the hand-posted captions at render time and
     the IG publish afterwards share the cached one."""
     chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
-    asyncio.run(news_bot._send_manual_captions(chat, state, [_render("eur24news")]))
+    asyncio.run(news_bot._send_captions(chat, state, [_render("eur24news")]))
     _run("Man walks past a bear", [_pair("wswire")], FOOTAGE,
          cache=state["caption_cache"])
     assert len(calls["expand"]) == 1
@@ -416,7 +422,7 @@ def test_a_cached_expansion_is_reused_with_the_same_sources(calls):
 def test_hand_posted_brands_get_a_comment_to_pin(calls):
     """Written from that account's own caption, sent in the same message."""
     chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
-    asyncio.run(news_bot._send_manual_captions(
+    asyncio.run(news_bot._send_captions(
         chat, state, [_render("eur24news"), _render("pioneerwire")]))
     assert len(chat.sent) == 2
     for text, _ in chat.sent:
@@ -428,7 +434,7 @@ def test_the_comment_to_pin_gets_the_source_post(calls):
     chat = _Chat()
     state = {"text": "Man walks past a bear", "footage": FOOTAGE,
              "source": SOURCE}
-    asyncio.run(news_bot._send_manual_captions(chat, state,
+    asyncio.run(news_bot._send_captions(chat, state,
                                                [_render("eur24news")]))
     assert calls["comment"][0][1] == SOURCE
 
@@ -436,5 +442,49 @@ def test_the_comment_to_pin_gets_the_source_post(calls):
 def test_no_comment_block_when_the_comment_fails(monkeypatch, calls):
     monkeypatch.setattr(news_bot.ig_caption, "pinned_comment", lambda t, source=None, model=None: "")
     chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
-    asyncio.run(news_bot._send_manual_captions(chat, state, [_render("eur24news")]))
+    asyncio.run(news_bot._send_captions(chat, state, [_render("eur24news")]))
     assert "📌" not in chat.sent[0][0] and "<pre>" in chat.sent[0][0]
+
+
+# --------------------------------------------------------------------------- #
+# every preview carries the caption its account will publish                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_every_preview_gets_its_brand_and_caption(calls):
+    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
+    renders = [_render("wswire", ig="wswire"), _render("mirnews", group="GMN")]
+    asyncio.run(news_bot._send_captions(chat, state, renders))
+    assert chat.sent == []   # no hand-posted brand, so no extra message
+    assert [mid for mid, _ in chat.edited] == [77, 77]
+    for (_, cap), name in zip(chat.edited, ("wswire", "mirnews")):
+        assert cap.startswith(f"{name}\n\n") and "<pre>" not in cap
+        assert f"#{name}" in cap
+
+
+def test_the_publish_ships_the_captions_the_previews_show(calls):
+    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
+    asyncio.run(news_bot._send_captions(chat, state, [_render("wswire", ig="wswire")]))
+    assert news_bot._fresh_captions(state) == state["captions"] != {}
+    state["info"] = "Source: WLOS."     # an info: reply makes them stale
+    assert news_bot._fresh_captions(state) == {}
+
+
+def test_captions_without_a_key_are_trusted():
+    assert news_bot._fresh_captions({"text": "h", "captions": {"a": "x"}}) == {"a": "x"}
+
+
+def test_a_caption_too_long_for_telegram_goes_as_a_reply():
+    chat = _Chat()
+    r = _render("wswire", ig="wswire")
+    asyncio.run(news_bot._caption_previews(chat, [r], {"wswire": "x" * 1100}))
+    assert not getattr(chat, "edited", [])
+    text, kw = chat.sent[0]
+    assert text.startswith("wswire\n\n") and kw["reply_to_message_id"] == 77
+
+
+def test_a_bundle_preview_keeps_its_video_label():
+    chat = _Chat()
+    asyncio.run(news_bot._caption_previews(
+        chat, [_render("wswire", ig="wswire")], {"wswire": "cap"}, "video 2"))
+    assert chat.edited == [(77, "wswire · video 2\n\ncap")]

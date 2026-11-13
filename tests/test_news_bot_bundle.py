@@ -235,6 +235,11 @@ def test_remove_this_one(env):
 # --------------------------------------------------------------------------- #
 
 
+def _summary_msg(env):
+    """The bundle summary — the caption replies to the previews come before it."""
+    return [m for m in env.chat.sent if m.text.startswith("📦")][-1]
+
+
 def _render(env, b, lines):
     state = news_bot._pending[lines[0].message_id]
     q = _Q(lines[0], "b:bgo")
@@ -259,7 +264,7 @@ def test_render_assigns_every_account_and_posts_one_summary(env):
     assert set(plan["assignment"]) == set(NAMES)
     assert sorted(bundle.copies(plan["assignment"]).values()) == [3, 3, 4]
     assert len(plan["slots"]) == 10
-    summary = env.chat.sent[-1]
+    summary = _summary_msg(env)
     assert summary.text.startswith(f"📦 Bundle #{b['id']} ready: 3 videos → "
                                    "10 accounts")
     data = [x.callback_data for r in summary.edits[-1][1].inline_keyboard
@@ -316,7 +321,7 @@ def test_history_keeps_a_video_off_an_account_that_posted_it(env):
 def test_publish_schedules_one_post_per_account_spread_out(env):
     b, lines = _start(env, 3)
     _render(env, b, lines)
-    summary = env.chat.sent[-1]
+    summary = _summary_msg(env)
     asyncio.run(news_bot._publish_bundle(env.ctx, b["id"], summary))
     rows = env.store.scheduled_for_bundle(b["id"], "pending")
     assert len(rows) == 10 and len(env.jq.jobs) == 10
@@ -339,7 +344,7 @@ def test_publish_is_three_taps_in_total(env):
     pick are tapless."""
     b, lines = _start(env, 3)          # tap 1 (+ two tapless joins)
     _render(env, b, lines)             # tap 2
-    summary = env.chat.sent[-1]
+    summary = _summary_msg(env)
     q = _Q(summary, f"u:pub:{b['id']}")
     asyncio.run(news_bot._on_bundle_callback(q, env.ctx))     # tap 3
     assert len(env.store.scheduled_for_bundle(b["id"], "pending")) == 10

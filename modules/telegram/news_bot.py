@@ -854,6 +854,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             _arm_auto_publish(msg.get_bot(), state, reply)
             if field != "info":
                 return
+            # New facts → new captions, rewritten onto the previews.
+            _start_captions(reply.chat, state, state.get("renders") or [])
             body = _publish_prompt_text(state)
             markup = branded.platform_keyboard(state["platforms"],
                                                state["sel_platforms"])
@@ -1771,7 +1773,7 @@ async def _do_render(q, context, state: dict) -> None:
             "❌ all renders failed:\n"
             + "\n".join(f"{n}: {e}" for n, e in failures))
         return
-    _start_manual_captions(q.message.chat, state, renders)
+    _start_captions(q.message.chat, state, renders)
 
     state["mode"] = "publish"
     state["renders"] = renders
@@ -1908,7 +1910,7 @@ async def _do_render_card(q, context, state: dict) -> None:
             "❌ all cards failed:\n"
             + "\n".join(f"{n}: {e}" for n, e in failures))
         return
-    _start_manual_captions(q.message.chat, state, renders)
+    _start_captions(q.message.chat, state, renders)
 
     state["mode"] = "publish"
     state["renders"] = renders
@@ -1956,27 +1958,94 @@ def _manual_ig(brand: dict) -> bool:
     """A brand whose Instagram is posted BY HAND: outside GMN and with no IG
     account connected (no `instagram` block in its credentials file). Its
     render preview is followed by the caption it would have published, ready
-    to copy (`_send_manual_captions`)."""
+    to copy (`_send_captions`)."""
     return (brand.get("group") or "").upper() != "GMN" and not brand.get("ig")
 
 
-async def _send_manual_captions(chat, state: dict, renders: list) -> None:
-    """The finished Instagram caption for every hand-posted brand in
-    `renders`, one message each, as a reply to that brand's preview.
+# Telegram's limit on a media caption. A longer IG caption goes in a reply.
+_TG_CAPTION_MAX = 1024
 
-    Runs as a task after the render (it waits on the caption's web search);
-    the expansion lands in `state["caption_cache"]`, so a publish to IG/YT
-    later on the same post reuses it instead of paying for a second search.
+
+def _captions_key(state: dict) -> tuple:
+    """What a post's captions were written from — the same key as
+    `_ig_captions`' expansion cache. Captions written under another key are
+    stale (an `info:` reply landed since) and are never published."""
+    return (state.get("text", ""), state.get("info", "") or "",
+            ((state.get("source") or {}).get("text") or ""))
+
+
+def _fresh_captions(state: dict) -> dict:
+    """`state["captions"]` if they still match the post, else {}. Captions
+    without a key (a bundle's, or a scheduled post's payload) are trusted."""
+    caps = state.get("captions") or {}
+    key = state.get("captions_key")
+    return caps if key is None or key == tuple(_captions_key(state)) else {}
+
+
+async def _caption_previews(chat, renders: list, texts: dict,
+                            label: str = "") -> None:
+    """Put each brand's Instagram caption on its preview: the preview's
+    caption becomes `<brand>\\n\\n<caption>`, plain text, so the operator
+    reads what each account will publish. Past Telegram's 1024-char caption
+    limit, or for a preview the bot can't edit (an MTProto upload has no
+    preview_id), the same text goes as a reply instead. Never raises."""
+    try:
+        bot = chat.get_bot()
+    except Exception:
+        bot = None
+    for r in renders:
+        name = r["brand"]["name"]
+        text = texts.get(name)
+        if not text:
+            continue
+        body = f"{name}{f' · {label}' if label else ''}\n\n{text}"
+        pid = r.get("preview_id")
+        try:
+            if bot is not None and pid and len(body) <= _TG_CAPTION_MAX:
+                await bot.edit_message_caption(chat_id=chat.id, message_id=pid,
+                                               caption=body)
+                continue
+        except Exception as exc:
+            if "not modified" in str(exc).lower():
+                continue
+            log.warning("caption on %s's preview failed (%s) — sending it as "
+                        "a reply", name, exc)
+        try:
+            _track(await chat.send_message(
+                body, reply_to_message_id=pid,
+                allow_sending_without_reply=True))
+        except Exception:
+            log.exception("caption message for %s failed", name)
+
+
+async def _send_captions(chat, state: dict, renders: list) -> None:
+    """Every rendered brand's finished Instagram caption, written onto its
+    preview (`_caption_previews`), then — for the hand-posted brands only —
+    the copy-ready block with the comment to pin.
+
+    Runs as a task after the render. The captions are kept in
+    `state["captions"]` with the key they were written from, and the publish
+    uses exactly these (`_fresh_captions`): what the operator read under the
+    preview is what goes out. An `info:` reply afterwards re-runs this.
     Never raises — a missing caption must not touch the renders."""
-    manual = [r for r in renders if _manual_ig(r["brand"])]
-    if not manual:
+    if not renders:
         return
     try:
+        key = _captions_key(state)
         caps = await _ig_captions(
-            state.get("text", ""), [{"platform": "ig", "render": r} for r in manual],
+            state.get("text", ""), [{"platform": "ig", "render": r} for r in renders],
             state.get("footage") or {}, state.get("info", ""),
             cache=state.setdefault("caption_cache", {}),
             source=state.get("source"))
+        if caps:
+            state["captions"], state["captions_key"] = caps, key
+        await _caption_previews(chat, renders, {
+            r["brand"]["name"]: caps.get(r["brand"]["name"]) or
+            ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
+            for r in renders})
+        manual = [r for r in renders if _manual_ig(r["brand"])]
+        if not manual:
+            return
         texts = {r["brand"]["name"]: caps.get(r["brand"]["name"]) or
                  ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
                  for r in manual}
@@ -2001,14 +2070,17 @@ async def _send_manual_captions(chat, state: dict, renders: list) -> None:
                 reply_to_message_id=r.get("preview_id"),
                 allow_sending_without_reply=True))
     except Exception:
-        log.exception("manual instagram captions failed")
+        log.exception("instagram captions for the previews failed")
 
 
-def _start_manual_captions(chat, state: dict, renders: list) -> None:
-    """Fire `_send_manual_captions` without holding up the picker."""
-    if any(_manual_ig(r["brand"]) for r in renders):
-        state["manual_task"] = asyncio.create_task(
-            _send_manual_captions(chat, state, renders))
+def _start_captions(chat, state: dict, renders: list) -> None:
+    """Fire `_send_captions` without holding up the picker; a run still in
+    flight (an earlier `info:`) is cancelled first."""
+    old = state.get("manual_task")
+    if old is not None and not old.done():
+        old.cancel()
+    state["manual_task"] = asyncio.create_task(
+        _send_captions(chat, state, renders))
 
 
 # Platforms whose post carries the expanded caption rather than the bare
@@ -2132,19 +2204,17 @@ async def _publish_pairs(message, bot, state: dict) -> None:
     await message.edit_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
 
-    # The hand-posted brands' captions may still be searching: let them land
-    # in the cache first, so this publish reuses that search, not a second one.
+    # The preview captions may still be being written: let them land first,
+    # so this publish ships exactly what the previews show. asyncio.wait, not
+    # wait_for: a run cancelled by a newer info: must not raise in here.
     manual = state.get("manual_task")
     if manual is not None and not manual.done():
-        try:
-            await asyncio.wait_for(asyncio.shield(manual), _VISION_WAIT_S)
-        except Exception:
-            pass
+        await asyncio.wait({manual}, timeout=_VISION_WAIT_S)
 
-    # Before the loop: one footage-backed expansion shared by every IG and YT
-    # pair, informed by the operator's info: reply when there is one. A
+    # Before the loop: the captions the previews show when they are still
+    # current; otherwise one fresh expansion shared by every IG/FB/YT pair. A
     # bundle post carries its captions already — written at render time.
-    ig_caps = state.get("captions") or await _ig_captions(
+    ig_caps = _fresh_captions(state) or await _ig_captions(
         state.get("text", ""), pairs, state.get("footage") or {},
         state.get("info", ""), cache=state.setdefault("caption_cache", {}),
         source=state.get("source"))
@@ -2475,6 +2545,10 @@ async def _render_pairs(bot, chat, bid: int, states: dict, assignment: dict,
             state["text"], pairs, state.get("footage") or {},
             state.get("info", ""), cache=state.setdefault("caption_cache", {}),
             source=state.get("source"))
+        await _caption_previews(chat, renders, {
+            r["brand"]["name"]: caps.get(r["brand"]["name"]) or
+            ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
+            for r in renders}, f"video {n}")
         os.makedirs(folder, exist_ok=True)
         for r in renders:
             new = os.path.join(folder, os.path.basename(r["path"]))
@@ -2952,6 +3026,9 @@ async def _schedule_post(context, state: dict, message, when: dt.datetime,
     state["files"] = [p for p in state["files"] if p not in renders]
     _cleanup(state)
 
+    # Captions an info: reply has made stale are not carried: the fire
+    # writes fresh ones instead.
+    state["captions"] = _fresh_captions(state)
     sched_id = queue_store.add_scheduled(when, CHAT_ID, message.message_id,
                                          schedule.to_payload(state))
     _arm_scheduled(context.job_queue, sched_id, when)
