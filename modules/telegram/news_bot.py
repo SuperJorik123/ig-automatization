@@ -2164,6 +2164,7 @@ async def _send_captions(chat, state: dict, renders: list) -> None:
             r["brand"]["name"]: caps.get(r["brand"]["name"]) or
             ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
             for r in renders})
+        await _send_caption_prompt(chat, state)
         manual = [r for r in renders if _manual_ig(r["brand"])]
         if not manual:
             return
@@ -2192,6 +2193,52 @@ async def _send_captions(chat, state: dict, renders: list) -> None:
                 allow_sending_without_reply=True))
     except Exception:
         log.exception("instagram captions for the previews failed")
+
+
+def _split_message(text: str, limit: int = 4000) -> list:
+    """`text` in pieces under Telegram's 4096-char message limit, cut at a
+    paragraph break, else a line break, else hard."""
+    parts = []
+    while len(text) > limit:
+        cut = text.rfind("\n\n", 0, limit)
+        if cut <= 0:
+            cut = text.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        parts.append(text[:cut].rstrip())
+        text = text[cut:].lstrip("\n")
+    if text.strip():
+        parts.append(text)
+    return parts
+
+
+async def _send_caption_prompt(chat, state: dict, label: str = "") -> None:
+    """The exact prompt the post's MAIN caption was written from — model,
+    system prompt, the user message (the post's facts) and the caption it
+    answered with — as plain-text messages, for the operator to review.
+    Every account's caption is a rewrite of that answer. Only when the
+    cached main caption matches the post as it stands; off with
+    SHOW_CAPTION_PROMPT=0. Never raises."""
+    if not config.SHOW_CAPTION_PROMPT:
+        return
+    try:
+        cache = state.get("caption_cache") or {}
+        if not cache.get("base") or cache.get("key") != _captions_key(state):
+            return
+        model = ig_caption.searchless(config.IG_CAPTION_MODEL)
+        user = ig_caption.user_message(
+            state.get("text", ""), state.get("info", ""),
+            state.get("footage") or {}, state.get("source"))
+        text = (f"🧠 Main caption prompt{f' · {label}' if label else ''} "
+                f"(model: {model})\n\n"
+                f"━━ SYSTEM ━━\n{ig_caption._SYSTEM}\n\n"
+                f"━━ USER ━━\n{user}\n\n"
+                f"━━ MAIN CAPTION (each account rewrites this) ━━\n"
+                f"{cache['base']}")
+        for part in _split_message(text):
+            _track(await chat.send_message(part))
+    except Exception:
+        log.exception("sending the caption prompt failed")
 
 
 def _start_captions(chat, state: dict, renders: list) -> None:
@@ -2670,6 +2717,7 @@ async def _render_pairs(bot, chat, bid: int, states: dict, assignment: dict,
             r["brand"]["name"]: caps.get(r["brand"]["name"]) or
             ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
             for r in renders}, f"video {n}")
+        await _send_caption_prompt(chat, state, f"video {n}")
         os.makedirs(folder, exist_ok=True)
         for r in renders:
             new = os.path.join(folder, os.path.basename(r["path"]))

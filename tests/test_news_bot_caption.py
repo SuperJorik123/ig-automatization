@@ -68,6 +68,13 @@ def _pair(name="mir", lang="en", headline="Man walks past a bear"):
                        "headline": headline}}
 
 
+@pytest.fixture(autouse=True)
+def _no_prompt_message(monkeypatch):
+    """The review copy of the caption prompt is its own messages; the tests
+    that count messages leave it out, the ones about it switch it back on."""
+    monkeypatch.setattr(config, "SHOW_CAPTION_PROMPT", False)
+
+
 @pytest.fixture
 def calls(monkeypatch):
     """Record every billed call the caption layer would make."""
@@ -488,3 +495,40 @@ def test_a_bundle_preview_keeps_its_video_label():
     asyncio.run(news_bot._caption_previews(
         chat, [_render("wswire", ig="wswire")], {"wswire": "cap"}, "video 2"))
     assert chat.edited == [(77, "wswire · video 2\n\ncap")]
+
+
+# --------------------------------------------------------------------------- #
+# the main caption's prompt is posted for review                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_main_prompt_follows_the_previews(monkeypatch, calls):
+    monkeypatch.setattr(config, "SHOW_CAPTION_PROMPT", True)
+    chat = _Chat()
+    state = {"text": "Man walks past a bear", "footage": FOOTAGE,
+             "info": "Source: WLOS."}
+    asyncio.run(news_bot._send_captions(chat, state, [_render("wswire", ig="wswire")]))
+    whole = "\n".join(t for t, _ in chat.sent)
+    assert chat.sent[0][0].startswith("🧠 Main caption prompt (model: ")
+    assert news_bot.ig_caption._SYSTEM[:200] in whole
+    assert "OPERATOR'S INFO: Source: WLOS." in whole
+    assert "HEADLINE: Man walks past a bear" in whole
+    assert EXPANDED.strip().splitlines()[0] in whole   # the answer
+    assert all(len(t) <= 4096 and "parse_mode" not in kw for t, kw in chat.sent)
+
+
+def test_no_prompt_when_the_main_caption_is_stale(monkeypatch, calls):
+    monkeypatch.setattr(config, "SHOW_CAPTION_PROMPT", True)
+    chat = _Chat()
+    state = {"text": "h", "caption_cache": {"key": ("h", "", ""), "base": "x"},
+             "info": "newer info"}
+    asyncio.run(news_bot._send_caption_prompt(chat, state))
+    assert chat.sent == []
+
+
+def test_split_message_keeps_every_character_under_the_limit():
+    text = ("para " * 300 + "\n\n") * 6
+    parts = news_bot._split_message(text, 1000)
+    assert all(len(p) <= 1000 for p in parts)
+    assert "".join(parts).replace("\n", "").replace(" ", "") == \
+        text.replace("\n", "").replace(" ", "")
