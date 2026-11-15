@@ -708,16 +708,19 @@ def test_old_narration_never_reaches_the_prompt(on, monkeypatch):
     assert "fell" not in _user_of(fake)
 
 
-def test_the_prompt_is_the_operators_spec(on, monkeypatch):
+def test_the_prompt_keeps_what_the_code_relies_on(on, monkeypatch):
+    """The prompt is the operator's to edit (prompts/caption_system.txt);
+    only the parts the code parses are pinned: the four-part shape and the
+    eight hashtag candidates on the last line (split_tags / choose_hashtags),
+    and the generalising rule the owner of the accounts asked to keep."""
     fake = _client(monkeypatch, content=BASE)
     caption.expand("h")
     system = _system_of(fake)
-    for must in ("SOURCES, IN ORDER OF TRUST", "LINE 1, THE HOOK. At most 90",
-                 "CONTEXT. One or two short sentences", "QUESTION.",
-                 "Eight candidates", "NO CALLS TO ACTION",
-                 "clothing colour", "\"the video shows\""):
+    assert system == caption._SYSTEM
+    for must in ("HOOK", "CONTEXT", "QUESTION", "HASHTAG CANDIDATES",
+                 "Eight candidates", "Never generalise",
+                 "attack or mock a whole nationality, religion or ethnic group"):
         assert must in system
-    assert "share line" not in system.lower()
 
 
 def test_the_expansion_keeps_eight_candidates(on, monkeypatch):

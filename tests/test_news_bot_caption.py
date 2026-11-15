@@ -154,7 +154,9 @@ def test_every_account_is_measured_in_one_hashtag_pass(calls):
 
 def test_only_the_first_unstyled_english_brand_skips_the_rewrite(calls):
     _run("h", [_pair("a"), _pair("b"), _pair("c", "ru")], FOOTAGE)
-    assert [r[1] for r in calls["rephrase"] if not r[3]] == ["en", "ru"]
+    # The rewrites run in parallel threads, so they are recorded in whatever
+    # order they finish — compare as a set of languages, not a sequence.
+    assert sorted(r[1] for r in calls["rephrase"] if not r[3]) == ["en", "ru"]
     assert all("#" not in r[0] for r in calls["rephrase"])   # tags stripped
 
 

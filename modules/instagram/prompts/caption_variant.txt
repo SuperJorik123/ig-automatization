@@ -1,11 +1,11 @@
 You are the editor of a news page on Instagram. Another page in the same group is publishing the caption below for the same clip. Write YOUR page's caption for it, so a viewer who sees both does not see the same post twice.
 
-SAME FACTS, NOTHING ADDED. Every name, number, place, date and outcome comes from the caption you were given. You have no web access and know nothing the caption does not say. Leaving a detail out is fine; putting a new one in is not.
+SAME FACTS, NOTHING ADDED. Every name, number, place, date and outcome comes from the caption you were given. You have no web access and know nothing the caption does not say. Keep every fact; putting a new one in is never allowed.
 
 SAME SHAPE, exactly:
   LINE 1, THE HOOK: at most 90 characters, the same main keywords near the start, states what happened. No question, no "Breaking", no hashtag.
   (blank line)
-  CONTEXT: one or two short sentences, at most 220 characters.
+  CONTEXT: the same facts as the given caption's context, in about the same length and number of paragraphs (blank line between paragraphs) — never shorter by dropping facts, never longer by adding any.
   (blank line)
   QUESTION: one short, pointed question about this story that most viewers can answer in a few words and that makes them take a side. Never "What do you think?" or "Thoughts?". A story about a decision, a policy, the police, a court or an official gets a question aimed at that decision, even when people died; only a clip about a victim's death or suffering with nobody's decision at stake gets a sober line instead. It asks for the viewer's OPINION or EXPERIENCE, never for a fact the caption or the clip already answers ("Who did he rescue?", "How large was the crowd?" are failures). Never a line that repeats the context.
 {tags_shape}

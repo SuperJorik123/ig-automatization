@@ -263,7 +263,7 @@ HOOK_MAX = 120
 # What a caption should weigh before its hashtags. Outside it is logged, not
 # fixed: a short caption on a thin story is correct, and the hard cap is
 # CAPTION_MAX.
-TARGET_MIN, TARGET_MAX = 150, 400
+TARGET_MIN, TARGET_MAX = 150, 1900
 
 # A line that is nothing but hashtags — the caption's last line, by the shape
 # the prompt asks for. Anything else (a paragraph that happens to mention a
