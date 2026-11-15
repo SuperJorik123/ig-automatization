@@ -410,6 +410,24 @@ def wrap_headline(text: str, width: int = LINE_WIDTH,
     return "\n".join(lines)
 
 
+# The banner's row limit (2026-11-15, operator's rule): a headline that wraps
+# onto more rows than this is refused before the render, not drawn smaller.
+HEADLINE_MAX_ROWS = int(os.environ.get("HEADLINE_MAX_ROWS") or 3)
+
+
+def headline_rows(headline: str, logo_path: str, style: dict | None = None) -> int:
+    """How many banner rows `headline` takes for the brand whose logo is at
+    `logo_path` — the exact wrap the render does (`_prepare_job`): that
+    brand's font and size, measured in pixels. Raises like load_style on a
+    broken brand."""
+    if style is None:
+        style = load_style(os.path.dirname(os.path.abspath(logo_path)))
+    font_path = style["font"]
+    rows = wrap_to_px(strip_unrenderable(headline, font_path),
+                      font_path, style["font_size"])
+    return len(rows.split("\n")) if rows else 0
+
+
 def _ff_path(path: str) -> str:
     """Path for use inside a filter option: ffmpeg's filter parser treats ':'
     as an option separator and '\\' as an escape, so Windows paths must use
@@ -545,6 +563,52 @@ def run_encode(build, source: str, outputs: int = 1,
             log.warning("render of %s hung — retrying with %s", source,
                         " ".join(SAFE_AUDIO_ARGS))
     return ffrun.run(build(_encode_args(True)), limit), True
+
+
+# The PREVIEW copy (2026-11-15): what the news bot sends back into the group
+# for review — never what is published. A full render is ~60 MB a minute at
+# CRF 18, past the Bot API's 50 MB upload cap, so every preview went through
+# the MTProto account at ~50 s each (9+ minutes for eleven brands). This copy
+# is the same 1080x1920 picture at a capped bitrate: well under the cap, a few
+# seconds to upload, and a Bot API message whose caption can be edited.
+# Measured on a 72 s 1080x1920 CRF 18 render, 2 threads (2026-11-15):
+# veryfast 66 s / 12.5 MB, ultrafast 25 s / 23.7 MB, ultrafast at 720p 24 s —
+# decoding the heavy render is most of the time, so neither a slower preset
+# nor a smaller picture pays. The copy is encoded while the previous one
+# uploads (news_bot._send_previews).
+PREVIEW_PRESET = os.environ.get("BRAND_PREVIEW_PRESET") or "ultrafast"
+PREVIEW_CRF = int(os.environ.get("BRAND_PREVIEW_CRF") or 26)
+PREVIEW_MAX_BPS = int(os.environ.get("BRAND_PREVIEW_MAX_BPS") or 2_500_000)
+# The copy's whole-file budget: under the 50 MB Bot API cap with room to
+# spare, which caps the bitrate of a long clip below PREVIEW_MAX_BPS.
+PREVIEW_MAX_BYTES = 40 * 1024 * 1024
+PREVIEW_AUDIO_BPS = 96_000
+
+
+def preview_copy(src: str, out: str, duration: float | None = None) -> str:
+    """A light copy of the rendered `src` for the Telegram preview, at `out`.
+    Same canvas, x264 at PREVIEW_CRF with the bitrate capped so the file stays
+    under PREVIEW_MAX_BYTES. Takes the machine-wide render slot like every
+    other encode, runs under ffrun's time limit, raises on failure (the
+    caller then sends the full file). Blocking."""
+    duration = duration or ffrun.duration_of(src) or 0
+    cap = PREVIEW_MAX_BPS
+    if duration > 0:
+        cap = min(cap, int(PREVIEW_MAX_BYTES * 8 / duration) - PREVIEW_AUDIO_BPS)
+    cap = max(cap, 300_000)
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", src,
+           "-map", "0:v:0", "-map", "0:a?",
+           "-c:v", "libx264", "-preset", PREVIEW_PRESET,
+           "-crf", str(PREVIEW_CRF),
+           "-maxrate", str(cap), "-bufsize", str(cap * 2),
+           "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", str(PREVIEW_AUDIO_BPS),
+           "-movflags", "+faststart", out]
+    with renderlock.render_slot():
+        proc = ffrun.run(cmd, ffrun.limit_s(duration or None, 1))
+    if proc.returncode != 0 or not os.path.exists(out):
+        raise RuntimeError(f"preview copy failed: {(proc.stderr or '')[-300:]}")
+    return out
 
 
 def _prepare_job(headline: str, logo_path: str, out_path: str,

@@ -1729,6 +1729,41 @@ class _EditError(_RenderSetupError):
     isn't lost); a bundle reports it like any other unreadable video."""
 
 
+class _HeadlineTooLong(_RenderSetupError):
+    """The headline wraps onto more than branding.HEADLINE_MAX_ROWS banner
+    rows for at least one brand. Checked before ffmpeg starts; a single post
+    goes back to its plan card asking for a shorter headline, a bundle lists
+    the video as failed."""
+
+    def __init__(self, over: list):
+        self.over = over   # [(brand name, rows)]
+        by_rows: dict[int, list] = {}
+        for name, rows in over:
+            by_rows.setdefault(rows, []).append(name)
+        where = "; ".join(f"{rows} rows on {', '.join(names)}"
+                          for rows, names in sorted(by_rows.items(),
+                                                    reverse=True))
+        super().__init__(
+            f"headline too long — {where} (max {branding.HEADLINE_MAX_ROWS}). "
+            "Reply with something shorter.")
+
+
+def _check_headline_rows(jobs: list) -> None:
+    """Raise _HeadlineTooLong when any job's headline (already translated for
+    its brand) wraps onto more than HEADLINE_MAX_ROWS rows. A brand whose
+    style can't be read is skipped here — the render reports it properly."""
+    over = []
+    for j in jobs:
+        try:
+            rows = branding.headline_rows(j["headline"], j["logo_path"])
+        except Exception:
+            continue
+        if rows > branding.HEADLINE_MAX_ROWS:
+            over.append((j["brand"]["name"], rows))
+    if over:
+        raise _HeadlineTooLong(over)
+
+
 async def _render_video(bot, chat, state: dict, brands: list, tag: str,
                         label: str = "") -> tuple[list, list, list, float]:
     """Render `state`'s video once per brand in `brands` (headline translated
@@ -1780,6 +1815,21 @@ async def _render_video(bot, chat, state: dict, brands: list, tag: str,
                 log.error("brand render failed for %s: %s", b["name"], exc)
                 failures.append((b["name"], str(exc)[:200]))
 
+        # The banner holds at most HEADLINE_MAX_ROWS rows: a longer headline
+        # (in any brand's language and font) stops here, before any ffmpeg.
+        _check_headline_rows(jobs)
+
+        # The Instagram captions need only the headline, the info, the source
+        # post and the brands — not the video — so they are written WHILE
+        # ffmpeg renders, and each preview goes out with its caption on it.
+        # The publish waits on the same task (`caption_task`).
+        cap_task = None
+        if jobs and not config.LITE:
+            cap_task = asyncio.create_task(_write_captions(
+                state, [{"brand": j["brand"], "headline": j["headline"]}
+                        for j in jobs]))
+            state["caption_task"] = cap_task
+
         # One ffmpeg pass for every brand. All-or-nothing by design, so a failure
         # (one bad logo, one broken style.json) retries brand-by-brand — the slow
         # path, but the one where the healthy brands still come out.
@@ -1795,7 +1845,10 @@ async def _render_video(bot, chat, state: dict, brands: list, tag: str,
                                     "headline": j["headline"]})
             except ffrun.Timeout as exc:
                 # A hang isn't one brand's fault: going brand-by-brand would sit
-                # out the limit once per brand.
+                # out the limit once per brand. The post goes back to its plan
+                # card, so the captions written for it are dropped too.
+                if cap_task is not None:
+                    cap_task.cancel()
                 raise _RenderHung(str(exc)) from exc
             except Exception as exc:
                 log.warning("combined brand render failed (%s) — retrying "
@@ -1818,39 +1871,145 @@ async def _render_video(bot, chat, state: dict, brands: list, tag: str,
     # preview send below works — a failed send must not knock it out of
     # `renders` (that would make the summary and the publish picker
     # disagree about what's available).
-    for r in renders:
-        b, path = r["brand"], r["path"]
-        name = b["name"] + (f" · {label}" if label else "")
-        try:
-            size = os.path.getsize(path)
-            if size > _BOT_UPLOAD_LIMIT and await mtproto.ensure_ready():
-                # Past the Bot API's 50 MB upload cap the preview comes from
-                # your own account instead — the clip still lands in the group.
-                # Not _track()ed: it's a Telethon message, and the weekly wipe
-                # deletes through the BOT, which can't remove your own posts.
-                # The caption must keep _PREVIEW_MARK: on_message recognises
-                # this message by it while send_video is still returning.
-                await mtproto.send_video(chat.id, path, _PREVIEW_MARK + name,
-                                         branding.OUT_W, branding.OUT_H,
-                                         int(duration))
-            elif size > _BOT_UPLOAD_LIMIT:
-                _track(await chat.send_message(
-                    f"🏷 {name}: rendered ({mtproto.human_size(size)} — "
-                    f"too big to send back, {mtproto.unavailable_reason()}; "
-                    "publishing still works)"))
-            else:
-                with open(path, "rb") as fh:
-                    # width/height matter: without them Telegram sizes the
-                    # inline player from defaults and plays the clip squashed.
-                    sent = _track(await chat.send_video(
-                        video=fh, caption=f"🏷 {name}",
-                        width=branding.OUT_W, height=branding.OUT_H,
-                        duration=int(duration)))
-                    r["preview_id"] = sent.message_id
-        except Exception as exc:  # Telegram send only — the render already succeeded
-            log.error("brand preview send failed for %s: %s", b["name"], exc)
-            warnings.append((b["name"], str(exc)[:200]))
+    texts = await _caption_texts(cap_task)
+    await _send_previews(chat, state, renders, duration, label, texts,
+                         warnings)
+    if cap_task is not None:
+        if cap_task.done():
+            await _send_caption_prompt(chat, state, label)
+        else:
+            # Still writing past _CAPTION_WAIT_S: the captions follow onto the
+            # previews when they land; the publish waits on this task.
+            state["caption_task"] = asyncio.create_task(
+                _late_captions(chat, state, renders, cap_task, label))
     return renders, failures, warnings, duration
+
+
+async def _late_captions(chat, state: dict, renders: list, cap_task,
+                         label: str) -> None:
+    """Captions that missed the previews: put on them once written
+    (`_caption_previews`), then the prompt for review. Never raises."""
+    try:
+        texts = await cap_task
+        await _caption_previews(chat, renders, texts, label)
+        await _send_caption_prompt(chat, state, label)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("late instagram captions failed")
+
+
+# How long the previews wait for captions still being written. They normally
+# finish during the render; past this the previews go out with the brand name
+# only and the captions follow as replies when they land (`_send_captions`).
+_CAPTION_WAIT_S = 180
+
+
+async def _caption_texts(cap_task) -> dict:
+    """The captions `_write_captions` produced, {brand name: text}, waiting up
+    to _CAPTION_WAIT_S for them. {} when there is no task, it failed, or it is
+    still running — then the previews go out without captions."""
+    if cap_task is None:
+        return {}
+    await asyncio.wait({cap_task}, timeout=_CAPTION_WAIT_S)
+    if not cap_task.done():
+        log.warning("captions not ready after %d s — previews go out without "
+                    "them", _CAPTION_WAIT_S)
+        return {}
+    if cap_task.cancelled() or cap_task.exception() is not None:
+        return {}
+    return cap_task.result()
+
+
+async def _light_preview(state: dict, r: dict, duration: float) -> str:
+    """The file to send as `r`'s preview: a light copy (branding.preview_copy)
+    under the Bot API's 50 MB cap, or the render itself — in lite mode (the
+    clip IS the product there) or when the copy fails. Never raises."""
+    if config.LITE:
+        return r["path"]
+    out = os.path.splitext(r["path"])[0] + "_preview.mp4"
+    try:
+        await asyncio.to_thread(branding.preview_copy, r["path"], out, duration)
+    except Exception as exc:
+        log.warning("preview copy for %s failed (%s) — sending the full render",
+                    r["brand"]["name"], str(exc)[:200])
+        return r["path"]
+    state["files"].append(out)
+    return out
+
+
+async def _send_previews(chat, state: dict, renders: list, duration: float,
+                         label: str, texts: dict, warnings: list) -> None:
+    """Send every render back into the group as ONE message: the preview with
+    `<brand>\\n\\n<its Instagram caption>` on it (`texts`). The next preview
+    copy is encoded while the current one uploads. A failed send is a
+    warning, never a lost render."""
+    if not renders:
+        return
+    nxt = asyncio.create_task(_light_preview(state, renders[0], duration))
+    try:
+        for i, r in enumerate(renders):
+            path = await nxt
+            nxt = (asyncio.create_task(
+                       _light_preview(state, renders[i + 1], duration))
+                   if i + 1 < len(renders) else None)
+            await _send_preview(chat, r, path, duration, label,
+                                texts.get(r["brand"]["name"]), warnings)
+    finally:
+        if nxt is not None and not nxt.done():
+            nxt.cancel()
+
+
+async def _send_preview(chat, r: dict, path: str, duration: float, label: str,
+                        caption: str | None, warnings: list) -> None:
+    b = r["brand"]
+    name = b["name"] + (f" · {label}" if label else "")
+    body = f"{name}\n\n{caption}" if caption else f"🏷 {name}"
+    # The caption on the video, or — past Telegram's 1024 chars — the brand
+    # name there and the full text in a reply under it.
+    fits = len(_PREVIEW_MARK + body) <= _TG_CAPTION_MAX
+    head = body if fits else f"🏷 {name}"
+    reply_to = None
+    try:
+        size = os.path.getsize(path)
+        if size > _BOT_UPLOAD_LIMIT and await mtproto.ensure_ready():
+            # Past the Bot API's 50 MB upload cap the preview comes from
+            # your own account instead — the clip still lands in the group.
+            # Not _track()ed: it's a Telethon message, and the weekly wipe
+            # deletes through the BOT, which can't remove your own posts.
+            # The caption must keep _PREVIEW_MARK: on_message recognises
+            # this message by it while send_video is still returning.
+            sent = await mtproto.send_video(
+                chat.id, path,
+                head if head.startswith(_PREVIEW_MARK) else _PREVIEW_MARK + head,
+                branding.OUT_W, branding.OUT_H, int(duration))
+            reply_to = getattr(sent, "id", None)
+        elif size > _BOT_UPLOAD_LIMIT:
+            _track(await chat.send_message(
+                f"🏷 {name}: rendered ({mtproto.human_size(size)} — "
+                f"too big to send back, {mtproto.unavailable_reason()}; "
+                "publishing still works)"))
+            fits = False
+        else:
+            with open(path, "rb") as fh:
+                # width/height matter: without them Telegram sizes the
+                # inline player from defaults and plays the clip squashed.
+                sent = _track(await chat.send_video(
+                    video=fh, caption=head,
+                    width=branding.OUT_W, height=branding.OUT_H,
+                    duration=int(duration)))
+                r["preview_id"] = reply_to = sent.message_id
+    except Exception as exc:  # Telegram send only — the render already succeeded
+        log.error("brand preview send failed for %s: %s", b["name"], exc)
+        warnings.append((b["name"], str(exc)[:200]))
+        return
+    if caption and not fits:
+        try:
+            _track(await chat.send_message(
+                body, reply_to_message_id=reply_to,
+                allow_sending_without_reply=True))
+        except Exception:
+            log.exception("caption message for %s failed", b["name"])
 
 
 async def _do_render(q, context, state: dict) -> None:
@@ -1876,6 +2035,13 @@ async def _do_render(q, context, state: dict) -> None:
             "Nothing was published.",
             reply_markup=_plan_markup(state))
         return
+    except _HeadlineTooLong as exc:
+        # Back to the card, where a reply replaces the headline.
+        state["mode"] = "plan"
+        await q.edit_message_text(
+            _plan_text(state) + f"\n\n❌ {exc}",
+            reply_markup=_plan_markup(state))
+        return
     except _RenderSetupError as exc:
         log.error("brand render setup failed: %s", exc)
         _pending.pop(q.message.message_id, None)
@@ -1890,8 +2056,8 @@ async def _do_render(q, context, state: dict) -> None:
             "❌ all renders failed:\n"
             + "\n".join(f"{n}: {e}" for n, e in failures))
         return
-    if not config.LITE:
-        _start_captions(q.message.chat, state, renders)
+    # The captions were written during the render and are on the previews
+    # already (`_render_video`).
 
     state["mode"] = "publish"
     state["renders"] = renders
@@ -2075,14 +2241,6 @@ async def _do_render_card(q, context, state: dict) -> None:
     _arm_auto_publish(context.bot, state, prompt)
 
 
-def _manual_ig(brand: dict) -> bool:
-    """A brand whose Instagram is posted BY HAND: outside GMN and with no IG
-    account connected (no `instagram` block in its credentials file). Its
-    render preview is followed by the caption it would have published, ready
-    to copy (`_send_captions`)."""
-    return (brand.get("group") or "").upper() != "GMN" and not brand.get("ig")
-
-
 # Telegram's limit on a media caption. A longer IG caption goes in a reply.
 _TG_CAPTION_MAX = 1024
 
@@ -2141,8 +2299,8 @@ async def _caption_previews(chat, renders: list, texts: dict,
 
 async def _send_captions(chat, state: dict, renders: list) -> None:
     """Every rendered brand's finished Instagram caption, written onto its
-    preview (`_caption_previews`), then — for the hand-posted brands only —
-    the copy-ready block with the comment to pin.
+    preview (`_caption_previews`), then the main caption's prompt for review
+    (`_send_caption_prompt`).
 
     Runs as a task after the render. The captions are kept in
     `state["captions"]` with the key they were written from, and the publish
@@ -2152,47 +2310,40 @@ async def _send_captions(chat, state: dict, renders: list) -> None:
     if not renders:
         return
     try:
-        key = _captions_key(state)
+        await _caption_previews(chat, renders,
+                                await _write_captions(state, renders))
+        await _send_caption_prompt(chat, state)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("instagram captions for the previews failed")
+
+
+async def _write_captions(state: dict, renders: list) -> dict:
+    """Every brand in `renders` (each {"brand", "headline"}) gets its finished
+    Instagram caption: {brand name: text}, falling back to the brand's
+    headline + tag where the caption couldn't be written — exactly what would
+    be published. The captions are kept in `state["captions"]` with the key
+    they were written from, so the publish ships these and nothing else
+    (`_fresh_captions`). Never raises, except a cancel."""
+    key = _captions_key(state)
+    try:
         caps = await _ig_captions(
-            state.get("text", ""), [{"platform": "ig", "render": r} for r in renders],
+            state.get("text", ""),
+            [{"platform": "ig", "render": r} for r in renders],
             state.get("footage") or {}, state.get("info", ""),
             cache=state.setdefault("caption_cache", {}),
             source=state.get("source"))
-        if caps:
-            state["captions"], state["captions_key"] = caps, key
-        await _caption_previews(chat, renders, {
-            r["brand"]["name"]: caps.get(r["brand"]["name"]) or
-            ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
-            for r in renders})
-        await _send_caption_prompt(chat, state)
-        manual = [r for r in renders if _manual_ig(r["brand"])]
-        if not manual:
-            return
-        texts = {r["brand"]["name"]: caps.get(r["brand"]["name"]) or
-                 ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
-                 for r in manual}
-        # One cheap searchless call per account, all at once: the comment to
-        # pin under the post, written from that account's own caption and the
-        # source post, credited to the source when it is known.
-        comments = dict(zip(texts, await asyncio.gather(
-            *(asyncio.to_thread(ig_caption.pinned_comment, t,
-                                state.get("source"))
-              for t in texts.values()))))
-        for r in manual:
-            name = r["brand"]["name"]
-            comment = comments.get(name) or ""
-            pin = (f"\n\n📌 Comment to pin:\n<pre>{html.escape(comment)}</pre>"
-                   if comment else "")
-            # <pre>: one tap copies the whole block in Telegram.
-            _track(await chat.send_message(
-                f"📋 <b>{html.escape(name)}</b> — Instagram caption "
-                f"(no IG account connected, post by hand):\n\n"
-                f"<pre>{html.escape(texts[name])}</pre>{pin}",
-                parse_mode="HTML",
-                reply_to_message_id=r.get("preview_id"),
-                allow_sending_without_reply=True))
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        log.exception("instagram captions for the previews failed")
+        log.exception("instagram captions failed")
+        caps = {}
+    if caps:
+        state["captions"], state["captions_key"] = caps, key
+    return {r["brand"]["name"]: caps.get(r["brand"]["name"]) or
+            ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
+            for r in renders}
 
 
 def _split_message(text: str, limit: int = 4000) -> list:
@@ -2213,9 +2364,10 @@ def _split_message(text: str, limit: int = 4000) -> list:
 
 
 async def _send_caption_prompt(chat, state: dict, label: str = "") -> None:
-    """The exact prompt the post's MAIN caption was written from — model,
-    system prompt, the user message (the post's facts) and the caption it
-    answered with — as plain-text messages, for the operator to review.
+    """What the post's MAIN caption was written from — the model, the user
+    message (the post's facts) and the caption it answered with — as
+    plain-text messages, for the operator to review. The system prompt is
+    left out: it is the same every post (prompts/caption_system.txt).
     Every account's caption is a rewrite of that answer. Only when the
     cached main caption matches the post as it stands; off with
     SHOW_CAPTION_PROMPT=0. Never raises."""
@@ -2231,7 +2383,6 @@ async def _send_caption_prompt(chat, state: dict, label: str = "") -> None:
             state.get("footage") or {}, state.get("source"))
         text = (f"🧠 Main caption prompt{f' · {label}' if label else ''} "
                 f"(model: {model})\n\n"
-                f"━━ SYSTEM ━━\n{ig_caption._SYSTEM}\n\n"
                 f"━━ USER ━━\n{user}\n\n"
                 f"━━ MAIN CAPTION (each account rewrites this) ━━\n"
                 f"{cache['base']}")
@@ -2244,10 +2395,10 @@ async def _send_caption_prompt(chat, state: dict, label: str = "") -> None:
 def _start_captions(chat, state: dict, renders: list) -> None:
     """Fire `_send_captions` without holding up the picker; a run still in
     flight (an earlier `info:`) is cancelled first."""
-    old = state.get("manual_task")
+    old = state.get("caption_task")
     if old is not None and not old.done():
         old.cancel()
-    state["manual_task"] = asyncio.create_task(
+    state["caption_task"] = asyncio.create_task(
         _send_captions(chat, state, renders))
 
 
@@ -2375,9 +2526,9 @@ async def _publish_pairs(message, bot, state: dict) -> None:
     # The preview captions may still be being written: let them land first,
     # so this publish ships exactly what the previews show. asyncio.wait, not
     # wait_for: a run cancelled by a newer info: must not raise in here.
-    manual = state.get("manual_task")
-    if manual is not None and not manual.done():
-        await asyncio.wait({manual}, timeout=_VISION_WAIT_S)
+    pending = state.get("caption_task")
+    if pending is not None and not pending.done():
+        await asyncio.wait({pending}, timeout=_CAPTION_WAIT_S)
 
     # Before the loop: the captions the previews show when they are still
     # current; otherwise one fresh expansion shared by every IG/FB/YT pair. A
@@ -2700,24 +2851,21 @@ async def _render_pairs(bot, chat, bid: int, states: dict, assignment: dict,
         try:
             renders, failures, warnings, duration = await _render_video(
                 bot, chat, state, want, f"b{bid}v{vid}", f"video {n}")
+        except _HeadlineTooLong as exc:
+            plan["failures"].append(f"❌ video {n}: {exc}")
+            continue
         except _RenderSetupError as exc:
             plan["failures"].append(f"❌ video {n}: can't read the video — "
                                     f"{str(exc)[:200]}")
             continue
         plan["failures"] += [f"❌ {name} (video {n}): {err}"
                              for name, err in failures]
-        offered = [p for p in branded.platforms_for(renders, duration)
-                   if p["platform"] in platforms]
-        pairs = branded.expand(offered, set(range(len(offered))))
-        caps = await _ig_captions(
-            state["text"], pairs, state.get("footage") or {},
-            state.get("info", ""), cache=state.setdefault("caption_cache", {}),
-            source=state.get("source"))
-        await _caption_previews(chat, renders, {
-            r["brand"]["name"]: caps.get(r["brand"]["name"]) or
-            ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
-            for r in renders}, f"video {n}")
-        await _send_caption_prompt(chat, state, f"video {n}")
+        # The captions were written during the render and are on the previews
+        # (`_render_video`); one that ran late is waited for here.
+        late = state.get("caption_task")
+        if late is not None and not late.done():
+            await asyncio.wait({late}, timeout=_CAPTION_WAIT_S)
+        caps = _fresh_captions(state)
         os.makedirs(folder, exist_ok=True)
         for r in renders:
             new = os.path.join(folder, os.path.basename(r["path"]))

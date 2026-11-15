@@ -127,6 +127,8 @@ def env(store, tmp_path, monkeypatch):
             out.append({"brand": b, "path": str(path),
                         "headline": state["text"]})
         rendered.append((state["text"], [b["name"] for b in brands]))
+        # Like the real one: the captions are written during the render.
+        await news_bot._write_captions(state, out)
         return out, [], [], 30.0
 
     async def fake_captions(text, pairs, footage=None, info="", cache=None,

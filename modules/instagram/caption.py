@@ -127,8 +127,8 @@ _SYSTEM = _prompt("caption_system.txt")
 # needs its facts, not its length.
 SOURCE_TEXT_MAX = 1500
 
-# How a source platform is named in the prompt and in a pinned comment's
-# credit.
+# How a source platform is named in the prompt and in the plan card's 📎
+# source credit (`credit`).
 PLATFORM_NAMES = {"x": "X", "reddit": "Reddit", "instagram": "Instagram",
                   "telegram": "Telegram"}
 
@@ -823,9 +823,10 @@ def rewrite_all(prose: str, entries: list) -> list:
     which on a live trace (2026-10-18) gave three of eleven pages the very same
     hook. So a second pass follows: walking the pages in order, one whose hook
     or question is `similar` to a page before it (the base caption's included,
-    when a page publishes it) is rewritten once more, ONE AT A TIME, told every
-    hook and question already taken (`rephrase(avoid=…)`). Usually a few calls;
-    whatever the second try returns is kept. Never raises; blocking."""
+    when a page publishes it) is rewritten once more — all such pages at once
+    — each told every hook and question the first round kept
+    (`rephrase(avoid=…)`). Usually a few calls; whatever the second try
+    returns is kept. Never raises; blocking."""
     def one(entry, avoid=()):
         if not entry["rewrite"]:
             return prose
@@ -841,38 +842,20 @@ def rewrite_all(prose: str, entries: list) -> list:
             redo.append(i)
             continue
         taken += [x for x in (hook, question) if x]
+    # The retries run in parallel too (2026-11-15: one at a time cost ~6 s
+    # each, 29 s for five on an eleven-brand post). Each is told every hook and
+    # question the first round kept; two retries can't see each other, which
+    # can rarely leave them close — accepted for the time.
     for i in redo:
         log.info("instagram caption for %s is too close to another page's — "
                  "rewriting it once more", entries[i]["name"])
-        texts[i] = one(entries[i], avoid=list(taken))
-        taken += [x for x in hook_and_question(texts[i]) if x]
+    if redo:
+        avoid = list(taken)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            again = list(pool.map(lambda i: one(entries[i], avoid=avoid), redo))
+        for i, text in zip(redo, again):
+            texts[i] = text
     return texts
-
-
-# The comment an account pins under its own post. Instagram weighs replies, and
-# a line right under the caption is what gets the first ones. Written by the
-# cheap rewrite model from the account's FINISHED caption plus the source post,
-# so it can add one fact the caption left out — in that account's language.
-COMMENT_MAX = 100
-
-_COMMENT_SYSTEM = (
-    "You run a news page on Instagram. Below is the caption of a post it is "
-    "publishing, and the SOURCE POST the clip came from. Write the ONE "
-    "comment the page will pin under its own post.\n\n"
-    "It is EITHER one extra fact from the source post that the caption does "
-    "not already give (only a fact the source post states plainly, never an "
-    "opinion, and only one that does not conflict with the caption), OR — "
-    "when the source post adds nothing — a sharper version of the caption's "
-    "question: more specific, easier to answer in a few words. Under "
-    f"{COMMENT_MAX} characters, one sentence, written in the same language as "
-    "the caption.\n"
-    "No new fact beyond the caption and the source post, no name or place "
-    "they do not give. No hashtags, no links, no emoji, no \"like\", "
-    "\"follow\", \"share\" or \"comment\", no credit line (it is added "
-    "afterwards). On a story with deaths, violence or disaster keep it "
-    "respectful — never a joke, never bait.\n\n"
-    "Output ONLY the comment, without quotation marks."
-)
 
 
 def credit(source: dict | None) -> str:
@@ -888,43 +871,6 @@ def credit(source: dict | None) -> str:
         return f" via u/{author}"
     name = PLATFORM_NAMES.get(platform)
     return f" via {name}" if name else ""
-
-
-def pinned_comment(text: str, source: dict | None = None,
-                   model: str | None = None) -> str:
-    """A pinned-comment suggestion for one account's finished caption `text`,
-    credited to the source (`credit`) when it is known.
-
-    One searchless call (`IG_CAPTION_VARIANT_MODEL`). Returns "" when it isn't
-    wanted or possible — no text, the kill switch off, no API key, a failed or
-    empty call, or an answer far over the length a pinned comment should have.
-    Never raises; blocking, async callers go through asyncio.to_thread.
-    """
-    text = (text or "").strip()
-    if not text or not config.IG_CAPTION_ENABLED or _client is None:
-        return ""
-    src = ((source or {}).get("text") or "").strip()[:SOURCE_TEXT_MAX]
-    try:
-        resp = _client.chat.completions.create(
-            model=searchless(model or config.IG_CAPTION_VARIANT_MODEL),
-            max_tokens=MAX_TOKENS,
-            messages=[
-                {"role": "system", "content": _COMMENT_SYSTEM},
-                {"role": "user", "content":
-                    f"CAPTION:\n{text}\n\nSOURCE POST: {src or '(none)'}"},
-            ],
-        )
-    except Exception as exc:
-        log.error("pinned comment failed: %s", exc)
-        return ""
-    out = " ".join(_clean(resp.choices[0].message.content or "").split())
-    if len(out) > 1 and out[0] in "\"'“«" and out[-1] in "\"'”»":
-        out = out[1:-1].strip()
-    # A little over the target is still a usable comment; a paragraph is not.
-    if len(out) > COMMENT_MAX * 1.5:
-        log.warning("pinned comment came back %d chars — dropped", len(out))
-        return ""
-    return out + credit(source) if out else ""
 
 
 def captions_for(headline: str, brands: list, footage: dict | None = None,

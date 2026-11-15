@@ -78,7 +78,7 @@ def _no_prompt_message(monkeypatch):
 @pytest.fixture
 def calls(monkeypatch):
     """Record every billed call the caption layer would make."""
-    seen = {"expand": [], "rephrase": [], "hashtags": [], "comment": []}
+    seen = {"expand": [], "rephrase": [], "hashtags": []}
 
     def _expand(headline, footage=None, model=None, info="", source=None):
         seen["expand"].append((headline, footage, info, source))
@@ -98,11 +98,6 @@ def calls(monkeypatch):
     monkeypatch.setattr(news_bot.ig_caption, "rephrase", _rephrase)
     monkeypatch.setattr(news_bot.ig_caption, "choose_hashtags", _choose)
 
-    def _comment(text, source=None, model=None):
-        seen["comment"].append((text, source))
-        return "Would you have noticed the bear?"
-
-    monkeypatch.setattr(news_bot.ig_caption, "pinned_comment", _comment)
     return seen
 
 
@@ -356,16 +351,8 @@ def test_a_brand_on_ig_and_yt_is_planned_once(calls):
 
 
 # --------------------------------------------------------------------------- #
-# hand-posted brands: the caption arrives with the render preview             #
+# render-time captions: shared with the publish                              #
 # --------------------------------------------------------------------------- #
-
-
-def test_only_non_gmn_brands_without_ig_are_hand_posted():
-    assert news_bot._manual_ig({"group": "JNN", "ig": ""})
-    assert news_bot._manual_ig({"group": "", "ig": ""})
-    assert not news_bot._manual_ig({"group": "JNN", "ig": "eur24news"})
-    assert not news_bot._manual_ig({"group": "GMN", "ig": ""})
-    assert not news_bot._manual_ig({"group": "gmn", "ig": ""})
 
 
 class _Chat:
@@ -392,18 +379,6 @@ def _render(name, group="JNN", ig=""):
     return p["render"]
 
 
-def test_hand_posted_brands_get_their_caption_as_a_reply(calls):
-    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
-    renders = [_render("eur24news"), _render("wswire", ig="wswire"),
-               _render("mirnews", group="GMN")]
-    asyncio.run(news_bot._send_captions(chat, state, renders))
-    assert len(chat.sent) == 1
-    text, kw = chat.sent[0]
-    assert "eur24news" in text and "<pre>" in text
-    assert "#eur24news" in text
-    assert kw["parse_mode"] == "HTML" and kw["reply_to_message_id"] == 77
-
-
 def test_the_publish_reuses_the_render_time_search(calls):
     """One expansion per post: the hand-posted captions at render time and
     the IG publish afterwards share the cached one."""
@@ -426,33 +401,6 @@ def test_a_cached_expansion_is_reused_with_the_same_sources(calls):
     _run("h", [_pair()], FOOTAGE, INFO, cache=cache, source=SOURCE)
     _run("h", [_pair("b")], FOOTAGE, INFO, cache=cache, source=SOURCE)
     assert len(calls["expand"]) == 1
-
-
-def test_hand_posted_brands_get_a_comment_to_pin(calls):
-    """Written from that account's own caption, sent in the same message."""
-    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
-    asyncio.run(news_bot._send_captions(
-        chat, state, [_render("eur24news"), _render("pioneerwire")]))
-    assert len(chat.sent) == 2
-    for text, _ in chat.sent:
-        assert "📌 Comment to pin:\n<pre>Would you have noticed the bear?</pre>" in text
-    assert all("#" in c for c, _ in calls["comment"])  # the finished captions
-
-
-def test_the_comment_to_pin_gets_the_source_post(calls):
-    chat = _Chat()
-    state = {"text": "Man walks past a bear", "footage": FOOTAGE,
-             "source": SOURCE}
-    asyncio.run(news_bot._send_captions(chat, state,
-                                               [_render("eur24news")]))
-    assert calls["comment"][0][1] == SOURCE
-
-
-def test_no_comment_block_when_the_comment_fails(monkeypatch, calls):
-    monkeypatch.setattr(news_bot.ig_caption, "pinned_comment", lambda t, source=None, model=None: "")
-    chat, state = _Chat(), {"text": "Man walks past a bear", "footage": FOOTAGE}
-    asyncio.run(news_bot._send_captions(chat, state, [_render("eur24news")]))
-    assert "📌" not in chat.sent[0][0] and "<pre>" in chat.sent[0][0]
 
 
 # --------------------------------------------------------------------------- #
@@ -512,7 +460,7 @@ def test_the_main_prompt_follows_the_previews(monkeypatch, calls):
     asyncio.run(news_bot._send_captions(chat, state, [_render("wswire", ig="wswire")]))
     whole = "\n".join(t for t, _ in chat.sent)
     assert chat.sent[0][0].startswith("🧠 Main caption prompt (model: ")
-    assert news_bot.ig_caption._SYSTEM[:200] in whole
+    assert news_bot.ig_caption._SYSTEM[:200] not in whole   # left out
     assert "OPERATOR'S INFO: Source: WLOS." in whole
     assert "HEADLINE: Man walks past a bear" in whole
     assert EXPANDED.strip().splitlines()[0] in whole   # the answer
@@ -534,3 +482,160 @@ def test_split_message_keeps_every_character_under_the_limit():
     assert all(len(p) <= 1000 for p in parts)
     assert "".join(parts).replace("\n", "").replace(" ", "") == \
         text.replace("\n", "").replace(" ", "")
+
+
+# --------------------------------------------------------------------------- #
+# previews: one message, the light copy with its caption on it                #
+# --------------------------------------------------------------------------- #
+
+
+class _VideoChat(_Chat):
+    def __init__(self):
+        super().__init__()
+        self.videos = []
+
+    async def send_video(self, video, caption="", **kw):
+        self.videos.append((getattr(video, "name", ""), caption))
+        return type("M", (), {"chat": self, "message_id": 500 + len(self.videos)})()
+
+
+@pytest.fixture
+def renders(tmp_path, monkeypatch):
+    copies = []
+
+    def fake_copy(src, out, duration=None):
+        copies.append(src)
+        with open(out, "wb") as fh:
+            fh.write(b"light")
+        return out
+
+    monkeypatch.setattr(news_bot.branding, "preview_copy", fake_copy)
+    out = []
+    for name in ("wswire", "mirnews"):
+        p = tmp_path / f"brand_1_{name}.mp4"
+        p.write_bytes(b"full render")
+        out.append({"brand": {"name": name}, "path": str(p), "headline": "H"})
+    return out, copies
+
+
+def test_each_preview_is_the_light_copy_with_its_caption(renders):
+    rs, copies = renders
+    chat, state = _VideoChat(), {"files": []}
+    asyncio.run(news_bot._send_previews(
+        chat, state, rs, 30.0, "", {"wswire": "Cap W", "mirnews": "Cap M"}, []))
+    assert copies == [r["path"] for r in rs]
+    assert [(n.endswith("_preview.mp4"), c) for n, c in chat.videos] == [
+        (True, "wswire\n\nCap W"), (True, "mirnews\n\nCap M")]
+    assert chat.sent == []                       # no extra messages
+    assert [r["preview_id"] for r in rs] == [501, 502]
+    assert all(p.endswith("_preview.mp4") for p in state["files"])
+
+
+def test_a_caption_too_long_for_the_video_follows_as_a_reply(renders):
+    rs, _ = renders
+    chat = _VideoChat()
+    asyncio.run(news_bot._send_previews(
+        chat, {"files": []}, rs[:1], 30.0, "", {"wswire": "x" * 1100}, []))
+    assert chat.videos[0][1] == "🏷 wswire"
+    text, kw = chat.sent[0]
+    assert text == "wswire\n\n" + "x" * 1100 and kw["reply_to_message_id"] == 501
+
+
+def test_no_captions_means_the_brand_name_only(renders):
+    rs, _ = renders
+    chat = _VideoChat()
+    asyncio.run(news_bot._send_previews(chat, {"files": []}, rs[:1], 30.0,
+                                        "video 2", {}, []))
+    assert chat.videos[0][1] == "🏷 wswire · video 2" and chat.sent == []
+
+
+def test_lite_mode_sends_the_full_render(renders, monkeypatch):
+    rs, copies = renders
+    monkeypatch.setattr(config, "LITE", True)
+    chat = _VideoChat()
+    asyncio.run(news_bot._send_previews(chat, {"files": []}, rs, 30.0, "", {}, []))
+    assert copies == []
+    assert [n for n, _ in chat.videos] == [r["path"] for r in rs]
+
+
+def test_a_failed_copy_falls_back_to_the_full_render(renders, monkeypatch):
+    rs, _ = renders
+
+    def boom(src, out, duration=None):
+        raise RuntimeError("ffmpeg died")
+
+    monkeypatch.setattr(news_bot.branding, "preview_copy", boom)
+    chat = _VideoChat()
+    asyncio.run(news_bot._send_previews(chat, {"files": []}, rs[:1], 30.0, "",
+                                        {"wswire": "Cap"}, []))
+    assert chat.videos == [(rs[0]["path"], "wswire\n\nCap")]
+
+
+def test_caption_texts_from_a_failed_or_missing_task():
+    async def go():
+        async def bad():
+            raise RuntimeError("x")
+
+        async def good():
+            return {"a": "cap"}
+
+        failed, ok = asyncio.create_task(bad()), asyncio.create_task(good())
+        return (await news_bot._caption_texts(None),
+                await news_bot._caption_texts(failed),
+                await news_bot._caption_texts(ok))
+
+    assert asyncio.run(go()) == ({}, {}, {"a": "cap"})
+
+
+# --------------------------------------------------------------------------- #
+# the banner's row limit: a headline over 3 rows is refused before ffmpeg     #
+# --------------------------------------------------------------------------- #
+
+import os  # noqa: E402
+
+_FONT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "assets", "fonts", "DejaVuSans-Bold.ttf")
+_STYLE = {"font": _FONT, "font_size": 49}
+
+
+def test_headline_rows_follows_the_render_wrap():
+    rows = news_bot.branding.headline_rows
+    assert rows("Short headline", "x/logo.png", _STYLE) == 1
+    assert rows("", "x/logo.png", _STYLE) == 0
+    long = " ".join(["Officer says he let a double homicide suspect walk"] * 4)
+    expected = news_bot.branding.wrap_to_px(long, _FONT, 49).count("\n") + 1
+    assert rows(long, "x/logo.png", _STYLE) == expected > 3
+
+
+def _job(name, headline):
+    return {"brand": {"name": name}, "headline": headline,
+            "logo_path": f"brands/X/{name}/logo.png"}
+
+
+def test_a_headline_over_three_rows_stops_the_render(monkeypatch):
+    counts = {"short": 2, "long": 4, "russian": 5}
+    monkeypatch.setattr(news_bot.branding, "headline_rows",
+                        lambda h, logo, style=None: counts[h])
+    news_bot._check_headline_rows([_job("wswire", "short")])   # fine
+    with pytest.raises(news_bot._HeadlineTooLong) as err:
+        news_bot._check_headline_rows([_job("wswire", "short"),
+                                       _job("dailynews", "long"),
+                                       _job("vestra24", "russian")])
+    assert err.value.over == [("dailynews", 4), ("vestra24", 5)]
+    msg = str(err.value)
+    assert msg.startswith("headline too long — 5 rows on vestra24; "
+                          "4 rows on dailynews (max 3)")
+    assert "shorter" in msg
+
+
+def test_a_broken_brand_style_is_left_to_the_render(monkeypatch):
+    def boom(h, logo, style=None):
+        raise FileNotFoundError("style.json")
+
+    monkeypatch.setattr(news_bot.branding, "headline_rows", boom)
+    news_bot._check_headline_rows([_job("wswire", "anything")])   # no raise
+
+
+def test_the_row_limit_is_a_render_setup_error():
+    """So a bundle lists the video as failed instead of crashing the render."""
+    assert issubclass(news_bot._HeadlineTooLong, news_bot._RenderSetupError)

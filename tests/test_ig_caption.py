@@ -635,28 +635,6 @@ def test_youtube_description_never_doubles_shorts_or_keeps_angle_brackets():
 
 
 # --------------------------------------------------------------------------- #
-# the comment to pin                                                          #
-# --------------------------------------------------------------------------- #
-
-
-def test_pinned_comment_drops_a_paragraph(on, monkeypatch):
-    _client(monkeypatch, content="word " * 60)
-    assert caption.pinned_comment("A caption.") == ""
-
-
-def test_pinned_comment_never_raises(on, monkeypatch):
-    class _Boom:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(**kw):
-                    raise RuntimeError("gateway down")
-    monkeypatch.setattr(caption, "_client", _Boom)
-    assert caption.pinned_comment("A caption.") == ""
-    assert caption.pinned_comment("") == ""
-
-
-# --------------------------------------------------------------------------- #
 # the 2026-10-18 redesign: sources, shape, rewrites, hashtags                 #
 # --------------------------------------------------------------------------- #
 
@@ -951,7 +929,7 @@ def test_captions_for_runs_the_whole_pipeline(on, monkeypatch, counts):
     assert len(counts) == 1
 
 
-# --- pinned comment credit ------------------------------------------------------
+# --- source credit (the plan card's 📎 line) -------------------------------------
 
 
 @pytest.mark.parametrize("source,want", [
@@ -964,18 +942,6 @@ def test_captions_for_runs_the_whole_pipeline(on, monkeypatch, counts):
 ])
 def test_credit_never_invents_a_handle(source, want):
     assert caption.credit(source) == want
-
-
-def test_pinned_comment_is_credited_to_the_source(on, monkeypatch):
-    fake = _client(monkeypatch, content='"Would you have gone in?"')
-    out = caption.pinned_comment("A caption.", SOURCE)
-    assert out == "Would you have gone in? via @newsdesk"
-    assert "Brazil: a 15-year-old" in _user_of(fake)
-
-
-def test_pinned_comment_without_a_source_has_no_credit(on, monkeypatch):
-    _client(monkeypatch, content="Would you have gone in?")
-    assert caption.pinned_comment("A caption.") == "Would you have gone in?"
 
 
 # --- rewrite_all: no two pages with the same hook or question ---------------------
@@ -1006,6 +972,27 @@ def test_a_page_too_close_to_another_is_rewritten_once_told_what_is_taken(monkey
     assert texts[0].startswith("Same hook") and texts[1].startswith("A brand new")
     retry = [a for _, a in seen if a]
     assert retry == [["Same hook for everyone", "Would you have helped?"]]
+
+
+def test_several_retries_all_get_what_the_first_round_kept(monkeypatch):
+    seen = []
+
+    def fake(text, lang="", style="", model=None, avoid=()):
+        seen.append((style, list(avoid)))
+        if avoid:
+            return f"Fresh hook for {style}\n\nCtx.\n\nYour call, {style}?"
+        return "Same hook for everyone\n\nCtx.\n\nWould you have helped?"
+
+    monkeypatch.setattr(caption, "rephrase", fake)
+    entries = caption.plan([{"name": n, "lang": "en", "style": f"{n}."}
+                            for n in "abcd"])
+    texts = caption.rewrite_all("Base hook\n\nCtx.\n\nQ?", entries)
+    retries = sorted((s, a) for s, a in seen if a)
+    assert [s for s, _ in retries] == ["b.", "c.", "d."]
+    assert all(a == ["Same hook for everyone", "Would you have helped?"]
+               for _, a in retries)
+    assert [t.split("\n")[0] for t in texts[1:]] == [
+        "Fresh hook for b.", "Fresh hook for c.", "Fresh hook for d."]
 
 
 def test_distinct_rewrites_cost_no_second_call(monkeypatch):
