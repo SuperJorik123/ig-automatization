@@ -1874,25 +1874,21 @@ async def _render_video(bot, chat, state: dict, brands: list, tag: str,
     texts = await _caption_texts(cap_task)
     await _send_previews(chat, state, renders, duration, label, texts,
                          warnings)
-    if cap_task is not None:
-        if cap_task.done():
-            await _send_caption_prompt(chat, state, label)
-        else:
-            # Still writing past _CAPTION_WAIT_S: the captions follow onto the
-            # previews when they land; the publish waits on this task.
-            state["caption_task"] = asyncio.create_task(
-                _late_captions(chat, state, renders, cap_task, label))
+    if cap_task is not None and not cap_task.done():
+        # Still writing past _CAPTION_WAIT_S: the captions follow onto the
+        # previews when they land; the publish waits on this task.
+        state["caption_task"] = asyncio.create_task(
+            _late_captions(chat, state, renders, cap_task, label))
     return renders, failures, warnings, duration
 
 
 async def _late_captions(chat, state: dict, renders: list, cap_task,
                          label: str) -> None:
     """Captions that missed the previews: put on them once written
-    (`_caption_previews`), then the prompt for review. Never raises."""
+    (`_caption_previews`). Never raises."""
     try:
         texts = await cap_task
         await _caption_previews(chat, renders, texts, label)
-        await _send_caption_prompt(chat, state, label)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -2299,8 +2295,7 @@ async def _caption_previews(chat, renders: list, texts: dict,
 
 async def _send_captions(chat, state: dict, renders: list) -> None:
     """Every rendered brand's finished Instagram caption, written onto its
-    preview (`_caption_previews`), then the main caption's prompt for review
-    (`_send_caption_prompt`).
+    preview (`_caption_previews`).
 
     Runs as a task after the render. The captions are kept in
     `state["captions"]` with the key they were written from, and the publish
@@ -2312,7 +2307,6 @@ async def _send_captions(chat, state: dict, renders: list) -> None:
     try:
         await _caption_previews(chat, renders,
                                 await _write_captions(state, renders))
-        await _send_caption_prompt(chat, state)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -2344,52 +2338,6 @@ async def _write_captions(state: dict, renders: list) -> dict:
     return {r["brand"]["name"]: caps.get(r["brand"]["name"]) or
             ig_caption.with_brand_tag(r["headline"], r["brand"]["name"])
             for r in renders}
-
-
-def _split_message(text: str, limit: int = 4000) -> list:
-    """`text` in pieces under Telegram's 4096-char message limit, cut at a
-    paragraph break, else a line break, else hard."""
-    parts = []
-    while len(text) > limit:
-        cut = text.rfind("\n\n", 0, limit)
-        if cut <= 0:
-            cut = text.rfind("\n", 0, limit)
-        if cut <= 0:
-            cut = limit
-        parts.append(text[:cut].rstrip())
-        text = text[cut:].lstrip("\n")
-    if text.strip():
-        parts.append(text)
-    return parts
-
-
-async def _send_caption_prompt(chat, state: dict, label: str = "") -> None:
-    """What the post's MAIN caption was written from — the model, the user
-    message (the post's facts) and the caption it answered with — as
-    plain-text messages, for the operator to review. The system prompt is
-    left out: it is the same every post (prompts/caption_system.txt).
-    Every account's caption is a rewrite of that answer. Only when the
-    cached main caption matches the post as it stands; off with
-    SHOW_CAPTION_PROMPT=0. Never raises."""
-    if not config.SHOW_CAPTION_PROMPT:
-        return
-    try:
-        cache = state.get("caption_cache") or {}
-        if not cache.get("base") or cache.get("key") != _captions_key(state):
-            return
-        model = ig_caption.searchless(config.IG_CAPTION_MODEL)
-        user = ig_caption.user_message(
-            state.get("text", ""), state.get("info", ""),
-            state.get("footage") or {}, state.get("source"))
-        text = (f"🧠 Main caption prompt{f' · {label}' if label else ''} "
-                f"(model: {model})\n\n"
-                f"━━ USER ━━\n{user}\n\n"
-                f"━━ MAIN CAPTION (each account rewrites this) ━━\n"
-                f"{cache['base']}")
-        for part in _split_message(text):
-            _track(await chat.send_message(part))
-    except Exception:
-        log.exception("sending the caption prompt failed")
 
 
 def _start_captions(chat, state: dict, renders: list) -> None:

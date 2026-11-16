@@ -18,7 +18,7 @@ import sys
 
 import yt_dlp
 
-from shared import config
+from shared import config, ffrun
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +90,7 @@ def download_media(url: str, dest_path: str, kind: str = "reel") -> tuple[str, s
     """`_download_media` without yt-dlp's info dict — (absolute path, caption),
     for the callers that only want the file and its text."""
     path, caption, _ = _download_media(resolve_reddit_url(url), dest_path, kind)
+    ffrun.strip_metadata(path)
     return path, caption
 
 
@@ -412,14 +413,18 @@ def fetch(url: str, dest_stub: str) -> tuple[list[str], str, dict]:
 
     Returns (paths, caption, source): one path for a video, up to MAX_PHOTOS
     for a photo carousel; `source` is the post the media came from
-    (`source_post`)."""
+    (`source_post`). A video comes back with its metadata stripped
+    (`ffrun.strip_metadata` — an X clip names Twitter in its track header),
+    so every use of it, "Post as-is" included, starts clean."""
     url = resolve_reddit_url(url)
     try:
         path, caption, info = _download_media(url, dest_stub, kind="reel")
+        ffrun.strip_metadata(path)
         return [path], caption, source_post(url, caption, info)
     except RuntimeError as first:
         try:
             path, caption, info = _download_media(url, dest_stub, kind="post")
+            ffrun.strip_metadata(path)
             return [path], caption, source_post(url, caption, info)
         except RuntimeError:
             try:

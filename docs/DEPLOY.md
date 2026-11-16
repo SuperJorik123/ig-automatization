@@ -291,7 +291,14 @@ them. From this PC, tar the tree without them and drop it over the old one:
 tar czf app.tar.gz --exclude=.git --exclude=__pycache__ --exclude=node_modules \
     --exclude=.env --exclude='.env.*' --exclude='credentials/*' \
     --exclude='posts/*' --exclude='modules/telegram/data/*' \
-    --exclude='modules/telegram/data_lite/*' .
+    --exclude='modules/telegram/data_lite/*' --exclude='modules/newsroom/data/*' \
+    --exclude='backup_*' --exclude=conversationplan.md --exclude=.claude \
+    --exclude=.vexp --exclude=.pytest_cache \
+    --exclude='tools/find_original/chrome-profile' --exclude='tools/find_original/runs' .
+# modules/newsroom/data/ is the newsroom bot's LIVE db on the VPS (a local copy
+# would overwrite it); backup_* holds brand credentials; chrome-profile holds
+# browser cookies. Check before uploading:
+#   tar tzf app.tar.gz | grep -iE '\.(db|session|pickle)$|backup|credentials/brands'
 scp app.tar.gz root@193.36.38.133:/tmp/
 ssh root@193.36.38.133 'cd /opt/ig-automatization2 && tar xzf /tmp/app.tar.gz \
     && .venv/bin/pip install -q -r requirements.txt \

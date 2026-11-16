@@ -338,7 +338,8 @@ def build_command(src: str, plan: dict, out: str, audio: bool) -> list:
     if audio:
         cmd += ["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(CRF),
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            *ffrun.CLEAN_METADATA, out]
     return cmd
 
 

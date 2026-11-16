@@ -205,12 +205,6 @@ HEADLINE_MODEL = (os.environ.get("HEADLINE_MODEL", "").strip()
 IG_CAPTION_ENABLED = os.environ.get("IG_CAPTION_ENABLED", "1").strip().lower() not in (
     "0", "false", "no", "off"
 )
-# After the render, the news bot posts the exact prompt the main caption was
-# written from (system + user message + the caption it returned) under the
-# previews, for the operator to review. 0 stops it.
-SHOW_CAPTION_PROMPT = os.environ.get("SHOW_CAPTION_PROMPT", "1").strip().lower() not in (
-    "0", "false", "no", "off"
-)
 
 # Every Instagram account on a post used to publish the SAME caption — one
 # expansion, cached per language, and twelve of the thirteen brands are "en".

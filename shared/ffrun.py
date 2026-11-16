@@ -48,6 +48,49 @@ def run(cmd: list, limit: int) -> subprocess.CompletedProcess:
         raise Timeout(f"{cmd[0]} hung and was stopped after {limit} s") from exc
 
 
+# Output options that leave no trace of where a clip came from or what wrote
+# it: no tags copied from the input (an X download carries
+# `handler_name=Twitter-vork muxer` and X's processing time, and ffmpeg copies
+# both into every render by default), and no `encoder=Lavf…/Lavc…` tags of
+# our own. Tracks get ffmpeg's neutral VideoHandler/SoundHandler names.
+CLEAN_METADATA = ["-map_metadata", "-1", "-map_chapters", "-1",
+                  "-fflags", "+bitexact",
+                  "-flags:v", "+bitexact", "-flags:a", "+bitexact"]
+
+_STRIPPABLE = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
+
+
+def strip_metadata(path: str) -> bool:
+    """Rewrite the video at `path` in place without its metadata: a stream
+    copy (no re-encode, picture and sound bit-for-bit the same, about a
+    second) with CLEAN_METADATA. Data tracks (timecode etc.) are dropped too.
+    Never raises — on any failure the original file stays as it was and a
+    warning is logged; returns whether the file was cleaned."""
+    stem, ext = os.path.splitext(path)
+    if ext.lower() not in _STRIPPABLE or not os.path.isfile(path):
+        return False
+    tmp = stem + ".clean" + ext
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", path,
+           "-map", "0:v", "-map", "0:a?", "-c", "copy", *CLEAN_METADATA]
+    if ext.lower() in (".mp4", ".mov", ".m4v"):
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(tmp)
+    try:
+        proc = run(cmd, BASE_S)
+        if proc.returncode != 0 or not os.path.getsize(tmp):
+            raise RuntimeError((proc.stderr or "").strip()[-200:] or "no output")
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        log.warning("metadata strip failed for %s, keeping it as is: %s",
+                    path, exc)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def duration_of(path: str) -> float | None:
     """The file's duration in seconds, None when it can't be read. Never
     raises: it only sizes a time limit."""

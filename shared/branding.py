@@ -534,6 +534,9 @@ ENCODE_ARGS = [
     "-color_trc", "bt709", "-color_range", "tv",
     "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
     "-movflags", "+faststart",
+    # The source's tags (an X clip's "Twitter-vork muxer" track name) are
+    # copied into every output by default — not into ours.
+    *ffrun.CLEAN_METADATA,
 ]
 
 # The retry after a hang. ffmpeg's default AAC method looped for ever on a clip
@@ -603,7 +606,7 @@ def preview_copy(src: str, out: str, duration: float | None = None) -> str:
            "-maxrate", str(cap), "-bufsize", str(cap * 2),
            "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", str(PREVIEW_AUDIO_BPS),
-           "-movflags", "+faststart", out]
+           "-movflags", "+faststart", *ffrun.CLEAN_METADATA, out]
     with renderlock.render_slot():
         proc = ffrun.run(cmd, ffrun.limit_s(duration or None, 1))
     if proc.returncode != 0 or not os.path.exists(out):

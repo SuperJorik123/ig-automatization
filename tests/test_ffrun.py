@@ -120,3 +120,62 @@ def test_single_render_removes_partial_output_after_two_hangs(monkeypatch, jobs)
     with pytest.raises(ffrun.Timeout):
         branding.render_branded("src.mp4", "h", "l.png", job["out_path"])
     assert not os.path.exists(job["out_path"])
+
+
+# --- metadata strip ---------------------------------------------------------
+
+def _tags(path) -> str:
+    return subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format_tags:stream_tags",
+         "-of", "default=nw=1", str(path)],
+        capture_output=True, text=True, check=True).stdout
+
+
+def _have_ffmpeg() -> bool:
+    import shutil
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+@pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg not on PATH")
+def test_strip_metadata_removes_source_tags_in_place(tmp_path):
+    clip = tmp_path / "x.mp4"
+    # What an X download looks like: the platform's name on the video track
+    # and its processing time in the header.
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc2=size=160x284:rate=25:duration=1",
+         "-f", "lavfi", "-i", "sine=duration=1",
+         "-c:v", "libx264", "-c:a", "aac",
+         "-metadata", "creation_time=2026-03-01T20:30:55Z",
+         "-metadata", "comment=https://x.com/someone/status/1",
+         "-metadata:s:v", "handler_name=Twitter-vork muxer", str(clip)],
+        check=True)
+    before = _tags(clip)
+    assert "Twitter-vork muxer" in before and "creation_time" in before
+    assert ffrun.strip_metadata(str(clip)) is True
+    after = _tags(clip)
+    for leak in ("Twitter", "creation_time", "x.com", "encoder", "Lavf"):
+        assert leak not in after
+    assert not (tmp_path / "x.clean.mp4").exists()
+    assert ffrun.duration_of(str(clip)) == pytest.approx(1, abs=0.1)
+
+
+def test_strip_metadata_never_raises(tmp_path):
+    assert ffrun.strip_metadata(str(tmp_path / "missing.mp4")) is False
+    photo = tmp_path / "a.jpg"
+    photo.write_bytes(b"not touched")
+    assert ffrun.strip_metadata(str(photo)) is False
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(b"not a video")
+    assert ffrun.strip_metadata(str(broken)) is False
+    assert broken.read_bytes() == b"not a video"
+    assert not (tmp_path / "broken.clean.mp4").exists()
+
+
+def test_every_encode_drops_input_metadata():
+    from shared import video_edit
+    assert "-map_metadata" in branding.ENCODE_ARGS
+    plan = video_edit.resolve(video_edit.parse("2-3"), 10)
+    cmd = video_edit.build_command("in.mp4", plan, "out.mp4", audio=True)
+    assert cmd[cmd.index("-map_metadata") + 1] == "-1"
+    assert cmd[-1] == "out.mp4"
