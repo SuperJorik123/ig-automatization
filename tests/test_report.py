@@ -76,7 +76,7 @@ def test_collect_reads_only_connected_platforms():
 
 def _r(brand, p, views=None, error="", **kw):
     data = None if error else {"url": f"https://x/{brand}/{p}",
-                               "posted_at": "2026-11-01T10:00:00+0000",
+                               "posted_at": "2026-10-31T10:00:00+0000",
                                "views": views, **kw}
     return {"brand": brand, "platform": p, "data": data, "error": error}
 
@@ -91,25 +91,34 @@ def test_render_ranks_accounts_and_sums_totals():
     pages = report.render(results, NOW)
     assert len(pages) == 1
     text = pages[0]
-    assert "Latest-reel report" in text
-    assert "IG 2/2 · FB 1/2" in text
-    assert "📸 Instagram · 👁 5.1K · ❤️ 305 · 💬 21" in text
-    assert "Σ All · 👁 6.1K" in text
-    assert "🏆 Most views: <b>big</b> Instagram — 5K" in text
-    assert "🐢 Fewest views: <b>small</b>" in text
-    assert text.index("1. big") < text.index("2. small") < text.index("3. broken")
-    assert "⚠️ token lacks permission" in text
-    assert '<a href="https://x/big/ig">IG</a> · 2h ago' in text
-    assert "ER 6.7%" in text   # (300+20+10+4)/5000
+    assert "Latest reels" in text
+    assert "👁 <b>6.1K views in total</b>" in text
+    assert "📸 5.1K · 📘 1K" in text
+    assert "🏆 Best: <b>big</b> on Instagram — 5K views" in text
+    assert "🔥 Most engaging: <b>big</b> on Instagram — 6.7%" in text  # 334/5000
+    assert "🐢 Weakest: <b>small</b> on Instagram — 100 views" in text
+    table = text[text.index("<pre>") + 5:text.index("</pre>")].splitlines()
+    assert table[0].split() == ["IG", "FB"]
+    assert table[1].split() == ["big", "5K", "1K"]
+    assert table[2].split() == ["small", "100", "·"]     # no FB account
+    assert table[3].split() == ["broken", "·", "!"]      # FB read failed
+    assert "• broken FB: token lacks permission" in text
+
+
+def test_render_never_calls_a_fresh_reel_the_weakest():
+    results = [_r("a", "ig", 5000), _r("b", "ig", 900), _r("c", "ig", 3)]
+    results[2]["data"]["posted_at"] = "2026-11-01T11:30:00+0000"   # 30 min old
+    assert "🐢 Weakest: <b>b</b>" in report.render(results, NOW)[0]
 
 
 def test_render_escapes_names_and_splits_long_reports():
     results = [_r(f"brand<{i}>", "ig", i * 10, likes=1, comments=0)
-               for i in range(1, 80)]
+               for i in range(1, 400)]
     pages = report.render(results, NOW)
     assert len(pages) > 1
     assert all(len(p) <= report.MSG_LIMIT for p in pages)
-    assert "brand&lt;79&gt;" in pages[0]
+    assert all(p.count("<pre>") == p.count("</pre>") == 1 for p in pages)
+    assert "brand&lt;399&gt;" in pages[0]
 
 
 def test_render_with_nothing_connected():

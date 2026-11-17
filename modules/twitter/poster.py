@@ -178,6 +178,22 @@ def post_photo(file_path: str, caption: str, account_name: str) -> dict:
     return post_media(file_path, caption, account_name)
 
 
+def followers(account_name: str) -> tuple[int | None, str]:
+    """(the account's follower count, "") or (None, why), for the weekly
+    follower report — one v2 GET /users/me (a pay-per-use read, one per
+    account per day). Never raises."""
+    try:
+        _, client = _get_clients(account_name)
+        resp = client.get_me(user_fields=["public_metrics"], user_auth=True)
+        metrics = (resp.data.public_metrics or {}) if resp and resp.data else {}
+    except Exception as exc:
+        return None, str(exc)[:300]
+    count = metrics.get("followers_count")
+    if count is None:
+        return None, "no follower count in the reply"
+    return int(count), ""
+
+
 def upload_post(d, media_path, caption_body, hashtags, kind="post", target_account=None):
     """Back-compat wrapper mirroring modules.instagram.upload_post.upload_post
     so existing call sites can slot Twitter in. `d` (the phone device) and

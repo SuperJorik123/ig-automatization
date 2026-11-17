@@ -16,6 +16,7 @@ CLI: py modules/youtube/stats.py @handle
 import datetime as dt
 import logging
 import os
+import re
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -83,6 +84,63 @@ def latest_short(handle: str) -> tuple[dict | None, str]:
         "likes": info.get("like_count"),
         "comments": info.get("comment_count"),
     }, ""
+
+
+def subscribers(handle: str) -> tuple[int | None, str]:
+    """(the channel's public subscriber count, "") or (None, why), for the
+    weekly follower report. YouTube ROUNDS it publicly (12,345 shows as
+    12.3K), so a small week can read as +0. Never raises."""
+    try:
+        import yt_dlp
+    except ImportError:
+        return None, "yt-dlp not installed"
+    why = ""
+    try:
+        with yt_dlp.YoutubeDL({**_OPTS, "extract_flat": True,
+                               "playlistend": 1}) as ydl:
+            tab = ydl.extract_info(channel_url(handle), download=False) or {}
+        if tab.get("channel_follower_count") is not None:
+            return int(tab["channel_follower_count"]), ""
+    except Exception as exc:
+        why = str(exc).replace("ERROR: ", "")[:300]
+    # yt-dlp misses the singular "1 subscriber" and fails outright on a
+    # channel with no Shorts tab (both seen 2026-11-17), so read the count
+    # off the channel page's header instead.
+    count, page_why = _subscribers_from_page(handle)
+    if count is not None:
+        return count, ""
+    return None, page_why or why or "subscriber count hidden"
+
+
+_SUBS_RE = re.compile(r'"content":"(No|[0-9][0-9.,]*)\s*([KMB]?) subscribers?"')
+
+
+def parse_subscribers(page: str) -> int | None:
+    """The header's "1 subscriber" / "12.3K subscribers" / "No subscribers"
+    -> an int, or None when the page shows no count (hidden, or zero on some
+    channels)."""
+    m = _SUBS_RE.search(page or "")
+    if not m:
+        return None
+    num, unit = m.groups()
+    if num == "No":
+        return 0
+    val = float(num.replace(",", ""))
+    return int(round(val * {"": 1, "K": 1e3, "M": 1e6, "B": 1e9}[unit]))
+
+
+def _subscribers_from_page(handle: str) -> tuple[int | None, str]:
+    try:
+        import requests
+        base = channel_url(handle)[: -len("/shorts")]
+        resp = requests.get(base, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.8"})
+        resp.raise_for_status()
+    except Exception as exc:
+        return None, str(exc)[:300]
+    count = parse_subscribers(resp.text)
+    return (count, "") if count is not None else (
+        None, "count not shown on the channel (hidden, or 0 subscribers)")
 
 
 if __name__ == "__main__":

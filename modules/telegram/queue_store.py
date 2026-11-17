@@ -190,6 +190,17 @@ def init() -> None:
                    followers_72h     INTEGER)"""
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_reel_log_brand ON reel_log(brand)")
+        # One follower count per (day, brand, platform) — the weekly follower
+        # report compares today's row with the one a week back
+        # (modules/telegram/followers.py). A re-read the same day overwrites.
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS follower_counts(
+                   day      TEXT NOT NULL,
+                   brand    TEXT NOT NULL,
+                   platform TEXT NOT NULL,
+                   count    INTEGER NOT NULL,
+                   PRIMARY KEY(day, brand, platform))"""
+        )
         sched_cols = {r["name"] for r in c.execute("PRAGMA table_info(scheduled)")}
         if "bundle_id" not in sched_cols:
             c.execute("ALTER TABLE scheduled ADD COLUMN bundle_id INTEGER")
@@ -734,3 +745,38 @@ def reels_since(since: datetime) -> list[dict]:
         rows = c.execute("SELECT * FROM reel_log WHERE posted_at>=? ORDER BY id",
                          (since.astimezone(timezone.utc).isoformat(timespec="seconds"),))
         return [_reel(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# follower counts (the weekly follower report)                                 #
+# --------------------------------------------------------------------------- #
+
+def save_follower_counts(day: str, counts: dict) -> None:
+    """counts = {(brand, platform): int} for `day` (YYYY-MM-DD); a count read
+    again the same day replaces the earlier one."""
+    with _conn() as c:
+        c.executemany(
+            "INSERT OR REPLACE INTO follower_counts(day, brand, platform, count) "
+            "VALUES (?, ?, ?, ?)",
+            [(day, b, p, int(n)) for (b, p), n in counts.items()])
+
+
+def follower_counts_on_or_before(day: str) -> tuple[str | None, dict]:
+    """(the latest day <= `day` that has counts, {(brand, platform): count})
+    — (None, {}) when nothing that old is stored."""
+    with _conn() as c:
+        row = c.execute("SELECT MAX(day) AS d FROM follower_counts WHERE day <= ?",
+                        (day,)).fetchone()
+        found = row["d"] if row else None
+        if not found:
+            return None, {}
+        rows = c.execute("SELECT brand, platform, count FROM follower_counts "
+                         "WHERE day = ?", (found,)).fetchall()
+    return found, {(r["brand"], r["platform"]): r["count"] for r in rows}
+
+
+def first_follower_day() -> str | None:
+    """The oldest day with counts, or None."""
+    with _conn() as c:
+        row = c.execute("SELECT MIN(day) AS d FROM follower_counts").fetchone()
+    return row["d"] if row else None

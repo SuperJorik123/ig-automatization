@@ -6,14 +6,15 @@ For each brand, the newest Reel / Short on each platform it has an account on
 — Instagram (Graph API, modules/instagram/graph.latest_reel), Facebook (Pages
 API, modules/facebook/poster.latest_reel) and YouTube (public numbers via
 yt-dlp, modules/youtube/stats.latest_short, needs the brand's @handle) — with
-views, likes, comments, shares/saves where the platform gives them, and an
-engagement rate. Read from the platforms, not from the bot's own logs, so a
+views (and the likes / comments / shares behind the engagement line). Read from the platforms, not from the bot's own logs, so a
 reel posted by hand counts too.
 
 `collect(brands)` is the blocking half (one thread per read, all in parallel;
 a failed read becomes that line's ⚠️, never an exception). `render(results)`
-is pure — Telegram HTML messages, split under the 4096-char limit on account
-boundaries, accounts ordered by total views.
+is pure — Telegram HTML built to be read in one glance: total views, best /
+most engaging / weakest reel in plain words, one monospace table of views
+(account × platform, best account first; "!" = read failed, "·" = no account)
+and a "needs fixing" list; split under the 4096-char limit between rows.
 
 CLI (prints the report as plain text): py modules/telegram/report.py
 """
@@ -152,110 +153,116 @@ def short_error(why: str) -> str:
     return w[:90] + ("…" if len(w) > 90 else "")
 
 
-def _metrics(d: dict) -> str:
-    parts = [f"👁 {fmt_num(d.get('views'))}", f"❤️ {fmt_num(d.get('likes'))}",
-             f"💬 {fmt_num(d.get('comments'))}"]
-    if d.get("shares") is not None:
-        parts.append(f"🔁 {fmt_num(d['shares'])}")
-    if d.get("saves") is not None:
-        parts.append(f"🔖 {fmt_num(d['saves'])}")
-    er = engagement(d)
-    if er is not None:
-        parts.append(f"ER {er * 100:.1f}%")
-    return " · ".join(parts)
+NAME_W = 10   # brand column of the table; longer names are cut with "…"
+COL_W = 6     # one number column: "12.4K" plus a space
+FRESH_S = 6 * 3600  # a reel younger than this isn't called the weakest yet
 
 
-def _line(r: dict, now: dt.datetime) -> str:
-    p = r["platform"]
-    d = r["data"]
-    if not d:
-        return f"{_ICON[p]} {_SHORT[p]} · ⚠️ {html.escape(short_error(r['error']))}"
-    link = f'<a href="{html.escape(d["url"], quote=True)}">{_SHORT[p]}</a>' \
-        if d.get("url") else _SHORT[p]
-    return f"{_ICON[p]} {link} · {age(d.get('posted_at'), now)} · {_metrics(d)}"
+def _views(r: dict):
+    return (r["data"] or {}).get("views")
 
 
-def _sum(rows: list, key: str):
-    vals = [r["data"].get(key) for r in rows if r["data"]]
-    vals = [v for v in vals if v is not None]
-    return sum(vals) if vals else None
+def _cell(r: dict | None) -> str:
+    """One table cell: views, "!" for a failed read, "·" for no account."""
+    if r is None:
+        return "·"
+    if not r["data"]:
+        return "!"
+    return fmt_num(_views(r))
+
+
+def _where(r: dict) -> str:
+    return f"<b>{html.escape(r['brand'])}</b> on {_LABEL[r['platform']]}"
 
 
 def render(results: list, now: dt.datetime | None = None) -> list:
-    """Telegram-HTML messages (usually one) for `collect`'s results."""
+    """Telegram-HTML messages (usually one) for `collect`'s results.
+
+    Built to be read in one glance, top to bottom: the total, the three
+    things worth knowing (best, most engaging, weakest), one table of views —
+    an account per row, a platform per column, best account first — and what
+    needs fixing. Likes / comments / shares stay out of it: views decide the
+    ranking and the engagement line covers the rest."""
     now = now or dt.datetime.now(dt.timezone.utc)
-    stamp = now.astimezone().strftime("%d %b %Y, %H:%M")
-    ok = [r for r in results if r["data"]]
-    head = [f"📊 <b>Latest-reel report</b> · {stamp}"]
-    counts = " · ".join(
-        f"{_SHORT[p]} {sum(1 for r in ok if r['platform'] == p)}/"
-        f"{sum(1 for r in results if r['platform'] == p)}"
-        for p, _, _ in PLATFORMS if any(r["platform"] == p for r in results))
+    stamp = now.astimezone().strftime("%d %b, %H:%M")
+    title = f"📊 <b>Latest reels</b> · {stamp}"
     if not results:
-        return ["\n".join(head + ["", "No account has Instagram, Facebook or "
-                                  "YouTube connected."])]
-    head.append(f"<i>Newest reel on every account · read {counts}</i>")
+        return [f"{title}\n\nNo account has Instagram, Facebook or YouTube "
+                "connected."]
 
-    # Totals per platform, then across all of them.
-    head += ["", "<b>Totals</b>"]
-    for p, label, icon in PLATFORMS:
-        rows = [r for r in ok if r["platform"] == p]
-        if not rows:
-            continue
-        tot = {k: _sum(rows, k) for k in ("views", "likes", "comments",
-                                         "shares", "saves")}
-        head.append(f"{icon} {label} · {_metrics(tot)}")
-    if len({r["platform"] for r in ok}) > 1:
-        tot = {k: _sum(ok, k) for k in ("views", "likes", "comments")}
-        head.append(f"Σ All · 👁 {fmt_num(tot['views'])} · ❤️ "
-                    f"{fmt_num(tot['likes'])} · 💬 {fmt_num(tot['comments'])}")
+    ok = [r for r in results if r["data"]]
+    viewed = [r for r in ok if _views(r) is not None]
+    plats = [p for p, _, _ in PLATFORMS if any(r["platform"] == p for r in results)]
 
-    # Best and weakest single reel by views, and best engagement.
-    viewed = [r for r in ok if r["data"].get("views") is not None]
+    out = [title, "<i>views of each account's newest reel</i>", ""]
+    total = sum(_views(r) for r in viewed)
+    out.append(f"👁 <b>{fmt_num(total)} views in total</b>")
+    out.append("   " + " · ".join(
+        f"{_ICON[p]} {fmt_num(sum(_views(r) for r in viewed if r['platform'] == p))}"
+        for p in plats))
+
     if viewed:
-        head.append("")
-        best = max(viewed, key=lambda r: r["data"]["views"])
-        head.append(f"🏆 Most views: <b>{html.escape(best['brand'])}</b> "
-                    f"{_LABEL[best['platform']]} — {fmt_num(best['data']['views'])}")
-        engaged = [r for r in viewed if engagement(r["data"]) is not None
-                   and r["data"]["views"] >= 100]
+        out.append("")
+        best = max(viewed, key=_views)
+        out.append(f"🏆 Best: {_where(best)} — {fmt_num(_views(best))} views")
+        engaged = [r for r in viewed if _views(r) >= 100
+                   and engagement(r["data"])]
         if engaged:
             top = max(engaged, key=lambda r: engagement(r["data"]))
-            head.append(f"🔥 Best engagement: <b>{html.escape(top['brand'])}</b> "
-                        f"{_LABEL[top['platform']]} — "
-                        f"{engagement(top['data']) * 100:.1f}%")
-        if len(viewed) > 2:
-            low = min(viewed, key=lambda r: r["data"]["views"])
-            head.append(f"🐢 Fewest views: <b>{html.escape(low['brand'])}</b> "
-                        f"{_LABEL[low['platform']]} — {fmt_num(low['data']['views'])}")
+            out.append(f"🔥 Most engaging: {_where(top)} — "
+                       f"{engagement(top['data']) * 100:.1f}% liked, commented "
+                       "or shared")
+        settled = [r for r in viewed if r is not best and (
+            (t := _parse_time(r["data"].get("posted_at"))) is None
+            or (now - t).total_seconds() >= FRESH_S)]
+        if len(viewed) > 2 and settled:
+            low = min(settled, key=_views)
+            out.append(f"🐢 Weakest: {_where(low)} — {fmt_num(_views(low))} "
+                       f"views ({age(low['data'].get('posted_at'), now)})")
 
-    # Per account, most total views first; accounts with nothing readable last.
-    by_brand: dict[str, list] = {}
+    # The table: one row per account, most total views first.
+    by_brand: dict[str, dict] = {}
     for r in results:
-        by_brand.setdefault(r["brand"], []).append(r)
-    order = {k: i for i, (k, _, _) in enumerate(PLATFORMS)}
+        by_brand.setdefault(r["brand"], {})[r["platform"]] = r
+    ranked = sorted(by_brand, key=lambda n: (
+        -sum(_views(r) or 0 for r in by_brand[n].values()), n))
+    name_w = min(NAME_W, max(len(n) for n in ranked))
 
-    def brand_views(name):
-        return sum(r["data"].get("views") or 0 for r in by_brand[name] if r["data"])
+    def name(n):
+        return n if len(n) <= name_w else n[:name_w - 1] + "…"
+    header = " " * name_w + "".join(_SHORT[p].rjust(COL_W) for p in plats)
+    rows = [name(n).ljust(name_w)
+            + "".join(_cell(by_brand[n].get(p)).rjust(COL_W) for p in plats)
+            for n in ranked]
 
-    blocks = []
-    ranked = sorted(by_brand, key=lambda n: (-brand_views(n), n))
-    for i, name in enumerate(ranked, 1):
-        rows = sorted(by_brand[name], key=lambda r: order[r["platform"]])
-        total = brand_views(name)
-        title = f"<b>{i}. {html.escape(name)}</b>" + (
-            f" — {fmt_num(total)} views" if total else "")
-        blocks.append("\n".join([title] + [_line(r, now) for r in rows]))
+    broken = [r for r in results if not r["data"]]
+    tail = []
+    if broken:
+        tail = ["", f"⚠️ <b>Needs fixing ({len(broken)})</b> — the ! in the table"]
+        tail += [f"• {html.escape(r['brand'])} {_SHORT[r['platform']]}: "
+                 f"{html.escape(short_error(r['error']))}"
+                 for r in sorted(broken, key=lambda r: (r["brand"], r["platform"]))]
 
-    messages, cur = [], "\n".join(head) + "\n\n<b>By account</b>"
-    for block in blocks:
-        if len(cur) + 2 + len(block) > MSG_LIMIT:
-            messages.append(cur)
-            cur = block
+    # Split only between table rows (each page repeats the header) and
+    # between problem lines, so no page ever cuts a row in half.
+    def table(chunk):
+        return "<pre>" + html.escape("\n".join([header] + chunk)) + "</pre>"
+
+    pages, head, chunk = [], "\n".join(out) + "\n\n", []
+    for row in rows:
+        if chunk and len(head) + len(table(chunk + [row])) > MSG_LIMIT:
+            pages.append(head + table(chunk))
+            head, chunk = "", []
+        chunk.append(row)
+    cur = head + table(chunk)
+    for line in tail:
+        if len(cur) + 1 + len(line) > MSG_LIMIT:
+            pages.append(cur)
+            cur = line
         else:
-            cur += "\n\n" + block
-    messages.append(cur)
-    return messages
+            cur += "\n" + line
+    pages.append(cur)
+    return pages
 
 
 def main() -> None:

@@ -107,6 +107,7 @@ from modules.youtube import publisher as yt_publisher  # noqa: E402
 from modules.twitter import publisher as tw_publisher  # noqa: E402
 from modules.telegram import branded, bundle, groups, headlines, schedule, spellfix, translator  # noqa: E402
 from modules.telegram import report as reach_report  # noqa: E402
+from modules.telegram import followers as follower_report  # noqa: E402
 from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
@@ -3128,10 +3129,61 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                                            disable_web_page_preview=True))
 
 
+def _follower_pages() -> list:
+    """Blocking: read every account's follower count now, store it as
+    today's, and render the change since the stored count of 7 days ago
+    (the closest older day if that one is missing; the oldest stored day
+    when there is no week of history yet). modules/telegram/followers.py."""
+    today = dt.date.today()
+    results = follower_report.collect(config.BRANDS)
+    queue_store.save_follower_counts(today.isoformat(),
+                                     follower_report.counts_of(results))
+    week_ago = (today - dt.timedelta(days=7)).isoformat()
+    then_day, then = queue_store.follower_counts_on_or_before(week_ago)
+    if then_day is None:
+        first = queue_store.first_follower_day()
+        if first and first < today.isoformat():
+            then_day, then = queue_store.follower_counts_on_or_before(first)
+    return follower_report.render(results, then, then_day, today.isoformat())
+
+
+async def _send_follower_report(chat, note=None) -> None:
+    try:
+        pages = await asyncio.to_thread(_follower_pages)
+    except Exception as exc:  # collect never raises; belt and braces
+        log.error("follower report failed: %s", exc)
+        pages = [f"❌ follower report failed: {html.escape(str(exc)[:300])}"]
+    if note is not None:
+        await note.edit_text(pages[0], parse_mode="HTML")
+        pages = pages[1:]
+    for page in pages:
+        _track(await chat.send_message(page, parse_mode="HTML"))
+
+
+async def cmd_followers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/followers — every account's follower change over the last week on
+    Instagram, Facebook, YouTube and X (the Monday report, on demand)."""
+    msg = update.effective_message
+    note = _track(await msg.reply_text("👥 reading every account's followers …"))
+    await _send_follower_report(msg.chat, note)
+
+
+async def _follower_count_job(context) -> None:
+    """Daily: store every account's follower count, so the weekly report
+    always has a count from 7 days back."""
+    results = await asyncio.to_thread(follower_report.collect, config.BRANDS)
+    counts = follower_report.counts_of(results)
+    await asyncio.to_thread(queue_store.save_follower_counts,
+                            dt.date.today().isoformat(), counts)
+    log.info("follower counts stored: %d of %d accounts read", len(counts),
+             len(results))
+
+
 # What the group's command menu (the "/" button) offers. /autopilot and /next
 # still work but are left out: unattended posting is prohibited (CLAUDE.md).
 _MENU = [
     BotCommand("report", "📊 latest reel of every account: views, likes, comments"),
+    BotCommand("followers", "👥 followers gained this week, every account"),
     BotCommand("bundle", "the open bundle with its buttons"),
     BotCommand("scheduled", "posts waiting to go out"),
     BotCommand("queue", "what's in the news queue"),
@@ -3216,6 +3268,7 @@ async def _weekly_report_job(context) -> None:
     _track(await context.bot.send_message(
         CHAT_ID, bundle.report_text(rows, "last 7 days")))
     _track(await context.bot.send_message(CHAT_ID, bundle.REMINDER))
+    await _send_follower_report(await context.bot.get_chat(CHAT_ID))
 
 
 # --------------------------------------------------------------------------- #
@@ -3847,8 +3900,16 @@ async def _on_start(app) -> None:
         app.job_queue.run_daily(_weekly_report_job,
                                 time=dt.time(9, 0, tzinfo=local_tz),
                                 days=(cleanup.MONDAY,), name="weekly-report")
-        log.info("bundles restored; reel insights hourly; weekly report "
-                 "Mondays 09:00 %s", local_tz)
+        # Counted every day so the Monday report (in _weekly_report_job)
+        # always finds a count from 7 days back; the first run 4 min after
+        # start seeds the history on a fresh deploy.
+        app.job_queue.run_daily(_follower_count_job,
+                                time=dt.time(8, 30, tzinfo=local_tz),
+                                name="follower-counts")
+        app.job_queue.run_once(_follower_count_job, when=240,
+                               name="follower-counts-seed")
+        log.info("bundles restored; reel insights hourly; follower counts "
+                 "daily 08:30; weekly report Mondays 09:00 %s", local_tz)
     if app.job_queue is None:
         log.warning("no job queue — weekly cleanup and scheduled posts NOT "
                     "scheduled (install python-telegram-bot[job-queue])")
@@ -3916,6 +3977,7 @@ def main() -> None:
     app.add_handler(CommandHandler("scheduled", cmd_scheduled, filters=control))
     app.add_handler(CommandHandler("bundle", cmd_bundle, filters=control))
     app.add_handler(CommandHandler("report", cmd_report, filters=control))
+    app.add_handler(CommandHandler("followers", cmd_followers, filters=control))
     # Chat filter limits the bot to the control group; ~COMMAND skips /commands.
     app.add_handler(MessageHandler(control & ~filters.COMMAND, on_message))
     app.add_handler(CallbackQueryHandler(on_callback))

@@ -510,6 +510,23 @@ def latest_reel(account: str) -> tuple[dict | None, str]:
     }, ""
 
 
+def followers(account: str) -> tuple[int | None, str]:
+    """(the Page's follower count, "") or (None, why) — the weekly follower
+    report. `followers_count` is what the Page shows as followers; `fan_count`
+    (likes) is the fallback for a Page that doesn't return it. Never raises."""
+    try:
+        token, page_id = _creds(account)
+        body = _call("GET", f"{API}/{page_id}",
+                     params={"fields": "followers_count,fan_count",
+                             "access_token": token})
+    except Exception as exc:
+        return None, str(exc)[:300]
+    for key in ("followers_count", "fan_count"):
+        if isinstance(body.get(key), int):
+            return body[key], ""
+    return None, "no follower count in the reply"
+
+
 def delete_post(post_id: str, account: str) -> dict:
     """Remove a post. Used to clear test posts off a live Page; not part of
     any publish path."""
