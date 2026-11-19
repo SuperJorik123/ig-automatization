@@ -11,16 +11,20 @@ there is nothing for it to talk to on a server.
 | Python | `/opt/python3.12/bin/python3.12`, built from source — 20.04 is EOL and deadsnakes dropped it, so there is no packaged 3.11+. The venv is `/opt/ig-automatization2/.venv`. |
 | ffmpeg | `/usr/local/bin/ffmpeg` — an **ffmpeg 8 static build** (BtbN), not the distro's 4.2. `shared/branding.py`'s row separator is a bare CR, which is an ffmpeg-8 drawtext behaviour; the apt build would render it differently. `/usr/local/bin` precedes `/usr/bin`, so the right binary wins. |
 | Headline font | `/usr/local/share/fonts/segoeuib.ttf`, copied from Windows. `branding.FONT_CANDIDATES` finds it there; without it every clip falls back to the much heavier shipped DejaVu. |
-| Timezone | `Europe/Bucharest`, matching `TIMEZONE` in `.env` — the weekly cleanup and `TG_FIRST_TICK` are local-clock. |
+| Timezone | `Europe/Bucharest`, matching `TIMEZONE` in `.env` — the weekly cleanup and the daily jobs are local-clock. |
 | Swap | 2 GB at `/swapfile` (2 vCPU since 2026-10 — was 1 — / 2 GB RAM; 1080×1920 encodes need the headroom). |
 | RAM sizing | Measured peaks: 4 services idle ~0.5 GB; branded video ~0.5 GB + ~0.39 GB per extra brand **within one ffmpeg pass**, capped by `BRAND_RENDER_BATCH` (default 4 → ~1.65 GB); one photo card **6.9 GB on `bria-rmbg`, 0.73 GB on `u2net`**. 2 GB needs `CARD_CUTOUT_MODEL=u2net` and `BRAND_RENDER_BATCH=2`; 4 GB runs the defaults; only 8 GB runs bria-rmbg cards. The `[monitor] Memory at 99%` mails come from these peaks — `psutil.virtual_memory().percent` is `MemAvailable`-based, so they are real pressure, not page cache. |
 
 ## Services
 
-> **PROHIBITED since 2026-10-06:** `news-collector` and `news-dispatcher` are
-> stopped and disabled, and `TG_AUTOPILOT=0` is in `.env` (the autopilot drip is
-> off). Do not start, enable or restart them, and leave them out of the deploy
-> restart below, until the owner lifts this. Only `news-bot` (manual posting)
+> **Unattended posting is gone:** the Telegram autopilot drip, the publish
+> picker's idle auto-publish, `BUNDLE_AUTO_PUBLISH` and the dispatcher's
+> YouTube auto-upload were REMOVED from the code on 2026-11-19 at the owner's
+> request (unattended posting had been prohibited since 2026-10-06; a stale
+> `TG_AUTOPILOT` line in `.env` is now ignored). `news-collector` and
+> `news-dispatcher` stay stopped and disabled — do not start, enable or restart
+> them, and leave them out of the deploy restart below, until the owner says
+> otherwise. Only `news-bot` (manual posting)
 > and `newsroom-bot` run. Pre-change `.env` backup: `.env.bak-2026-10-06`.
 
 ```
@@ -32,8 +36,8 @@ systemctl restart news-bot
 | Unit | Runs | Notes |
 | ---- | ---- | ----- |
 | `news-collector` | `modules/telegram/collector.py` | Needs a one-off interactive login (below) before it can be enabled. |
-| `news-dispatcher` | `modules/telegram/dispatcher.py` | The only process that scores. |
-| `news-bot` | `modules/telegram/news_bot.py` | Manual broadcaster + autopilot drip + weekly cleanup. |
+| `news-dispatcher` | `modules/telegram/dispatcher.py` | The only process that scores. Publishes nothing. |
+| `news-bot` | `modules/telegram/news_bot.py` | Manual broadcaster + weekly cleanup. |
 | `render-bot` | `modules/telegram/news_bot.py` with `ENV_FILE=.env.lite` | **Lite render bot** (since 2026-11-13): render only — video in, headline spell-fixed, optional `edit:`, PulseNews-branded clip back into its own group; nothing published, no posting credentials loaded. Unit file `deploy/render-bot.service`, env template `deploy/render-bot.env.example`, data in `modules/telegram/data_lite/`. Shares `data/render.lock` with news-bot so only one renders at a time (see "Lite render bot" below). |
 | `newsroom-bot` | `modules/newsroom/main.py` | The client's WordPress→Telegram bot. Same checkout and venv as the three above since 2026-09-03 (it was the `client/wp-newsbot` branch and `/opt/wp-newsbot` before); its own token (`NR_BOT_TOKEN`), its own SQLite store under `modules/newsroom/data/`, its own BulkFollows key. A code push restarts it together with the others — the store makes restarts safe (seen articles are never reposted). |
 

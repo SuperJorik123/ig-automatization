@@ -1,4 +1,4 @@
-"""Caption fitting — an autopilot post must ship, not bounce off a limit."""
+"""Caption fitting — a post must ship, not bounce off a limit."""
 
 from modules.telegram import publisher
 

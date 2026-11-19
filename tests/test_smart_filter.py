@@ -1,4 +1,4 @@
-"""Routing policy: which channels a scored item reaches."""
+"""The news filter: what counts as news, and the head-to-head pick."""
 
 from modules.telegram import smart_filter
 
@@ -8,9 +8,6 @@ def dest(chat_id, *regions, lang="en"):
 
 
 EU = dest("@news_eu", "eu")
-RU = dest("@news_ru", "ru", lang="ru")
-WORLD = dest("@news_world", "us", "eu")
-ANY = dest("@news_any")  # no regions configured -> catch-all
 
 
 PHOTO = {"type": "photo", "path": "a.jpg"}
@@ -21,70 +18,26 @@ def item(score=80, regions=("eu",), media=(PHOTO,)):
     return {"id": 1, "score": score, "regions": list(regions), "media": list(media)}
 
 
-# --- matches ---------------------------------------------------------------
-
-
-def test_exact_region_matches():
-    assert smart_filter.matches(["eu"], EU)
-
-
-def test_other_region_does_not_match():
-    assert not smart_filter.matches(["ru"], EU)
-
-
-def test_global_items_reach_every_channel():
-    assert smart_filter.matches(["global"], EU)
-    assert smart_filter.matches(["global"], RU)
-
-
-def test_multi_region_channel_matches_any_of_its_regions():
-    assert smart_filter.matches(["us"], WORLD)
-    assert smart_filter.matches(["eu"], WORLD)
-    assert not smart_filter.matches(["ru"], WORLD)
-
-
-def test_channel_without_regions_is_a_catch_all():
-    assert smart_filter.matches(["ru"], ANY)
-    assert smart_filter.matches([], ANY)
-
-
-def test_item_without_regions_only_reaches_catch_alls():
-    """An unrouted item shouldn't leak into region-specific channels."""
-    assert not smart_filter.matches([], EU)
-
-
-# --- telegram_targets ------------------------------------------------------
-
-
-def test_telegram_targets_filters_by_region():
-    got = smart_filter.telegram_targets(item(regions=["eu"]), [EU, RU, WORLD], min_score=60)
-    assert [d["chat_id"] for d in got] == ["@news_eu", "@news_world"]
-
-
-def test_telegram_targets_respects_the_score_floor():
-    assert smart_filter.telegram_targets(item(score=59), [EU], min_score=60) == []
-    assert smart_filter.telegram_targets(item(score=60), [EU], min_score=60) == [EU]
+# --- is_news: media required -----------------------------------------------
 
 
 def test_text_only_stories_are_not_news():
     """A source post with no photo/video is commentary, not news."""
-    assert smart_filter.telegram_targets(item(media=[]), [EU], min_score=60) == []
+    assert not smart_filter.is_news(item(media=[]))
 
 
 def test_a_photo_makes_it_news():
-    with_photo = item(media=[{"type": "photo", "path": "a.jpg"}])
-    assert smart_filter.telegram_targets(with_photo, [EU], min_score=60) == [EU]
+    assert smart_filter.is_news(item(media=[{"type": "photo", "path": "a.jpg"}]))
 
 
 def test_a_video_makes_it_news():
-    with_video = item(media=[{"type": "video", "path": "a.mp4"}])
-    assert smart_filter.telegram_targets(with_video, [EU], min_score=60) == [EU]
+    assert smart_filter.is_news(item(media=[{"type": "video", "path": "a.mp4"}]))
 
 
 def test_an_album_makes_it_news():
     album = item(media=[{"type": "photo", "path": "a.jpg"},
                         {"type": "video", "path": "b.mp4"}])
-    assert smart_filter.telegram_targets(album, [EU], min_score=60) == [EU]
+    assert smart_filter.is_news(album)
 
 
 def test_is_news_can_be_switched_off(monkeypatch):
@@ -92,38 +45,9 @@ def test_is_news_can_be_switched_off(monkeypatch):
 
     monkeypatch.setattr(config, "NEWS_REQUIRE_MEDIA", False)
     assert smart_filter.is_news(item(media=[]))
-    assert smart_filter.telegram_targets(item(media=[]), [EU], min_score=60) == [EU]
 
 
-def test_telegram_targets_handles_an_unscored_item():
-    assert smart_filter.telegram_targets({"regions": ["eu"], "media": []}, [EU], min_score=60) == []
-
-
-# --- youtube_targets -------------------------------------------------------
-
-
-def test_youtube_targets_needs_a_video():
-    no_video = item(score=90, media=[{"type": "photo", "path": "a.jpg"}])
-    assert smart_filter.youtube_targets(no_video, [EU], min_score=70) == []
-
-    with_video = item(score=90, media=[{"type": "video", "path": "a.mp4"}])
-    assert smart_filter.youtube_targets(with_video, [EU], min_score=70) == [EU]
-
-
-def test_youtube_targets_ignores_region():
-    """YT channels are language-targeted; every one gets the qualifying video."""
-    it = item(score=90, regions=["ru"], media=[{"type": "video", "path": "a.mp4"}])
-    assert smart_filter.youtube_targets(it, [EU, WORLD], min_score=70) == [EU, WORLD]
-
-
-def test_youtube_floor_is_higher_than_telegram_by_default():
-    """Shorts uploads cost API quota; Telegram posts don't."""
-    from shared import config
-
-    assert config.YT_AUTO_MIN_SCORE >= config.TG_AUTO_MIN_SCORE
-
-
-# --- best_of: the head-to-head choice made at post time --------------------
+# --- best_of: the head-to-head choice ------------------------------------
 
 
 def pair(item_id, text, score=80):

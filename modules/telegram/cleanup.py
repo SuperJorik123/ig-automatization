@@ -2,10 +2,9 @@
 modules/telegram/cleanup.py — the weekly control-group wipe.
 
 Every Monday at 04:00 local time (registered by news_bot as a JobQueue job)
-the control group is emptied: open reaction asks are closed as skipped, then
-every message the bot has TRACKED there (queue_store.group_messages — the Bot
-API can't list chat history, so tracked = seen incoming + sent outgoing) is
-deleted in batches of 100. Messages posted while the bot was down were never
+the control group is emptied: every message the bot has TRACKED there
+(queue_store.group_messages — the Bot API can't list chat history, so tracked
+= seen incoming + sent outgoing) is deleted in batches of 100. Messages posted while the bot was down were never
 tracked and survive.
 
 The bot needs the "Delete messages" admin right in the group to remove the
@@ -33,14 +32,9 @@ MONDAY = 1
 
 
 async def wipe_chat(bot, chat_id) -> tuple[int, int]:
-    """Close every open ask as skipped, then delete every tracked message in
-    `chat_id`. Returns (deleted, failed). Rows are cleared for every id
-    attempted — an id that can't be deleted now never will be (too old), so
-    keeping it would just re-fail forever."""
-    for ask in queue_store.open_asks():
-        queue_store.close_ask(ask["id"], "skipped")
-        log.info("cleanup: ask %d closed as skipped", ask["id"])
-
+    """Delete every tracked message in `chat_id`. Returns (deleted, failed).
+    Rows are cleared for every id attempted — an id that can't be deleted now
+    never will be (too old), so keeping it would just re-fail forever."""
     ids = queue_store.tracked_message_ids(str(chat_id))
     deleted = failed = 0
     for i in range(0, len(ids), BATCH):

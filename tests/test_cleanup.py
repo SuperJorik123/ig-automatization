@@ -5,7 +5,7 @@ import asyncio
 import os
 import time
 
-from modules.telegram import cleanup, reactions
+from modules.telegram import cleanup
 
 
 class StubBot:
@@ -56,16 +56,6 @@ def test_wipe_falls_back_to_single_deletes(store):
     assert bot.singles == [1, 3]
     # failed ids are cleared too — they'll never become deletable
     assert store.tracked_message_ids("-100777") == []
-
-
-def test_wipe_closes_open_asks_as_skipped(store):
-    ask_id = store.open_ask(41, reactions.new_state(41, [
-        {"chat_id": "@c", "link": "https://t.me/c/1"}]))
-
-    wipe(StubBot())
-
-    assert store.get_ask(ask_id)["status"] == "skipped"
-    assert store.open_asks() == []
 
 
 def test_wipe_leaves_other_chats_alone(store):

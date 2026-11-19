@@ -132,14 +132,6 @@ TWITTER_ACCOUNTS = [
     a.strip() for a in os.environ.get("TWITTER_ACCOUNTS", "").split(",") if a.strip()
 ]
 
-# Minimum smart-filter score (0-100) at which the dispatcher auto-uploads a
-# collected video to every YouTube channel. 70 = scorer's "high" tier floor.
-try:
-    YT_AUTO_MIN_SCORE = int(os.environ.get("YT_AUTO_MIN_SCORE", "70"))
-except ValueError:
-    YT_AUTO_MIN_SCORE = 70
-
-
 # --------------------------------------------------------------------------- #
 # Telegram news aggregator (modules/telegram)                                 #
 # --------------------------------------------------------------------------- #
@@ -332,20 +324,19 @@ def _parse_destinations(raw: str):
 # every one of these.
 TG_DESTINATIONS = _parse_destinations(os.environ.get("TG_DESTINATIONS", ""))
 
-# Master kill switch for ALL YouTube uploading (dispatcher auto-upload, the
-# news bot's manual picker, brand-it). OFF unless YT_UPLOADS_ENABLED=1 — three
+# Kill switch for YouTube uploading through modules/youtube/publisher (the
+# news bot's as-is picker). OFF unless YT_UPLOADS_ENABLED=1 — three
 # accounts were terminated for community-guideline strikes on auto-uploaded
 # clips, so uploading is opt-in until a pre-upload policy check exists (see
 # the TODO in CLAUDE.md). publisher.publish_shorts also enforces this itself,
 # so a caller passing explicit destinations cannot bypass it.
 YT_UPLOADS_ENABLED = os.environ.get("YT_UPLOADS_ENABLED", "0") == "1"
 
-# YouTube destination channels (news bot picker + dispatcher auto-upload):
+# YouTube destination channels (the news bot's as-is picker):
 # comma-separated "account:lang" pairs, e.g. "mirnews:en,rusnews:ru". Same
 # parser as TG_DESTINATIONS — here "chat_id" holds the ACCOUNT NAME, which
 # must match a folder under credentials/youtube/. Emptied when uploads are
-# disabled so the picker shows no YouTube rows and the dispatcher logs its
-# "nothing auto-uploads" warning at startup.
+# disabled so the picker shows no YouTube rows.
 YT_DESTINATIONS = (_parse_destinations(os.environ.get("YT_DESTINATIONS", ""))
                    if YT_UPLOADS_ENABLED else [])
 
@@ -471,9 +462,6 @@ BRANDS = _parse_brands(os.environ.get("BRANDS", ""), os.environ)
 BUNDLE_ACCOUNTS = [
     a.strip() for a in os.environ.get("BUNDLE_ACCOUNTS", "").split(",") if a.strip()
 ] or [b["name"] for b in BRANDS if b["ig"]]
-# Skip the 🚀 Publish tap: a rendered bundle is scheduled straight away.
-BUNDLE_AUTO_PUBLISH = os.environ.get("BUNDLE_AUTO_PUBLISH", "0").strip().lower() in (
-    "1", "true", "yes", "on")
 # The random gap between two consecutive bundle posts, in seconds (2-8 min).
 BUNDLE_GAP_MIN_S = _int_env("BUNDLE_GAP_MIN_S", 120)
 BUNDLE_GAP_MAX_S = _int_env("BUNDLE_GAP_MAX_S", 480)
@@ -486,7 +474,7 @@ BUNDLE_FIRST_POST_S = _int_env("BUNDLE_FIRST_POST_S", 120)
 
 
 # --------------------------------------------------------------------------- #
-# Telegram autopilot (modules/telegram/autopilot.py, hosted by news_bot.py)   #
+# News filter (modules/telegram/smart_filter.py, run by dispatcher.py)        #
 # --------------------------------------------------------------------------- #
 
 
@@ -499,53 +487,17 @@ NEWS_REQUIRE_MEDIA = os.environ.get("NEWS_REQUIRE_MEDIA", "1").strip().lower() n
     "0", "false", "no", "off"
 )
 
-# Minimum smart-filter score for an autopilot Telegram post. Lower than the
-# YouTube floor: a Telegram post is cheap, a Shorts upload costs API quota.
-TG_AUTO_MIN_SCORE = _int_env("TG_AUTO_MIN_SCORE", 60)
-
-# The drip sleeps a fresh random gap in this range between posts, so the
-# channels never look metronomic. 18-24 hours by default — roughly one
-# carefully chosen story a day, at an hour nobody can predict.
-TG_DRIP_MIN_S = _int_env("TG_DRIP_MIN_S", 18 * 3600)
-TG_DRIP_MAX_S = _int_env("TG_DRIP_MAX_S", 24 * 3600)
-
-# Stories older than this are never auto-posted — stale news dripping out days
-# late is worse than a quiet channel. Manual posting ignores this.
-# KEEP THIS ABOVE TG_DRIP_MAX_S/3600: a window shorter than the gap between
-# ticks means everything collected since the last post has already expired by
-# the time the next one fires, and the drip starves.
-TG_MAX_AGE_H = _int_env("TG_MAX_AGE_H", 48)
+# How many of the best-scoring stories smart_filter.best_of compares
+# head-to-head to pick the strongest one. 1 or 0 disables the comparison and
+# takes the top-scoring story outright.
+TG_COMPARE_TOP = _int_env("TG_COMPARE_TOP", 5)
 
 # How long a file in TG_DATA_DIR/media survives before the news bot's nightly
 # sweep removes it (cleanup.sweep_media). Nothing here is precious: the
 # collector's downloads are re-fetchable, and brand_/card_ renders are rebuilt
 # from the source post in seconds. 24 h is ~144x the ~10 min a brand-it flow
 # actually needs, and the directory grew to 17 GB when nothing swept it at all.
-# WITH THE COLLECTOR RUNNING, keep this above TG_MAX_AGE_H: an item stays
-# postable for TG_MAX_AGE_H, and deleting its media first makes the autopilot
-# publish text-only (autopilot._present_media drops missing files silently
-# rather than failing, so the loss would never show up as an error).
 TG_MEDIA_KEEP_H = _int_env("TG_MEDIA_KEEP_H", 24)
-
-# How many of the best-scoring eligible stories are compared head-to-head at
-# post time to choose the one that actually goes out (smart_filter.best_of).
-# 1 or 0 disables the comparison and posts the top-scoring story outright.
-TG_COMPARE_TOP = _int_env("TG_COMPARE_TOP", 5)
-
-# Where the "which reactions?" question is sent. Defaults to the control group
-# the news bot already listens in; set it to your personal chat id for a DM.
-TG_ASK_CHAT_ID = os.environ.get("TG_ASK_CHAT_ID", "").strip() or TELEGRAM_CHAT_ID
-
-# Start with the drip paused (still switchable at runtime with /autopilot on).
-TG_AUTOPILOT = os.environ.get("TG_AUTOPILOT", "1").strip().lower() not in ("0", "false", "no", "off")
-
-# Pin the FIRST tick after startup to a wall-clock time, "HH:MM" in the
-# machine's local timezone (e.g. "21:00"): today if that hour is still ahead,
-# otherwise tomorrow. Only the first tick — every one after it goes back to
-# the random TG_DRIP_MIN_S..TG_DRIP_MAX_S gap. Blank resumes the normal rhythm
-# from the last post. Useful for testing, and for lining the first post of a
-# fresh deployment up with a sensible hour.
-TG_FIRST_TICK = os.environ.get("TG_FIRST_TICK", "").strip()
 
 
 # --------------------------------------------------------------------------- #

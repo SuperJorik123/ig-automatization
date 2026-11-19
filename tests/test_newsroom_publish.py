@@ -14,7 +14,7 @@ from modules.newsroom import publish
 
 def run(coro):
     """Drive one coroutine to completion. The repo does not depend on
-    pytest-asyncio — tests/test_autopilot.py and test_cleanup.py use the same
+    pytest-asyncio — tests/test_cleanup.py and test_news_bot_countdown.py use the same
     plain asyncio.run."""
     return asyncio.run(coro)
 

@@ -54,8 +54,7 @@ def _fit(text: str, has_media: bool) -> str:
     """Trim a caption to what Telegram will accept.
 
     Truncating beats the alternative: an over-long caption is rejected per
-    channel, and for an unattended autopilot post that means the story simply
-    never ships. Every trim is logged."""
+    channel, and the story simply never ships there. Every trim is logged."""
     limit = CAPTION_LIMIT if has_media else TEXT_LIMIT
     if len(text or "") <= limit:
         return text

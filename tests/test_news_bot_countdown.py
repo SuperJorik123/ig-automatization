@@ -1,9 +1,8 @@
-"""Offline tests for the publish picker's idle auto-publish.
+"""Offline tests for the publish countdown.
 
-The picker ships what it has ticked once it has sat `_AUTO_PUBLISH_S` with
-nobody touching it; every tap or reply restarts the clock, and Cancel or a
-manual Publish stop it. Nothing here touches Telegram — `_do_publish` is
-stubbed and the delay shrunk to milliseconds.
+The 🚀 tap turns the picker into a `_PUBLISH_GRACE_S` countdown whose only
+button is ✕ Cancel; nothing publishes until it runs out. Nothing here touches
+Telegram — `_do_publish` is stubbed and the delays shrunk to milliseconds.
 """
 
 import asyncio
@@ -48,7 +47,6 @@ def published(monkeypatch):
         news_bot._pending.pop(message.message_id, None)
 
     monkeypatch.setattr(news_bot, "_do_publish", fake_publish)
-    monkeypatch.setattr(news_bot, "_AUTO_PUBLISH_S", 0.05)
     monkeypatch.setattr(news_bot, "_PUBLISH_GRACE_S", 0.04)
     monkeypatch.setattr(news_bot, "_COUNTDOWN_TICK_S", 0.02)
     yield calls
@@ -60,33 +58,6 @@ def _state(sel=frozenset({0})):
              "platforms": [{"label": "TG"}, {"label": "X"}]}
     news_bot._pending[_Msg.message_id] = state
     return state
-
-
-def _open_picker(sel=frozenset({0})):
-    state = _state(sel)
-    news_bot._arm_auto_publish(None, state, _Msg())
-    return state
-
-
-def test_an_untouched_picker_publishes_itself(published):
-    async def go():
-        state = _open_picker()
-        await asyncio.sleep(0.25)
-        return state
-    state = asyncio.run(go())
-    assert published == [state] and state["auto_published"]
-
-
-def test_a_tap_restarts_the_clock(published):
-    async def go():
-        state = _open_picker()
-        await asyncio.sleep(0.03)
-        news_bot._arm_auto_publish(None, state, _Msg())  # what a tap does
-        await asyncio.sleep(0.03)
-        assert state["mode"] == "publish"  # 0.06 s since open, 0.03 since the tap
-        await asyncio.sleep(0.25)
-    asyncio.run(go())
-    assert len(published) == 1
 
 
 def test_publish_waits_out_the_countdown_then_ships(published):
@@ -122,35 +93,10 @@ def test_the_countdown_has_only_a_cancel_button():
     assert [[b.callback_data for b in r] for r in rows] == [["b:cancel"]]
 
 
-def test_cancel_stops_the_clock(published):
+def test_an_untouched_picker_never_publishes_itself(published):
     async def go():
-        state = _open_picker()
-        news_bot._pending.pop(_Msg.message_id)
-        news_bot._cleanup(state)  # the ✕ Cancel path
+        _state()
         await asyncio.sleep(0.15)
     asyncio.run(go())
     assert published == []
-
-
-def test_nothing_ticked_publishes_nothing(published):
-    async def go():
-        _open_picker(sel=frozenset())
-        await asyncio.sleep(0.15)
-    asyncio.run(go())
-    assert published == []
-
-
-def test_a_picker_that_moved_on_is_left_alone(published):
-    async def go():
-        state = _open_picker()
-        state["mode"] = "rendering"
-        await asyncio.sleep(0.15)
-    asyncio.run(go())
-    assert published == []
-
-
-def test_the_picker_says_it_will_publish_by_itself(monkeypatch):
-    monkeypatch.setattr(news_bot, "_AUTO_PUBLISH_S", 300)
-    assert "5 min" in news_bot._publish_prompt_text({"platforms": []})
-    monkeypatch.setattr(news_bot, "_AUTO_PUBLISH_S", 0)
     assert "⏱" not in news_bot._publish_prompt_text({"platforms": []})

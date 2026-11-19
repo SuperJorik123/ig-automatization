@@ -264,13 +264,12 @@ def countdown_keyboard() -> InlineKeyboardMarkup:
 
 # What every card opens with — the same plan every time, so the operator never
 # has to check what a card inherited from the post before. JNN is the family
-# most posts go to; Telegram is left off on purpose (channels get their posts
-# from the autopilot). A platform only shows up when a selected brand has an
-# account on it. YouTube is left off too: it is still OFFERED (the operator
-# ticks it in the editor or the publish picker), but never pre-ticked — an
-# upload there has to be a deliberate choice, after three accounts were lost
-# to strikes (2026-08). YT_UPLOADS_ENABLED (the smart filter's unattended
-# auto-upload switch) doesn't apply to this human pick.
+# most posts go to; Telegram is left off on purpose. A platform only shows up
+# when a selected brand has an account on it. YouTube is left off too: it is
+# still OFFERED (the operator ticks it in the editor or the publish picker),
+# but never pre-ticked — an upload there has to be a deliberate choice, after
+# three accounts were lost to strikes (2026-08). YT_UPLOADS_ENABLED (which
+# gates the as-is picker's YT_DESTINATIONS) doesn't apply to this human pick.
 DEFAULT_GROUP = "JNN"
 DEFAULT_PLATFORMS = ("tw", "ig", "fb")
 

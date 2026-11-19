@@ -1,6 +1,6 @@
 """
 modules/telegram/collector.py — reads your source channels via a Telethon USER
-client and queues each new post (text + downloaded media) for the daily drip.
+client and queues each new post (text + downloaded media) for the news filter.
 
 Why a user client: a bot cannot read channels it doesn't own/admin, so
 collection runs as YOUR account. First run does an interactive login (Telegram

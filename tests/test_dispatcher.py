@@ -19,7 +19,6 @@ def test_items_with_media_are_scored(store, monkeypatch):
     monkeypatch.setattr(dispatcher.smart_filter, "evaluate",
                         lambda text, source_hint=None: {"score": 72, "regions": ["eu"],
                                                         "tier": "high"})
-    monkeypatch.setattr(dispatcher.smart_filter, "youtube_targets", lambda item: [])
     item_id = queue_store.enqueue("tg:@src", "a story",
                                   [{"file_id": "p1", "type": "photo"}])
 
@@ -41,7 +40,6 @@ def test_the_media_rule_can_be_switched_off(store, monkeypatch):
     monkeypatch.setattr(dispatcher.smart_filter, "evaluate",
                         lambda text, source_hint=None: {"score": 65, "regions": ["global"],
                                                         "tier": "medium"})
-    monkeypatch.setattr(dispatcher.smart_filter, "youtube_targets", lambda item: [])
     item_id = queue_store.enqueue("tg:@src", "text only", [])
 
     dispatcher.process_one()

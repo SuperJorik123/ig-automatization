@@ -114,7 +114,6 @@ def env(store, tmp_path, monkeypatch):
               for n in NAMES]
     monkeypatch.setattr(config, "BRANDS", brands)
     monkeypatch.setattr(config, "BUNDLE_ACCOUNTS", list(NAMES))
-    monkeypatch.setattr(config, "BUNDLE_AUTO_PUBLISH", False)
     monkeypatch.setattr(news_bot.ig_graph, "publishing_quota", lambda a: (0, 100))
     monkeypatch.setattr(news_bot.ig_graph, "followers", lambda a: 100)
 
@@ -373,13 +372,6 @@ def test_us_evening_starts_the_timetable_at_the_next_us_slot(env, monkeypatch):
     assert min(r["due_at"] for r in rows) == slot
     assert any(n.startswith("🇺🇸 starts")
                for n in env.store.get_bundle(b["id"])["plan"]["notes"])
-
-
-def test_auto_publish_skips_the_tap(env, monkeypatch):
-    monkeypatch.setattr(config, "BUNDLE_AUTO_PUBLISH", True)
-    b, lines = _start(env, 2)
-    _render(env, b, lines)
-    assert len(env.store.scheduled_for_bundle(b["id"], "pending")) == 10
 
 
 def test_a_full_quota_rolls_to_tomorrow_and_says_so(env, monkeypatch):

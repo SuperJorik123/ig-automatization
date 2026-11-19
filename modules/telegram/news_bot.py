@@ -47,22 +47,12 @@ so instead of failing vaguely.
 
 Weekly cleanup: every message the bot sees or sends in the control group is
 recorded (queue_store.group_messages), and Mondays at 04:00 local the group is
-wiped — open reaction asks closed as skipped, tracked messages deleted
-(modules/telegram/cleanup.py). Give the bot the "Delete messages" admin right
-or it can only remove its own recent ones. Destination channels are untouched.
+wiped — tracked messages deleted (modules/telegram/cleanup.py). Give the bot
+the "Delete messages" admin right or it can only remove its own recent ones.
+Destination channels are untouched.
 
-Autopilot: this process also hosts the Telegram drip
-(modules/telegram/autopilot.py) as a JobQueue job — every random 18-24 hours it
-publishes the best story the collector+dispatcher have queued (the finalists
-are compared head-to-head at post time) to the channels whose region it
-matches, then asks here which reactions to buy. It shares this process because
-one bot token allows exactly one poller and the ask needs callbacks. Manual
-posting above is unaffected by it.
-
-    /queue      what's queued + what the next drip would post
-    /autopilot  on|off — pause or resume the drip
-    /asks       re-render unanswered reaction asks
-    /next       run one drip immediately
+Nothing publishes without a human tap: every post, schedule and bundle starts
+from the operator's button.
 
 Run:  py modules/telegram/news_bot.py
 """
@@ -96,7 +86,6 @@ from telegram.ext import (  # noqa: E402
 
 from shared import config, reel_downloader  # noqa: E402
 from modules.telegram import (  # noqa: E402
-    autopilot,
     cleanup,
     mtproto,
     publisher,
@@ -634,8 +623,7 @@ def _plan_markup(state: dict) -> InlineKeyboardMarkup:
 
 
 # The emoji catalogue and the BulkFollows ordering rules live in
-# modules/telegram/reactions.py — shared with the autopilot's reaction ask so
-# the two flows can't drift apart.
+# modules/telegram/reactions.py.
 EMOJI_SERVICES = reactions.EMOJI_SERVICES
 
 
@@ -776,7 +764,7 @@ def _cleanup(state: dict) -> None:
         task = state.get(key)
         if task is not None and not task.done():
             task.cancel()
-    _disarm_auto_publish(state)
+    _stop_countdown(state)
     for path in state.get("files", ()):
         try:
             os.remove(path)
@@ -939,8 +927,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             # The headline is burned into the renders and can't be changed
             # now — but the Instagram caption is written at publish time, so an
             # info reply is still worth taking this late.
-            # Any reply means the operator is here — restart the idle clock.
-            _arm_auto_publish(msg.get_bot(), state, reply)
             if field != "info":
                 return
             # New facts → new captions, rewritten onto the previews.
@@ -1134,53 +1120,7 @@ def _publish_prompt_text(state: dict) -> str:
     lines += _info_lines(state)
     if any(p["platform"] in ("ig", "fb") for p in state.get("platforms", ())):
         lines.append(_INFO_HINT)
-    if _AUTO_PUBLISH_S:
-        lines.append(f"⏱ publishes the ticked platforms by itself after "
-                     f"{_AUTO_PUBLISH_S // 60} min untouched — any tap or "
-                     "reply restarts the clock")
     return "\n\n".join(lines)
-
-
-# The publish picker ships what it has ticked once it has sat this long with
-# nobody touching it — the renders are made and the plan is already approved,
-# so a post must not die in the group because the operator walked away.
-# 0 turns it off.
-_AUTO_PUBLISH_S = 5 * 60
-
-
-def _arm_auto_publish(bot, state: dict, message) -> None:
-    """(Re)start the idle clock on an open publish picker. Called when the
-    picker opens and on every tap or reply it takes, so it measures idleness,
-    not age."""
-    _disarm_auto_publish(state)
-    if _AUTO_PUBLISH_S:
-        state["auto_task"] = asyncio.create_task(
-            _auto_publish(bot, state, message))
-
-
-def _disarm_auto_publish(state: dict) -> None:
-    """Stop the idle clock — never the task running this very call, which is
-    the auto-publish itself on its way through _do_publish."""
-    task = state.pop("auto_task", None)
-    if task is not None and not task.done() and task is not asyncio.current_task():
-        task.cancel()
-
-
-async def _auto_publish(bot, state: dict, message) -> None:
-    try:
-        await asyncio.sleep(_AUTO_PUBLISH_S)
-    except asyncio.CancelledError:
-        return  # touched, published or cancelled in the meantime
-    # Same guards as the button: still this picker's state, still publishing,
-    # and something to publish to.
-    if _pending.get(message.message_id) is not state or state.get("mode") != "publish":
-        return
-    if not state["sel_platforms"]:
-        log.info("auto-publish skipped: no platform ticked")
-        return
-    log.info("publish picker idle for %ss — publishing", _AUTO_PUBLISH_S)
-    state["auto_published"] = True
-    _start_countdown(bot, state, message)
 
 
 # Publishing never starts on the tap itself: the picker turns into a countdown
@@ -1196,21 +1136,25 @@ _COUNTDOWN_TICK_S = 10
 def _countdown_text(state: dict, left: int) -> str:
     ticked = [p["label"] for i, p in enumerate(state["platforms"])
               if i in state["sel_platforms"]]
-    lines = []
-    if state.get("auto_published"):
-        lines.append(f"⏱ picker untouched for {_AUTO_PUBLISH_S // 60} min")
-    lines.append(f"🚀 publishing to {' · '.join(ticked)} in {int(left)} s")
-    lines.append("✕ Cancel stops every post — nothing has gone out yet")
+    lines = [f"🚀 publishing to {' · '.join(ticked)} in {int(left)} s",
+             "✕ Cancel stops every post — nothing has gone out yet"]
     return "\n\n".join(lines)
 
 
 def _start_countdown(bot, state: dict, message) -> None:
-    """Publish (the 🚀 tap or the idle clock) lands here: the picker becomes a
-    countdown, and _do_publish runs only if nobody cancels it. The task sits
-    in the same slot as the idle clock, so ✕ Cancel → _cleanup stops it."""
-    _disarm_auto_publish(state)
+    """The 🚀 tap lands here: the picker becomes a countdown, and _do_publish
+    runs only if nobody cancels it. ✕ Cancel → _cleanup stops it."""
+    _stop_countdown(state)
     state["mode"] = "countdown"
-    state["auto_task"] = asyncio.create_task(_countdown(bot, state, message))
+    state["countdown_task"] = asyncio.create_task(_countdown(bot, state, message))
+
+
+def _stop_countdown(state: dict) -> None:
+    """Cancel a running countdown — never the task running this very call,
+    which is the countdown itself on its way through _do_publish."""
+    task = state.pop("countdown_task", None)
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
 
 
 async def _countdown(bot, state: dict, message) -> None:
@@ -1452,7 +1396,6 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
     if verb.startswith("p:") and state.get("mode") == "publish":
         await q.answer()
         state["sel_platforms"] ^= {int(verb.split(":", 1)[1])}
-        _arm_auto_publish(context.bot, state, q.message)
         await q.edit_message_reply_markup(
             branded.platform_keyboard(state["platforms"],
                                       state["sel_platforms"]))
@@ -1471,9 +1414,6 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
             await q.answer("Pick at least one platform.", show_alert=True)
             return
         await q.answer()
-        # The idle clock would publish from under the time picker; Back
-        # re-arms it.
-        _disarm_auto_publish(state)
         state["mode"] = "schedule"
         await q.edit_message_text(
             schedule.picker_text(schedule.ticked_labels(
@@ -1491,14 +1431,12 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
                            show_alert=True)
             return
         await q.answer()
-        _disarm_auto_publish(state)
         await _schedule_post(context, state, q.message, when)
         return
 
     if verb == "back" and state.get("mode") == "schedule":
         await q.answer()
         state["mode"] = "publish"
-        _arm_auto_publish(context.bot, state, q.message)
         await q.edit_message_text(
             _publish_prompt_text(state),
             reply_markup=branded.platform_keyboard(state["platforms"],
@@ -2121,7 +2059,6 @@ async def _do_render(q, context, state: dict) -> None:
 
     _pending.pop(q.message.message_id, None)
     _pending[prompt.message_id] = state
-    _arm_auto_publish(context.bot, state, prompt)
 
 
 async def _ensure_local_photos(bot, state: dict) -> list[str]:
@@ -2250,7 +2187,6 @@ async def _do_render_card(q, context, state: dict) -> None:
 
     _pending.pop(q.message.message_id, None)
     _pending[prompt.message_id] = state
-    _arm_auto_publish(context.bot, state, prompt)
 
 
 # Telegram's limit on a media caption. A longer IG caption goes in a reply.
@@ -2479,11 +2415,10 @@ async def _publish_pairs(message, bot, state: dict) -> None:
     already translated per brand — Telegram destinations get lang "" so
     publisher.publish doesn't translate again.
 
-    Takes the picker message rather than a callback query: the 🚀 Publish tap
-    and the idle auto-publish (`_auto_publish`) both end up here."""
+    Takes the picker message rather than a callback query: the 🚀 Publish
+    countdown and a scheduled post both end up here."""
     pairs = branded.expand(state["platforms"], state["sel_platforms"])
     _pending.pop(message.message_id, None)
-    _disarm_auto_publish(state)
     await message.edit_text(
         "⏳ publishing " + ", ".join(p["label"] for p in pairs) + " …")
 
@@ -2600,8 +2535,6 @@ async def _publish_pairs(message, bot, state: dict) -> None:
             failed.add(p["platform"])
     state["failed_platforms"] = sorted(failed)
 
-    if state.get("auto_published"):
-        lines.insert(0, f"⏱ auto-published after {_AUTO_PUBLISH_S // 60} min idle")
     if state.get("note"):
         lines.insert(0, state["note"])
     if not (failed and state.get("bundle")):
@@ -2947,9 +2880,6 @@ async def _render_bundle(q, context, bid: int) -> None:
                                reply_markup=bundle.open_keyboard(bid))
         await asyncio.to_thread(queue_store.claim_bundle, bid, "ready", "open")
         return
-    if config.BUNDLE_AUTO_PUBLISH:
-        await _publish_bundle(context, bid, status)
-        return
     await status.edit_text(_summary(bid, plan, bndl["platforms"]),
                            reply_markup=bundle.ready_keyboard(bid))
 
@@ -3208,14 +3138,12 @@ async def _follower_count_job(context) -> None:
              len(results))
 
 
-# What the group's command menu (the "/" button) offers. /autopilot and /next
-# still work but are left out: unattended posting is prohibited (CLAUDE.md).
+# What the group's command menu (the "/" button) offers.
 _MENU = [
     BotCommand("report", "📊 latest reel of every account: views, likes, comments"),
     BotCommand("followers", "👥 followers gained this week, every account"),
     BotCommand("bundle", "the open bundle with its buttons"),
     BotCommand("scheduled", "posts waiting to go out"),
-    BotCommand("queue", "what's in the news queue"),
 ]
 
 
@@ -3537,131 +3465,11 @@ async def cmd_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🕒 scheduled:\n\n" + "\n\n".join(lines)))
 
 
-# --------------------------------------------------------------------------- #
-# Reaction asks (autopilot posts)                                             #
-# --------------------------------------------------------------------------- #
-
-
-async def _on_ask_callback(q, context) -> None:
-    """Taps on an autopilot reaction ask ("r:<ask_id>:<verb>").
-
-    All the state is in SQLite and the ask id rides in the callback data, so
-    these keep working across a bot restart — unlike the manual picker, whose
-    state is deliberately in-memory and short-lived."""
-    try:
-        _, raw_id, verb = q.data.split(":", 2)
-        ask_id = int(raw_id)
-    except ValueError:
-        await q.answer()
-        return
-
-    ask = queue_store.get_ask(ask_id)
-    if ask is None or ask["status"] != "open":
-        await q.answer("That ask is already closed.", show_alert=True)
-        return
-    await q.answer()
-
-    state, action = reactions.reduce(ask["state"], verb)
-    queue_store.save_ask_state(ask_id, state)
-
-    if action is None:
-        text, keyboard = reactions.render(ask_id, state)
-        try:
-            await q.edit_message_text(text, reply_markup=keyboard,
-                                      disable_web_page_preview=True)
-        except Exception:  # "message is not modified" — same tap twice
-            pass
-        return
-
-    if action == "apply":
-        # Ordering is blocking HTTP — keep the bot's event loop free.
-        n = await asyncio.to_thread(reactions.apply_orders, state)
-        queue_store.close_ask(ask_id, "applied")
-        await q.edit_message_text(f"{reactions.summary(state, True)}\n({n} order(s) placed)")
-    else:
-        queue_store.close_ask(ask_id, "skipped")
-        await q.edit_message_text(reactions.summary(state, False))
-
-
-# --------------------------------------------------------------------------- #
-# Commands                                                                    #
-# --------------------------------------------------------------------------- #
-
-
-async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/queue — what the smart filter is holding and what goes out next."""
-    # Commands bypass on_message (~filters.COMMAND), so each one tracks its own
-    # trigger message for the weekly wipe.
-    _track(update.effective_message)
-    counts = queue_store.counts()
-    # compare=False: a status command shouldn't burn a model call. The real
-    # pick is made head-to-head at post time, so this is the front-runner.
-    item, targets = autopilot.pick(compare=False)
-    lines = [
-        "📊 " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "empty"),
-        f"autopilot: {'on' if autopilot.is_enabled() else 'paused'} · "
-        f"every {config.TG_DRIP_MIN_S // 3600}-{config.TG_DRIP_MAX_S // 3600} h · "
-        f"score ≥ {config.TG_AUTO_MIN_SCORE} · max age {config.TG_MAX_AGE_H}h",
-        "",
-        "front-runner: " + (autopilot.describe(item, targets) if item else "nothing eligible"),
-    ]
-    if item:
-        lines.append(f"(final pick compared across the top {config.TG_COMPARE_TOP} at post time)")
-    per_channel = queue_store.channel_post_counts()
-    if per_channel:
-        lines.append(
-            f"\n📣 posts per channel (channel order every {reactions.CHANNEL_POST_THRESHOLD}): "
-            + ", ".join(f"{k} {v}" for k, v in per_channel.items())
-        )
-    open_n = len(queue_store.open_asks())
-    if open_n:
-        lines.append(f"\n🎛 {open_n} reaction ask(s) waiting — /asks")
-    _track(await update.effective_message.reply_text("\n".join(lines)))
-
-
-async def cmd_autopilot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/autopilot [on|off] — pause or resume the drip without a restart."""
-    _track(update.effective_message)
-    arg = (context.args[0].lower() if context.args else "")
-    if arg in ("on", "off"):
-        autopilot.set_enabled(arg == "on")
-    _track(await update.effective_message.reply_text(
-        f"autopilot is {'on' if autopilot.is_enabled() else 'paused'}"
-        + ("" if arg in ("on", "off") else "  (use /autopilot on|off to change)")
-    ))
-
-
-async def cmd_asks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/asks — re-render every unanswered reaction ask, including any whose
-    message never made it out because the bot died mid-tick."""
-    _track(update.effective_message)
-    asks = queue_store.open_asks()
-    if not asks:
-        _track(await update.effective_message.reply_text("no open reaction asks"))
-        return
-    for ask in asks:
-        await autopilot.refresh_ask(context.bot, ask)
-    _track(await update.effective_message.reply_text(f"re-sent {len(asks)} open ask(s)"))
-
-
-async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/next — run one drip right now. The scheduled tick is untouched."""
-    _track(update.effective_message)
-    msg = _track(await update.effective_message.reply_text("⏳ running one drip …"))
-    await msg.edit_text(await autopilot.tick(context.bot))
-
-
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle taps on the channel picker and on autopilot reaction asks."""
+    """Handle taps on the channel picker and the brand-it flow."""
     q = update.callback_query
     if q.message is None:
         await q.answer()
-        return
-
-    # Asks may live in a different chat (TG_ASK_CHAT_ID) than the control
-    # group, so they're routed before the control-group check below.
-    if (q.data or "").startswith("r:"):
-        await _on_ask_callback(q, context)
         return
 
     if q.message.chat.id != CHAT_ID:
@@ -3836,9 +3644,8 @@ def _sweep_orphans() -> None:
 
 
 async def _weekly_cleanup_job(context) -> None:
-    """Mondays 04:00 local: wipe the control group (tracked messages + open
-    asks). Needs the "Delete messages" admin right for the operator's own
-    messages."""
+    """Mondays 04:00 local: wipe the control group's tracked messages. Needs
+    the "Delete messages" admin right for the operator's own messages."""
     try:
         deleted, failed = await cleanup.wipe_chat(context.bot, CHAT_ID)
         log.info("weekly cleanup: %d deleted, %d failed", deleted, failed)
@@ -3896,11 +3703,9 @@ async def _heartbeat_job(context) -> None:
 
 
 async def _on_start(app) -> None:
-    """Queue the autopilot's first tick once the event loop is running, register
-    the weekly cleanup, and connect the big-file client so its state is known
-    (and logged) before the first post rather than discovered mid-upload."""
-    if not config.LITE:
-        autopilot.schedule(app)
+    """Once the event loop is running: set the command menu, register the
+    jobs, and connect the big-file client so its state is known (and logged)
+    before the first post rather than discovered mid-upload."""
     try:
         await app.bot.set_my_commands([] if config.LITE else _MENU,
                                       scope=BotCommandScopeChat(CHAT_ID))
@@ -3992,7 +3797,7 @@ def main() -> None:
     errmail.install("lite-render-bot" if config.LITE else "news_bot")
     _write_busy()  # nothing is running yet: clear a marker a crash left behind
     _sweep_orphans()
-    queue_store.init()  # the autopilot reads/writes the same DB as the collector
+    queue_store.init()
     # PTB's 5 s read timeout is too tight for the VPS: Telegram delivered a
     # "⏳ downloading …" reply but answered after 5 s, the send raised
     # TimedOut and the handler died before the download started — leaving a
@@ -4010,10 +3815,6 @@ def main() -> None:
                  ", ".join(b["name"] for b in config.BRANDS), config.TG_DATA_DIR)
         app.run_polling(allowed_updates=Update.ALL_TYPES)
         return
-    app.add_handler(CommandHandler("queue", cmd_queue, filters=control))
-    app.add_handler(CommandHandler("autopilot", cmd_autopilot, filters=control))
-    app.add_handler(CommandHandler("asks", cmd_asks, filters=control))
-    app.add_handler(CommandHandler("next", cmd_next, filters=control))
     app.add_handler(CommandHandler("scheduled", cmd_scheduled, filters=control))
     app.add_handler(CommandHandler("bundle", cmd_bundle, filters=control))
     app.add_handler(CommandHandler("report", cmd_report, filters=control))
@@ -4042,12 +3843,6 @@ def main() -> None:
         "instagram (graph api): %d account(s): %s | media hosting: %s",
         len(config.IG_GRAPH_ACCOUNTS), ", ".join(config.IG_GRAPH_ACCOUNTS) or "—",
         config.PUBLIC_MEDIA_BASE_URL or "NOT CONFIGURED (IG publishing will fail)",
-    )
-    log.info(
-        "autopilot %s: score >= %d, every %.1f-%.1f h, top %d compared at post time, asks in chat %s",
-        "on" if autopilot.is_enabled() else "paused",
-        config.TG_AUTO_MIN_SCORE, config.TG_DRIP_MIN_S / 3600, config.TG_DRIP_MAX_S / 3600,
-        config.TG_COMPARE_TOP, autopilot.ask_chat_id(),
     )
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

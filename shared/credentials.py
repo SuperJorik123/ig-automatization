@@ -29,8 +29,8 @@ a brand is two paths and nothing else. Deleting a brand is deleting its file;
 handing one brand's credentials to someone is sending one file, with no way to
 leak a sibling's keys by accident.
 
-SHARED services stay in .env — OpenRouter, BulkFollows, SMTP, the bot tokens,
-the autopilot knobs are common to every brand and were never per-account.
+SHARED services stay in .env — OpenRouter, BulkFollows, SMTP, the bot tokens
+are common to every brand and were never per-account.
 These files are only ever about accounts a brand owns.
 
 They are EXPANDED INTO os.environ by shared/config.py at import, so every

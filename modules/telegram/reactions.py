@@ -1,38 +1,14 @@
 """
-modules/telegram/reactions.py — the BulkFollows side of publishing: which
-emoji can be ordered, the "which reactions?" ask, and the orders themselves.
+modules/telegram/reactions.py — the BulkFollows side of manual publishing:
+which emoji can be ordered, and the orders themselves.
 
-Split out of news_bot.py so the manual picker and the autopilot share one
-catalogue and one set of ordering rules instead of drifting apart.
-
-Two halves:
-
-  ORDERS      order_post / order_emoji / record_posts — thin, logged, never
-              raising wrappers over smm.place_order. Blocking HTTP: async
-              callers hand them to asyncio.to_thread.
-
-  THE ASK     a pure state machine (new_state / reduce / orders_from /
-              render) driving the message the operator taps. The state is a
-              plain JSON-able dict that lives in SQLite, so a bot restart
-              doesn't strand a published post without its reactions, and the
-              whole flow is testable without a Telegram connection.
-
-Ask state:
-    {"item_id": 41,
-     "mode": "all" | "per",     # one set for every channel, or per channel
-     "cur": 0,                  # channel being edited in "per" mode
-     "chans": [{"chat_id": "@news_eu", "link": "https://t.me/news_eu/412"}, ...],
-     "sel": {"0": [0, 1], "1": [0]}}   # channel index (str) -> emoji indices
-
-In "all" mode a toggle is written to every channel at once, so switching to
-"per" mode carries the current selection over as each channel's starting
-point — pick the common set first, then adjust the odd one out.
+order_post / order_emoji / record_posts are thin, logged, never raising
+wrappers over smm.place_order. Blocking HTTP: async callers hand them to
+asyncio.to_thread.
 """
 
 import logging
 import random
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from shared import config
 from modules.telegram import queue_store, smm
@@ -127,9 +103,8 @@ def record_posts(posted: list, links: list, emojis: list | None = None) -> None:
     (chat_id, url) pairs — a channel can succeed without yielding a link, and
     that post is counted but cannot be ordered against.
 
-    `emojis` are reactions to order immediately for every posted channel, as
-    the manual picker does (it asks before posting). The autopilot passes None
-    and opens an ask instead, applying the reactions later."""
+    `emojis` are the reactions the operator ticked on the picker, ordered
+    immediately for every posted channel."""
     by_chat = dict(links)
     log.info("BulkFollows: %d channel(s) posted — %s | %d reaction(s): %s",
              len(posted), ", ".join(posted), len(emojis or []),
@@ -147,145 +122,3 @@ def record_posts(posted: list, links: list, emojis: list | None = None) -> None:
         log.info("[%s] post %d (channel order every %d)", chat_id, n, CHANNEL_POST_THRESHOLD)
         if n % CHANNEL_POST_THRESHOLD == 0:
             order_channel_threshold(chat_id, link)
-
-
-def apply_orders(state: dict) -> int:
-    """Place every (channel, emoji) order the ask selected. Blocking — call it
-    through asyncio.to_thread. Returns the number of orders attempted."""
-    orders = orders_from(state)
-    for chat_id, link, emoji in orders:
-        order_emoji(chat_id, link, emoji)
-    return len(orders)
-
-
-# --------------------------------------------------------------------------- #
-# The ask: pure state machine                                                 #
-# --------------------------------------------------------------------------- #
-
-
-def new_state(item_id: int, channels: list) -> dict:
-    """Initial ask state. `channels` is [{"chat_id", "link"}] — normally the
-    links publisher.publish handed back."""
-    return {
-        "item_id": item_id,
-        "mode": "all",
-        "cur": 0,
-        "chans": [{"chat_id": c["chat_id"], "link": c.get("link")} for c in channels],
-        "sel": {str(i): [] for i in range(len(channels))},
-    }
-
-
-def _selected(state: dict, idx: int) -> list:
-    return state["sel"].get(str(idx), [])
-
-
-def reduce(state: dict, verb: str) -> tuple[dict, str | None]:
-    """Apply one button press. Returns (new_state, action) where action is
-    None (redraw), "apply" or "skip" (the caller finishes the ask).
-
-    Pure: no I/O, no globals. The verb is the part of callback_data after the
-    ask id — t<i> toggle, pc per-channel mode, nx/pv navigate, ap apply,
-    sk skip."""
-    state = {**state, "sel": dict(state["sel"])}
-    n = len(state["chans"])
-
-    if verb.startswith("t") and verb[1:].isdigit():
-        i = int(verb[1:])
-        # "all" mode keeps every channel in sync, so switching to per-channel
-        # later starts from what you already picked.
-        targets = range(n) if state["mode"] == "all" else [state["cur"]]
-        for t in targets:
-            sel = list(_selected(state, t))
-            state["sel"][str(t)] = [x for x in sel if x != i] if i in sel else sorted(sel + [i])
-        return state, None
-
-    if verb == "pc":
-        state["mode"] = "per"
-        return state, None
-
-    if verb in ("nx", "pv") and n:
-        step = 1 if verb == "nx" else -1
-        state["cur"] = (state["cur"] + step) % n  # wraps, so you can't get stuck
-        return state, None
-
-    if verb == "ap":
-        return state, "apply"
-    if verb == "sk":
-        return state, "skip"
-    return state, None
-
-
-def orders_from(state: dict) -> list:
-    """[(chat_id, link, emoji)] the current selection would order. Channels
-    that never produced a public link are skipped — there is nothing to order
-    against — and logged by the caller via summary()."""
-    out = []
-    for i, chan in enumerate(state["chans"]):
-        if not chan.get("link"):
-            continue
-        for e in _selected(state, i):
-            if 0 <= e < len(EMOJI_SERVICES):
-                out.append((chan["chat_id"], chan["link"], EMOJI_SERVICES[e]))
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# The ask: rendering                                                          #
-# --------------------------------------------------------------------------- #
-
-
-def render(ask_id: int, state: dict) -> tuple[str, InlineKeyboardMarkup]:
-    """Message text + keyboard for an open ask."""
-    chans = state["chans"]
-    n = len(chans)
-    if state["mode"] == "all":
-        head = [f"🎛 Reactions · item {state['item_id']} · {n} channel(s)"]
-        for c in chans:
-            head.append(f"• {c['chat_id']} — {c.get('link') or 'no public link'}")
-        shown = _selected(state, 0)
-    else:
-        cur = state["cur"]
-        c = chans[cur] if chans else {"chat_id": "—", "link": None}
-        head = [
-            f"🎛 Reactions · item {state['item_id']}",
-            f"{cur + 1}/{n} · {c['chat_id']}",
-            c.get("link") or "no public link — reactions can't be ordered here",
-        ]
-        shown = _selected(state, cur)
-
-    rows = []
-    for i in range(0, len(EMOJI_SERVICES), 2):
-        row = []
-        for j, em in enumerate(EMOJI_SERVICES[i:i + 2], start=i):
-            mark = "☑" if j in shown else "☐"
-            row.append(InlineKeyboardButton(f"{mark} {face(em)}", callback_data=f"r:{ask_id}:t{j}"))
-        rows.append(row)
-
-    if state["mode"] == "all":
-        rows.append([InlineKeyboardButton(f"✅ Apply to all {n} channel(s)",
-                                          callback_data=f"r:{ask_id}:ap")])
-        rows.append([InlineKeyboardButton("⚙ Per-channel…", callback_data=f"r:{ask_id}:pc"),
-                     InlineKeyboardButton("✕ Skip", callback_data=f"r:{ask_id}:sk")])
-    else:
-        rows.append([InlineKeyboardButton("◂ prev", callback_data=f"r:{ask_id}:pv"),
-                     InlineKeyboardButton("next ▸", callback_data=f"r:{ask_id}:nx")])
-        rows.append([InlineKeyboardButton("✅ Apply all", callback_data=f"r:{ask_id}:ap"),
-                     InlineKeyboardButton("✕ Skip", callback_data=f"r:{ask_id}:sk")])
-
-    head.append("Pick the reactions to buy, then Apply.")
-    return "\n".join(head), InlineKeyboardMarkup(rows)
-
-
-def summary(state: dict, applied: bool) -> str:
-    """What the ask message becomes once it's answered."""
-    if not applied:
-        return f"✕ reactions skipped · item {state['item_id']}"
-    lines = [f"✅ reactions ordered · item {state['item_id']}"]
-    for i, chan in enumerate(state["chans"]):
-        picked = " ".join(face(EMOJI_SERVICES[e]) for e in _selected(state, i)
-                          if 0 <= e < len(EMOJI_SERVICES))
-        if not chan.get("link"):
-            lines.append(f"• {chan['chat_id']}: — (no public link)")
-        else:
-            lines.append(f"• {chan['chat_id']}: {picked or '—'}")
-    return "\n".join(lines)
