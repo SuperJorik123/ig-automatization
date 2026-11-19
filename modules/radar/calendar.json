@@ -1,0 +1,4 @@
+{
+  "_note": "Your own dates for the evening briefing (big games, verdicts, announced protests, launches). Yearly US dates (July 4, Black Friday…) are built in — don't repeat them here. Format: {\"date\": \"YYYY-MM-DD\", \"title\": \"…\"}.",
+  "events": []
+}

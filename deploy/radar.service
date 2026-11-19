@@ -1,0 +1,26 @@
+# /etc/systemd/system/radar.service — the OSINT radar (ALERTS ONLY).
+# Same checkout; everything it needs is in .env.radar (template:
+# deploy/radar.env.example). It posts nowhere but its own Radar group.
+#
+#   cp deploy/radar.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now radar
+#   journalctl -u radar -f
+[Unit]
+Description=OSINT radar (alerts to the Radar group; never publishes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/ig-automatization2
+Environment=ENV_FILE=/opt/ig-automatization2/.env.radar
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/ig-automatization2/.venv/bin/python -m modules.radar
+# Below the bots: rendering and publishing always come first.
+Nice=15
+# 2 GB VPS shared with three bots and their renders.
+MemoryMax=300M
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

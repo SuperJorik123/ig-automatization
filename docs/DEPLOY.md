@@ -292,9 +292,10 @@ tar czf app.tar.gz --exclude=.git --exclude=__pycache__ --exclude=node_modules \
     --exclude=.env --exclude='.env.*' --exclude='credentials/*' \
     --exclude='posts/*' --exclude='modules/telegram/data/*' \
     --exclude='modules/telegram/data_lite/*' --exclude='modules/newsroom/data/*' \
-    --exclude='backup_*' --exclude=conversationplan.md --exclude=.claude \
+    --exclude='modules/radar/data/*' --exclude='backup_*' --exclude=conversationplan.md --exclude=.claude \
     --exclude=.vexp --exclude=.pytest_cache \
     --exclude='tools/find_original/chrome-profile' --exclude='tools/find_original/runs' .
+# modules/radar/data/ holds the radar's db and its listening account's session.
 # modules/newsroom/data/ is the newsroom bot's LIVE db on the VPS (a local copy
 # would overwrite it); backup_* holds brand credentials; chrome-profile holds
 # browser cookies. Check before uploading:

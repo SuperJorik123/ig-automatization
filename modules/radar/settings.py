@@ -1,0 +1,100 @@
+"""Radar settings — read from its OWN env file, never the bots' `.env`.
+
+The radar is a separate process with its own bot token, group and Telegram
+listening account. It deliberately does not import `shared.config`: that module
+loads every brand's credentials into the environment, and the radar has no
+business holding a single posting token. `ENV_FILE` (default `.env.radar`)
+names the file; see `deploy/radar.env.example`.
+"""
+import os
+
+from dotenv import load_dotenv
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ENV_FILE = os.environ.get("ENV_FILE", "").strip() or ".env.radar"
+if not os.path.isabs(ENV_FILE):
+    ENV_FILE = os.path.join(ROOT_DIR, ENV_FILE)
+load_dotenv(ENV_FILE)
+
+
+def _str(name: str, default: str = "") -> str:
+    return os.environ.get(name, "").strip() or default
+
+
+def _int(name: str, default: int) -> int:
+    try:
+        return int(_str(name) or default)
+    except ValueError:
+        return default
+
+
+def _list(name: str, default: str) -> list:
+    return [s.strip() for s in _str(name, default).split(",") if s.strip()]
+
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# --- Telegram: the alert bot + the group it writes to ----------------------
+BOT_TOKEN = _str("RADAR_BOT_TOKEN")
+CHAT_ID = _int("RADAR_CHAT_ID", 0)  # a SUPERgroup (-100…) — see docs/RADAR_PLAN.md
+
+# --- Telegram: the LISTENING user account (a spare one, not the bots') ------
+API_ID = _str("RADAR_API_ID") or _str("TELEGRAM_API_ID")
+API_HASH = _str("RADAR_API_HASH") or _str("TELEGRAM_API_HASH")
+DATA_DIR = _str("RADAR_DATA_DIR", os.path.join(HERE, "data"))
+SESSION = os.path.join(DATA_DIR, "listener")
+DB_PATH = os.path.join(DATA_DIR, "radar.db")
+CHANNELS_FILE = _str("RADAR_CHANNELS_FILE", os.path.join(HERE, "channels.json"))
+CALENDAR_FILE = _str("RADAR_CALENDAR_FILE", os.path.join(HERE, "calendar.json"))
+
+# --- AI labelling (OpenRouter) ---------------------------------------------
+OPENROUTER_API_KEY = _str("OPENROUTER_API_KEY")
+LABEL_MODEL = _str("RADAR_LABEL_MODEL", "google/gemini-2.5-flash")
+AI_MAX_PER_DAY = _int("RADAR_AI_MAX_PER_DAY", 400)  # 0 = no AI, rules only
+
+# --- Alerting ---------------------------------------------------------------
+# Alerts go out the moment an incident crosses the bar — any hour (owner,
+# 2026-11-19). MAX_PER_HOUR is only a runaway guard; 0 = no cap.
+ALERT_MIN_SCORE = _int("RADAR_ALERT_MIN_SCORE", 60)
+MAX_PER_HOUR = _int("RADAR_MAX_PER_HOUR", 0)
+# Categories never alerted (labels from label.CATEGORIES), e.g. "war,politics".
+BLOCK_CATEGORIES = set(_list("RADAR_BLOCK_CATEGORIES", ""))
+US_BONUS = _int("RADAR_US_BONUS", 10)
+# Videos up to this size are copied into the group when a channel forbids
+# forwarding; bigger ones are linked.
+MAX_COPY_MB = _int("RADAR_MAX_COPY_MB", 50)
+
+# --- Clustering + spikes ----------------------------------------------------
+CLUSTER_WINDOW_H = _int("RADAR_CLUSTER_WINDOW_H", 3)
+SPIKE_WINDOW_H = _int("RADAR_SPIKE_WINDOW_H", 2)
+SPIKE_RATIO = _int("RADAR_SPIKE_RATIO", 3)
+SPIKE_MIN_HITS = _int("RADAR_SPIKE_MIN_HITS", 6)
+SPIKE_MIN_SOURCES = _int("RADAR_SPIKE_MIN_SOURCES", 3)
+SPIKE_COOLDOWN_H = _int("RADAR_SPIKE_COOLDOWN_H", 3)
+SPIKE_CHECK_S = _int("RADAR_SPIKE_CHECK_S", 300)
+
+# --- Reddit -----------------------------------------------------------------
+REDDIT_CLIENT_ID = _str("REDDIT_CLIENT_ID")
+REDDIT_CLIENT_SECRET = _str("REDDIT_CLIENT_SECRET")
+REDDIT_SUBS = _list("RADAR_REDDIT_SUBS", ",".join([
+    "PublicFreakout", "ActualPublicFreakouts", "CrazyFuckingVideos",
+    "Damnthatsinteresting", "nextfuckinglevel", "WeatherGifs", "IdiotsInCars",
+    "iamatotalpieceofshit", "instant_regret", "TikTokCringe", "Whatcouldgowrong",
+    "CatastrophicFailure", "news", "worldnews", "PoliceChases",
+]))
+REDDIT_POLL_S = _int("RADAR_REDDIT_POLL_S", 180)
+REDDIT_MAX_AGE_H = _int("RADAR_REDDIT_MAX_AGE_H", 4)
+REDDIT_MIN_UPS = _int("RADAR_REDDIT_MIN_UPS", 50)
+
+# --- Hazard feeds -----------------------------------------------------------
+HAZARD_POLL_S = _int("RADAR_HAZARD_POLL_S", 300)
+QUAKE_MIN_WORLD = float(_str("RADAR_QUAKE_MIN_WORLD", "6.0"))
+QUAKE_MIN_US = float(_str("RADAR_QUAKE_MIN_US", "4.8"))
+
+# --- Evening briefing -------------------------------------------------------
+TZ = _str("RADAR_TZ", "Europe/Chisinau")
+BRIEFING_AT = _str("RADAR_BRIEFING_AT", "21:00")  # "" = off
+
+# Contact string in the User-Agent the NWS and Reddit ask for — generic on
+# purpose (no owner name or e-mail goes to outside services).
+USER_AGENT = _str("RADAR_USER_AGENT", "news-radar/1.0")

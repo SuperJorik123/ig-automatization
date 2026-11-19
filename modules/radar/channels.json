@@ -1,0 +1,27 @@
+{
+  "_note": "DRAFT for the owner to strike/add. Public Telegram channels the radar's listening account joins (`py -m modules.radar --join`). Only posts WITH VIDEO can alert; text posts feed grouping + spikes. Starting set = World Monitor's breaking/OSINT channels (data/telegram-channels.json in koala73/worldmonitor) + the old collector's sources. Their state-media / militant-wing channels were left out on purpose. `py -m modules.radar --check` says which handles don't resolve.",
+  "channels": [
+    {"handle": "BNONews",               "why": "breaking news, worldwide, often first"},
+    {"handle": "spectatorindex",        "why": "breaking headlines, huge reach"},
+    {"handle": "wfwitness",             "why": "eyewitness footage"},
+    {"handle": "LiveUAMap",             "why": "geolocated incidents"},
+    {"handle": "OSINTdefender",         "why": "breaking + video"},
+    {"handle": "OsintUpdates",          "why": "breaking"},
+    {"handle": "osintlive",             "why": "breaking"},
+    {"handle": "Osintlatestnews",       "why": "breaking"},
+    {"handle": "OsintTv",               "why": "video-heavy"},
+    {"handle": "ClashReport",           "why": "clashes, protests, video (old collector source)"},
+    {"handle": "AuroraIntel",           "why": "breaking, conflict"},
+    {"handle": "nexta_tv",              "why": "Europe/Eastern Europe video (Russian-language)"},
+    {"handle": "war_monitor",           "why": "conflict, breaking"},
+    {"handle": "MiddleEastNow_Breaking","why": "Middle East breaking"},
+    {"handle": "Middle_East_Spectator", "why": "Middle East breaking"},
+    {"handle": "TimesofIsrael",         "why": "Israel breaking"},
+    {"handle": "IranIntl_En",           "why": "Iran protests/video"},
+    {"handle": "france24_en",           "why": "France/Europe"},
+    {"handle": "dsns_telegram",         "why": "Ukraine emergency service: fires, rescues (video)"},
+    {"handle": "InaTEWS_BMKG",          "why": "Indonesia quakes/tsunami warnings"},
+    {"handle": "remarks",               "why": "old collector source"},
+    {"handle": "bricsnews",             "why": "old collector source (viral, partisan — read critically)"}
+  ]
+}
