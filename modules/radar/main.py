@@ -40,6 +40,17 @@ def _markup(rows):
                                  for row in rows])
 
 
+def _handles(entity) -> set:
+    """Every @username a channel answers to, lower-cased. Channels with
+    collectible (Fragment) usernames keep them in `usernames`, and their
+    `username` is then None — matching only `username` missed 3 of 22."""
+    names = {(getattr(entity, "username", "") or "").lower()}
+    for u in getattr(entity, "usernames", None) or []:
+        names.add((getattr(u, "username", "") or "").lower())
+    names.discard("")
+    return names
+
+
 class Notifier:
     """Puts things in the Radar group: the bot writes, the listening account
     forwards the videos (a bot can't forward from a channel it isn't in)."""
@@ -191,9 +202,9 @@ class Radar:
         wanted = {h.lower() for h in tgsrc.load_channels()}
         watch = {}
         async for d in client.iter_dialogs():
-            uname = (getattr(d.entity, "username", "") or "").lower()
-            if d.is_channel and uname in wanted:
-                watch[d.id] = d.entity.username
+            hit = _handles(d.entity) & wanted if d.is_channel else set()
+            if hit:
+                watch[d.id] = next(h for h in tgsrc.load_channels() if h.lower() in hit)
         missing = wanted - {u.lower() for u in watch.values()}
         if missing:
             log.warning("not joined (run --join): %s", ", ".join(sorted(missing)))
@@ -296,7 +307,10 @@ class Radar:
             except Exception:
                 log.exception("Telegram listener failed to start")
             jq = app.job_queue
-            jq.run_repeating(self.poll_reddit, S.REDDIT_POLL_S, first=20, name="reddit")
+            if S.REDDIT_CLIENT_ID and S.REDDIT_CLIENT_SECRET:
+                jq.run_repeating(self.poll_reddit, S.REDDIT_POLL_S, first=20, name="reddit")
+            else:
+                log.info("Reddit off — no REDDIT_CLIENT_ID/SECRET (keyless JSON is 403)")
             jq.run_repeating(self.poll_hazards, S.HAZARD_POLL_S, first=10, name="hazards")
             jq.run_repeating(self.check_spikes, S.SPIKE_CHECK_S, first=60, name="spikes")
             jq.run_repeating(self.prune, 86400, first=300, name="prune")
@@ -368,8 +382,10 @@ async def _join():
     client = TelegramClient(S.SESSION, int(S.API_ID), S.API_HASH)
     await client.connect()
     try:
-        joined = {(getattr(d.entity, "username", "") or "").lower()
-                  async for d in client.iter_dialogs() if d.is_channel}
+        joined = set()
+        async for d in client.iter_dialogs():
+            if d.is_channel:
+                joined |= _handles(d.entity)
         todo = [h for h in tgsrc.load_channels() if h.lower() not in joined]
         print(f"{len(todo)} channel(s) to join")
         for h in todo:
@@ -392,8 +408,10 @@ async def _check():
     client = TelegramClient(S.SESSION, int(S.API_ID), S.API_HASH)
     await client.connect()
     try:
-        joined = {(getattr(d.entity, "username", "") or "").lower()
-                  async for d in client.iter_dialogs() if d.is_channel}
+        joined = set()
+        async for d in client.iter_dialogs():
+            if d.is_channel:
+                joined |= _handles(d.entity)
         for h in tgsrc.load_channels():
             print(("✅ " if h.lower() in joined else "❌ not joined ") + "@" + h)
     finally:
@@ -416,7 +434,8 @@ def _hazards_now():
 
 def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    for noisy in ("httpx", "apscheduler", "telethon.network"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="radar")
     p.add_argument("--login", action="store_true")
     p.add_argument("--phone", action="store_true",
