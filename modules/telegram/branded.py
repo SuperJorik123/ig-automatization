@@ -233,7 +233,9 @@ def platform_keyboard(platforms: list, selected: set) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✕ Cancel", callback_data="b:cancel"),
     ])
     # Same platforms, later: see modules/telegram/schedule.py.
-    rows.append([InlineKeyboardButton("🕒 Schedule", callback_data="b:sched")])
+    # 🇺🇸 = the next free US-evening slot in one tap (schedule.next_us_slot).
+    rows.append([InlineKeyboardButton("🇺🇸 US evening", callback_data="b:us"),
+                 InlineKeyboardButton("🕒 Schedule", callback_data="b:sched")])
     return InlineKeyboardMarkup(rows)
 
 

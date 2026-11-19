@@ -137,3 +137,58 @@ def test_the_source_post_survives_the_round_trip():
     state, _ = schedule.from_payload(schedule.to_payload(st), [
         {"name": "a", "tw": "acc_a", "ig": "ig_a"}, {"name": "b", "tw": "acc_b"}])
     assert state["source"] == {"platform": "x", "text": "t", "author": "a"}
+
+
+# --- US evening slots --------------------------------------------------------
+
+US = schedule.US_TZ
+
+
+def us(*args):
+    return dt.datetime(*args, tzinfo=US)
+
+
+def test_us_slot_is_8pm_eastern_tonight():
+    # 15:20 Chisinau = 08:20 New York (both on summer time in mid-October)
+    when = schedule.next_us_slot((), NOW)
+    assert when == us(2026, 10, 13, 20, 0)
+    assert when.astimezone(TZ).hour == 3            # 03:00 in Chisinau
+
+
+def test_us_slot_skips_taken_times_in_preference_order():
+    taken = [us(2026, 10, 13, 20, 0)]
+    assert schedule.next_us_slot(taken, NOW) == us(2026, 10, 13, 19, 0)
+    taken.append(us(2026, 10, 13, 19, 10))           # within 45 min of 19:00
+    assert schedule.next_us_slot(taken, NOW) == us(2026, 10, 13, 21, 0)
+
+
+def test_us_slot_after_the_window_is_tomorrow_evening():
+    late = us(2026, 10, 13, 23, 30)
+    assert schedule.next_us_slot((), late) == us(2026, 10, 14, 20, 0)
+
+
+def test_us_slot_mid_window_takes_what_is_left():
+    mid = us(2026, 10, 13, 20, 10)
+    assert schedule.next_us_slot((), mid) == us(2026, 10, 13, 21, 0)
+
+
+def test_us_slot_follows_new_york_clock_changes():
+    # 18 Mar 2026: the US is on summer time, Europe not yet -> 6 h apart
+    when = schedule.next_us_slot((), us(2026, 3, 18, 9, 0))
+    assert when == us(2026, 3, 18, 20, 0)
+    assert when.astimezone(TZ).hour == 2
+
+
+def test_us_slot_full_week_is_none():
+    taken = [us(2026, 10, 13 + d, hh, mm) for d in range(8)
+             for hh, mm in schedule.US_SLOTS]
+    assert schedule.next_us_slot(taken, NOW) is None
+
+
+def test_us_label_and_picker_button():
+    when = us(2026, 10, 13, 20, 0)
+    assert schedule.us_label(when, NOW) == "🇺🇸 Tonight 8:00pm ET · 03:00"
+    assert schedule.us_label(when + dt.timedelta(days=1), NOW).startswith(
+        "🇺🇸 Tomorrow 8:00pm ET")
+    first = schedule.picker_keyboard(NOW).inline_keyboard[0][0]
+    assert first.callback_data == f"b:at:{int(when.timestamp())}"

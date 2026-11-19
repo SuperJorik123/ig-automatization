@@ -4,6 +4,8 @@ carry-over, per-video captions), Publish (one scheduled post per account,
 spread out), a restart, and Retry. Telegram, the renderer and the caption
 model are stand-ins; the database is a throwaway one."""
 
+import datetime as dt
+
 import asyncio
 import os
 import types
@@ -271,7 +273,7 @@ def test_render_assigns_every_account_and_posts_one_summary(env):
                                    "10 accounts")
     data = [x.callback_data for r in summary.edits[-1][1].inline_keyboard
             for x in r]
-    assert data == [f"u:pub:{b['id']}", f"u:rs:{b['id']}", f"u:x:{b['id']}"]
+    assert data == [f"u:pub:{b['id']}", f"u:us:{b['id']}", f"u:rs:{b['id']}", f"u:x:{b['id']}"]
 
 
 def test_each_videos_captions_come_from_its_own_info_and_headline(env):
@@ -350,6 +352,27 @@ def test_publish_is_three_taps_in_total(env):
     q = _Q(summary, f"u:pub:{b['id']}")
     asyncio.run(news_bot._on_bundle_callback(q, env.ctx))     # tap 3
     assert len(env.store.scheduled_for_bundle(b["id"], "pending")) == 10
+
+
+def test_us_evening_starts_the_timetable_at_the_next_us_slot(env, monkeypatch):
+    from modules.telegram import schedule
+    slot = schedule.now().replace(microsecond=0) + dt.timedelta(hours=10)
+    seen = {}
+
+    def fake_next(taken, current=None):
+        seen["taken"] = list(taken)
+        return slot
+
+    monkeypatch.setattr(schedule, "next_us_slot", fake_next)
+    b, lines = _start(env, 3)
+    _render(env, b, lines)
+    q = _Q(_summary_msg(env), f"u:us:{b['id']}")
+    asyncio.run(news_bot._on_bundle_callback(q, env.ctx))
+    rows = env.store.scheduled_for_bundle(b["id"], "pending")
+    assert len(rows) == 10
+    assert min(r["due_at"] for r in rows) == slot
+    assert any(n.startswith("🇺🇸 starts")
+               for n in env.store.get_bundle(b["id"])["plan"]["notes"])
 
 
 def test_auto_publish_skips_the_tap(env, monkeypatch):

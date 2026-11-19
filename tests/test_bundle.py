@@ -143,7 +143,7 @@ def test_summary_lists_every_account_with_its_time():
 def test_buttons_are_db_routed_by_bundle_id():
     kb = bundle.ready_keyboard(7).inline_keyboard
     data = [b.callback_data for row in kb for b in row]
-    assert data == ["u:pub:7", "u:rs:7", "u:x:7"]
+    assert data == ["u:pub:7", "u:us:7", "u:rs:7", "u:x:7"]
 
 
 # --------------------------------------------------------------------------- #

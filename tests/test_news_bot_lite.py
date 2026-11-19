@@ -82,7 +82,7 @@ class _Query:
         self.answers.append(text)
 
 
-@pytest.mark.parametrize("data", ["b:publish", "b:sched", "b:asis", "b:dl",
+@pytest.mark.parametrize("data", ["b:publish", "b:sched", "b:us", "b:asis", "b:dl",
                                   "b:bundle", "b:edit", "s:1:r", "u:go:1",
                                   "submit"])
 def test_other_callbacks_are_refused(lite, monkeypatch, data):

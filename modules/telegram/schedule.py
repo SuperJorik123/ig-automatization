@@ -12,8 +12,9 @@ table (so a restart doesn't lose it), moves the renders out of the nightly
 sweep's reach, and fires it from the JobQueue. Everything here is pure and
 offline-testable, like branded.py.
 
-Callback namespace: "b:sched" opens the time picker, "b:at:<unix ts>" picks a
-preset, "b:back" returns to the platform picker — all on the publish picker,
+Callback namespace: "b:sched" opens the time picker, "b:us" (straight from
+the publish picker) schedules the next free US-evening slot, "b:at:<unix ts>"
+picks a preset, "b:back" returns to the platform picker — all on the publish picker,
 so under news_bot's "b:" router. "s:<id>:x" cancels a scheduled post; it is
 routed on the DB row, not on in-memory state, so it works after a restart.
 """
@@ -141,11 +142,93 @@ def presets(current: dt.datetime | None = None) -> list:
     return out
 
 
-def picker_keyboard(current: dt.datetime | None = None) -> InlineKeyboardMarkup:
-    """Preset times two per row, then back to the platform picker."""
+# --------------------------------------------------------------------------- #
+# US evening slots                                                            #
+# --------------------------------------------------------------------------- #
+#
+# The accounts are for a US audience, but a reel posted in the operator's
+# afternoon/evening (Chisinau) is first tested on Europe's prime time — the
+# reach data showed 11-36 % US viewers per reel against 62 % US followers.
+# US_SLOTS are the US-evening times in US_TZ (New York: Eastern + Central
+# is ~76 % of the US, both in their evening at these times), in ORDER OF
+# PREFERENCE: 8 pm first. Kept in New York time so the US/EU clock changes,
+# which fall on different dates, take care of themselves. A slot within
+# US_SLOT_GAP of a post already scheduled is skipped, so several posts in one
+# evening spread out instead of stacking on 8 pm.
+
+
+def _tz(name: str, fallback: str):
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name or fallback)
+    except Exception as exc:
+        log.warning("timezone %r unavailable (%s) — using UTC", name or fallback, exc)
+        return dt.timezone.utc
+
+
+US_TZ = _tz(os.environ.get("US_TZ", "").strip(), "America/New_York")
+
+
+def _slots(raw: str) -> list:
+    out = []
+    for part in raw.split(","):
+        m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", part)
+        if m and int(m.group(1)) < 24 and int(m.group(2)) < 60:
+            out.append((int(m.group(1)), int(m.group(2))))
+        elif part.strip():
+            log.warning("US_SLOTS: ignoring %r (want HH:MM)", part)
+    return out
+
+
+US_SLOTS = _slots(os.environ.get("US_SLOTS", "")
+                  or "20:00,19:00,21:00,19:30,20:30,21:30,18:30,22:00")
+US_SLOT_GAP = dt.timedelta(minutes=int(os.environ.get("US_SLOT_GAP_MIN", "") or 45))
+# Not a slot that's about to start: the publish still has to be set up.
+_US_LEAD = dt.timedelta(minutes=5)
+
+
+def next_us_slot(taken=(), current: dt.datetime | None = None,
+                 days: int = 7) -> dt.datetime | None:
+    """The first US-evening slot (in preference order, today's US evening
+    before tomorrow's) that is still ahead and at least US_SLOT_GAP from every
+    moment in `taken`. None only when a whole week is full."""
+    current = current or now()
+    us_today = current.astimezone(US_TZ).date()
+    for d in range(days):
+        day = us_today + dt.timedelta(days=d)
+        for hh, mm in US_SLOTS:
+            when = dt.datetime(day.year, day.month, day.day, hh, mm, tzinfo=US_TZ)
+            if when < current + _US_LEAD:
+                continue
+            if any(abs(when - t) < US_SLOT_GAP for t in taken):
+                continue
+            return when
+    return None
+
+
+def us_label(when: dt.datetime, current: dt.datetime | None = None) -> str:
+    """'🇺🇸 Tonight 8:00pm ET · 03:00' — the US time, then the local one."""
+    current = current or now()
+    us = when.astimezone(US_TZ)
+    gap = (us.date() - current.astimezone(US_TZ).date()).days
+    day = "Tonight" if gap == 0 else "Tomorrow" if gap == 1 else us.strftime("%a")
+    clock = us.strftime("%I:%M%p").lstrip("0").lower()
+    zone = us.tzname() if getattr(US_TZ, "key", "") != "America/New_York" else "ET"
+    return f"🇺🇸 {day} {clock} {zone} · {when.astimezone(TZ):%H:%M}"
+
+
+def picker_keyboard(current: dt.datetime | None = None,
+                    taken=()) -> InlineKeyboardMarkup:
+    """The next free US-evening slot on its own row, preset times two per
+    row, then back to the platform picker."""
+    rows = []
+    us = next_us_slot(taken, current)
+    if us is not None:
+        rows.append([InlineKeyboardButton(
+            us_label(us, current), callback_data=f"b:at:{int(us.timestamp())}")])
     btns = [InlineKeyboardButton(label, callback_data=f"b:at:{int(when.timestamp())}")
             for label, when in presets(current)]
-    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    rows += [btns[i:i + 2] for i in range(0, len(btns), 2)]
     rows.append([InlineKeyboardButton("⬅ Back", callback_data="b:back")])
     return InlineKeyboardMarkup(rows)
 

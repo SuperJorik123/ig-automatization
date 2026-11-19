@@ -1478,7 +1478,21 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         await q.edit_message_text(
             schedule.picker_text(schedule.ticked_labels(
                 state["platforms"], state["sel_platforms"])),
-            reply_markup=schedule.picker_keyboard())
+            reply_markup=schedule.picker_keyboard(taken=_taken_slots()))
+        return
+
+    if verb == "us" and state.get("mode") == "publish":
+        if not state["sel_platforms"]:
+            await q.answer("Pick at least one platform.", show_alert=True)
+            return
+        when = schedule.next_us_slot(_taken_slots())
+        if when is None:
+            await q.answer("No free US-evening slot in the next week.",
+                           show_alert=True)
+            return
+        await q.answer()
+        _disarm_auto_publish(state)
+        await _schedule_post(context, state, q.message, when)
         return
 
     if verb == "back" and state.get("mode") == "schedule":
@@ -1497,7 +1511,8 @@ async def _on_brand_callback(q, context, state: dict, verb: str) -> None:
         why = schedule.check(when)
         if why:
             await q.answer(f"Can't schedule: {why}.", show_alert=True)
-            await q.edit_message_reply_markup(schedule.picker_keyboard())
+            await q.edit_message_reply_markup(
+                schedule.picker_keyboard(taken=_taken_slots()))
             return
         await q.answer()
         await _schedule_post(context, state, q.message, when)
@@ -2984,8 +2999,11 @@ def _unused_files(plan: dict, used: set) -> list:
     return [p for p in paths if p not in used]
 
 
-async def _publish_bundle(context, bid: int, message) -> None:
-    """🚀 Publish: one scheduled post per account at its timetable slot."""
+async def _publish_bundle(context, bid: int, message,
+                          start: dt.datetime | None = None) -> None:
+    """🚀 Publish: one scheduled post per account at its timetable slot.
+    `start` is when the timetable begins (🇺🇸 US evening passes the next free
+    US slot); by default BUNDLE_FIRST_POST_S from now."""
     if not await asyncio.to_thread(queue_store.claim_bundle, bid, "ready",
                                    "scheduled"):
         return
@@ -2993,9 +3011,12 @@ async def _publish_bundle(context, bid: int, message) -> None:
     plan = bndl["plan"]
     brands = {b["name"]: b for b in branded.available_brands(config.BRANDS)}
     copies = bundle.copies({a: v for _, a, v in plan["slots"]})
-    start = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
-        seconds=config.BUNDLE_FIRST_POST_S)
     notes, used = [], set()
+    if start is None:
+        start = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+            seconds=config.BUNDLE_FIRST_POST_S)
+    else:
+        notes.append(f"🇺🇸 starts {schedule.us_label(start)}")
     for at, account, vid in plan["slots"]:
         b, r = brands.get(account), plan["renders"][vid][account]
         if b is None:
@@ -3098,6 +3119,14 @@ async def _on_bundle_callback(q, context) -> None:
     elif verb == "pub":
         await q.answer()
         await _publish_bundle(context, bid, q.message)
+    elif verb == "us":
+        when = schedule.next_us_slot(_taken_slots())
+        if when is None:
+            await q.answer("No free US-evening slot in the next week.",
+                           show_alert=True)
+            return
+        await q.answer()
+        await _publish_bundle(context, bid, q.message, start=when)
     elif verb == "rs":
         await _reshuffle_bundle(q, context, bid)
     elif verb == "x":
@@ -3303,6 +3332,17 @@ def _remove_files(paths) -> None:
             os.remove(path)
         except OSError:
             pass
+
+
+def _taken_slots() -> list:
+    """When the posts already waiting will go out — the 🇺🇸 slot keeps clear
+    of them. A DB hiccup only means the slot may land next to another post."""
+    try:
+        return [r["due_at"] for r in
+                queue_store.scheduled_with_status("pending", "running")]
+    except Exception as exc:
+        log.warning("couldn't read scheduled posts for the US slot: %s", exc)
+        return []
 
 
 async def _schedule_post(context, state: dict, message, when: dt.datetime,

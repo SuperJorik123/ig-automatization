@@ -280,7 +280,10 @@ def summary_text(bundle_id: int, headlines: dict, slots: list, start,
 
 def ready_keyboard(bundle_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Publish", callback_data=f"{NS}:pub:{bundle_id}")],
+        [InlineKeyboardButton("🚀 Publish", callback_data=f"{NS}:pub:{bundle_id}"),
+         # The whole timetable, starting at the next free US-evening slot
+         # (schedule.next_us_slot) instead of BUNDLE_FIRST_POST_S from now.
+         InlineKeyboardButton("🇺🇸 US evening", callback_data=f"{NS}:us:{bundle_id}")],
         [InlineKeyboardButton("🔀 Reshuffle", callback_data=f"{NS}:rs:{bundle_id}"),
          InlineKeyboardButton("✕ Cancel", callback_data=f"{NS}:x:{bundle_id}")]])
 
