@@ -1,6 +1,7 @@
 """Radar — the live process: listens, polls, alerts. Never posts anywhere else.
 
-    py -m modules.radar --login   one-time login of the LISTENING account (--qr to scan)
+    py -m modules.radar --login   one-time login of the LISTENING account: scan a QR
+                                  with its phone (--phone for number + code instead)
     py -m modules.radar --join    join channels.json's channels, slowly
     py -m modules.radar --check   which channels are joined / missing
     py -m modules.radar --hazards print what the hazard feeds would alert now
@@ -330,19 +331,30 @@ async def _login(qr: bool):
             print(f"already logged in as @{me.username or me.id}")
             return
         if qr:
+            # Scan with the account's phone — no number, no code. The token
+            # lives ~30 s, so it's redrawn until scanned (Ctrl+C gives up).
+            from getpass import getpass
+
             import qrcode
+            from telethon import errors
             login = await client.qr_login()
             while True:
                 q = qrcode.QRCode(border=1)
                 q.add_data(login.url)
                 q.print_ascii(invert=True)
-                print("Telegram app → Settings → Devices → Link Desktop Device, scan this")
+                print("On the SPARE account's phone: Telegram → Settings → Devices → "
+                      "Link Desktop Device, and scan this. Waiting… (Ctrl+C to give up)")
                 try:
                     await login.wait(30)
                     break
                 except asyncio.TimeoutError:
                     await login.recreate()
+                    print("\n(expired — here's a fresh one)\n")
+                except errors.SessionPasswordNeededError:
+                    await client.sign_in(password=getpass("2FA password: "))
+                    break
         else:
+            # Phone login wants the international form: +40…, not 07…
             await client.start()
         me = await client.get_me()
         print(f"✅ logged in as @{me.username or me.id} — session at {S.SESSION}")
@@ -407,7 +419,8 @@ def main(argv=None):
     logging.getLogger("httpx").setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="radar")
     p.add_argument("--login", action="store_true")
-    p.add_argument("--qr", action="store_true")
+    p.add_argument("--phone", action="store_true",
+                   help="log in with phone number + code instead of scanning a QR")
     p.add_argument("--join", action="store_true")
     p.add_argument("--check", action="store_true")
     p.add_argument("--hazards", action="store_true")
@@ -417,7 +430,7 @@ def main(argv=None):
     if a.login or a.join or a.check:
         if not (S.API_ID and S.API_HASH):
             raise SystemExit(f"RADAR_API_ID / RADAR_API_HASH missing in {S.ENV_FILE}")
-        coro = _login(a.qr) if a.login else _join() if a.join else _check()
+        coro = _login(not a.phone) if a.login else _join() if a.join else _check()
         return asyncio.run(coro)
     Radar().run()
 
