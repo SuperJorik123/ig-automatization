@@ -27,6 +27,7 @@ allowed, so a one-video bundle (ten copies) takes about two and a half hours
 and a ten-video bundle about forty minutes.
 """
 
+import html
 import random
 import statistics
 
@@ -364,30 +365,84 @@ def copies_comparison(rows: list) -> dict:
     return {k: (int(statistics.mean(v)), len(v)) for k, v in groups.items()}
 
 
+REPORT_NAME_W = 10   # account column, like /report's table
+SETTLED_POSTS = 2    # an account needs this many reels to be called weakest
+
+
+def _name(n: str, width: int) -> str:
+    return n if len(n) <= width else n[:width - 1] + "…"
+
+
 def report_text(rows: list, since_label: str) -> str:
-    """The weekly Telegram report, plain text."""
+    """The Monday report as Telegram HTML, laid out like /report
+    (modules/telegram/report.py): the total, a few one-line highlights, ONE
+    monospace table (an account per row, best first), then the bundle and
+    copy comparisons. Sent with parse_mode=HTML."""
+    from modules.telegram.report import fmt_num   # pure; no platform imports
+
+    title = f"📊 <b>Reels this week</b> · {html.escape(since_label)}"
     if not rows:
-        return f"📊 Weekly report ({since_label}): no reels logged."
-    lines = [f"📊 Weekly report ({since_label}) — {len(rows)} reels"]
-    lines.append("\nPer account (median views · ≥10k · ≥50k · follows):")
-    for acc, s in sorted(account_stats(rows).items(),
-                         key=lambda kv: -(kv[1]["median"] or 0)):
-        med = f"{s['median']:,}" if s["median"] is not None else "—"
-        lines.append(f"  {acc}: {med} · {s['hits10k']} · {s['hits50k']} · "
-                     f"{s['follows']:+d} ({s['posts']} posts)")
+        return f"{title}\n\nNo reels logged."
+
+    stats = account_stats(rows)
+    views = [v for v in (_views(r) for r in rows) if v is not None]
+    follows = sum(s["follows"] for s in stats.values())
+
+    out = [title, f"<i>{len(rows)} Instagram reels the bot published · "
+                  "views at 72 h (24 h if younger)</i>", ""]
+    if views:
+        out.append(f"👁 <b>{fmt_num(sum(views))} views in total</b> · "
+                   f"median {fmt_num(int(statistics.median(views)))} a reel")
+        hits10 = sum(v >= 10_000 for v in views)
+        hits50 = sum(v >= 50_000 for v in views)
+        out.append(f"   🔟 {hits10} past 10K · 🚀 {hits50} past 50K")
+    else:
+        out.append("👁 <b>No view counts yet</b> — insights arrive 24 h after posting")
+    out.append(f"👥 {'+' if follows >= 0 else '−'}{fmt_num(abs(follows))} "
+               "followers after posting")
+
+    ranked = sorted(stats, key=lambda a: (-(stats[a]["median"] or -1), a))
+    measured = [a for a in ranked if stats[a]["median"] is not None]
+    if measured:
+        out.append("")
+        best = measured[0]
+        out.append(f"🏆 Best account: <b>{html.escape(best)}</b> — median "
+                   f"{fmt_num(stats[best]['median'])} over {stats[best]['posts']} reels")
+        top = max((r for r in rows if _views(r) is not None), key=_views)
+        where = (f" (bundle #{top['bundle_id']})" if top.get("bundle_id") is not None
+                 else "")
+        out.append(f"⭐ Best reel: <b>{html.escape(top['account'])}</b> — "
+                   f"{fmt_num(_views(top))} views{where}")
+        settled = [a for a in measured[1:] if stats[a]["posts"] >= SETTLED_POSTS]
+        if len(measured) > 2 and settled:
+            low = settled[-1]
+            out.append(f"🐢 Weakest: <b>{html.escape(low)}</b> — median "
+                       f"{fmt_num(stats[low]['median'])} over {stats[low]['posts']} reels")
+
+    w = min(REPORT_NAME_W, max(len(a) for a in ranked))
+    table = [" " * w + "reels".rjust(6) + "median".rjust(8) + "10K+".rjust(6)
+             + "follows".rjust(8)]
+    for a in ranked:
+        s = stats[a]
+        f = s["follows"]
+        table.append(_name(a, w).ljust(w) + str(s["posts"]).rjust(6)
+                     + fmt_num(s["median"]).rjust(8) + str(s["hits10k"]).rjust(6)
+                     + (("+" if f > 0 else "−" if f < 0 else "") + fmt_num(abs(f))).rjust(8))
+    out += ["", "<pre>" + html.escape("\n".join(table)) + "</pre>"]
+
     spread = bundle_spread(rows)
     if spread:
-        lines.append("\nPer bundle (best · median · best/median):")
-        for b, (best, med, ratio) in sorted(spread.items()):
-            lines.append(f"  #{b}: {best:,} · {med:,} · ×{ratio if ratio else '—'}")
+        out += ["", "📦 <b>Bundles</b> — same video, different accounts"]
+        lines = [f"#{b}".ljust(5) + f"best {fmt_num(best)}".ljust(11)
+                 + f"median {fmt_num(med)}".ljust(13) + f"×{ratio if ratio else '—'}"
+                 for b, (best, med, ratio) in sorted(spread.items())]
+        out.append("<pre>" + html.escape("\n".join(lines)) + "</pre>")
     comp = copies_comparison(rows)
     if comp:
-        lines.append("\nViews per copy by copies of the video:")
-        for k in ("1-2", "3", "4+"):
-            if k in comp:
-                mean, n = comp[k]
-                lines.append(f"  on {k} accounts: {mean:,} avg ({n} reels)")
-    return "\n".join(lines)
+        out += ["", "🔁 <b>Views per copy</b> by how many accounts posted the video",
+                "   " + " · ".join(f"{k} accounts: {fmt_num(comp[k][0])} ({comp[k][1]})"
+                                   for k in ("1-2", "3", "4+") if k in comp)]
+    return "\n".join(out)
 
 
 REMINDER = ("🛡 Weekly check: open Settings → Account status on every "

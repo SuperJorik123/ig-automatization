@@ -176,8 +176,20 @@ def test_bundle_spread_and_copies():
     assert comp["4+"] == (31_000, 2) and comp["1-2"] == (12_000, 1)
 
 
-def test_report_text_mentions_every_section():
+def test_report_text_is_laid_out_like_the_views_report():
     text = bundle.report_text(ROWS, "last 7 days")
-    assert "Per account" in text and "Per bundle" in text
-    assert "on 4+ accounts" in text
-    assert "no reels" in bundle.report_text([], "x")
+    assert text.startswith("📊 <b>Reels this week</b>")
+    assert "74K views in total" in text and "1 past 50K" in text
+    assert "🏆 Best account: <b>acc0</b> — median 36K over 2 reels" in text
+    assert "⭐ Best reel: <b>acc0</b> — 60K views (bundle #1)" in text
+    table = text.split("<pre>")[1].split("</pre>")[0].splitlines()
+    assert table[0].split() == ["reels", "median", "10K+", "follows"]
+    assert table[1].split() == ["acc0", "2", "36K", "2", "+30"]   # best first
+    assert table[-1].split()[:3] == ["acc2", "1", "—"]            # no views yet
+    assert "📦 <b>Bundles</b>" in text and "4+ accounts: 31K (2)" in text
+    assert "No reels logged" in bundle.report_text([], "x")
+
+
+def test_report_text_escapes_account_names():
+    rows = [dict(ROWS[0], account="a<b>")]
+    assert "a&lt;b&gt;" in bundle.report_text(rows, "x")

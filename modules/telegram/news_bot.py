@@ -3223,7 +3223,7 @@ async def _weekly_report_job(context) -> None:
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
     rows = await asyncio.to_thread(queue_store.reels_since, since)
     _track(await context.bot.send_message(
-        CHAT_ID, bundle.report_text(rows, "last 7 days")))
+        CHAT_ID, bundle.report_text(rows, "last 7 days"), parse_mode="HTML"))
     _track(await context.bot.send_message(CHAT_ID, bundle.REMINDER))
     await _send_follower_report(await context.bot.get_chat(CHAT_ID))
 
