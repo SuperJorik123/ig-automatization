@@ -5,7 +5,8 @@ live one is in main.py, tests pass a fake). Alerts go out THE MOMENT an
 incident crosses RADAR_ALERT_MIN_SCORE — any hour (owner, 2026-11-19).
 
 Rules:
-  * Only an incident WITH VIDEO alerts. Text-only posts still count: they
+  * Only an incident WITH VIDEO alerts, and only when the AI calls it a real
+    event rated RADAR_AI_MIN+ (RADAR_AI_MIN_US+ in the US) — score.passes. Text-only posts still count: they
     join incidents (more sources = higher score) and feed spikes.
   * One incident alerts once. When it grows (a new source or a new video)
     the alert is edited in place; if you tapped 👀 Watch it also pings.
@@ -24,7 +25,7 @@ import time
 from modules.radar import cluster, score as SC, settings as S, spikes, text as T
 from modules.radar import alert as A
 from modules.radar.label import label as ai_label
-from modules.radar.sources import reddit
+from modules.radar.sources import hazards, reddit
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +110,7 @@ class Pipeline:
             "graphic": int(any(l.get("graphic") for l in labels)),
             "english": (best or {}).get("english", ""),
             "_sources": sources, "_videos": sum(1 for i in items if i["has_video"]),
+            "_gate": SC.passes(labels, us),
         }
 
     def _room(self, now: float) -> bool:
@@ -120,12 +122,13 @@ class Pipeline:
             return
         info = self._summarise(items, now)
         n_sources, n_videos = info.pop("_sources"), info.pop("_videos")
+        gate = info.pop("_gate")
         self.store.update_incident(inc_id, updated=now, **info)
         inc = self.store.incident(inc_id)
         if inc["ignored"] or not inc["has_video"] or SC.blocked(inc["category"]):
             return
         if inc["alert_msg_id"] is None:
-            if inc["score"] < S.ALERT_MIN_SCORE:
+            if not gate or inc["score"] < S.ALERT_MIN_SCORE:
                 return
             if not self._room(now):
                 log.warning("alert cap reached (%d/h) — incident %s waits", S.MAX_PER_HOUR, inc_id)
@@ -146,9 +149,23 @@ class Pipeline:
                                        alerted_videos=n_videos)
 
     # --- hazards --------------------------------------------------------------
+    def _same_quake(self, it, now: float) -> bool:
+        """USGS often files one quake twice (a revised id, M5.0 vs M5.1, the
+        Vanuatu M6.5 five minutes apart): one alert per area per QUAKE_DEDUPE_H."""
+        if it.source != "usgs":
+            return False
+        key = hazards.area(it.place)
+        since = now - S.QUAKE_DEDUPE_H * 3600
+        return any(i["kind"] == "hazard" and i["category"] == "earthquake"
+                   and i["alert_msg_id"] is not None and hazards.area(i["place"]) == key
+                   for i in self.store.open_incidents(since))
+
     async def _hazard(self, row_id: int, it, now: float):
         if not it.metrics.get("alert"):
             return                 # may qualify on a later poll (quake "felt" reports)
+        if self._same_quake(it, now):
+            self.store.mark_processed(row_id, None, None)
+            return
         inc_id = self.store.new_incident(now, "hazard", set(), {
             "category": it.metrics.get("category", "disaster"), "place": it.place,
             "country": it.country, "title": it.text.split("\n")[0][:200], "score": 90,

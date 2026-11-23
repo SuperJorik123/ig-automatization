@@ -23,9 +23,16 @@ CATEGORIES = [
     "protest", "riot", "politics", "war", "animal", "crowd", "stunt", "other",
 ]
 
-PROMPT = """You screen social-media posts for a viral news video account aimed at a US audience.
+# Calibrated on 4 days of live alerts (2026-11-23): the old prompt rated
+# routine war clips 60-80 and spectacular non-war footage 50-65 — backwards for
+# a viral account. `newsworthy` is now THE alert gate (settings.AI_MIN, 75), so
+# the examples pin the scale to clips the owner did and didn't want.
+PROMPT = """You pick clips for a viral news video account (Instagram/TikTok reels) whose audience is in the US.
+A clip earns a post when it is FOOTAGE OF SOMETHING HAPPENING that makes people stop scrolling:
+dramatic, spectacular, shocking, rare, or a big story everyone will talk about today.
+
 For the post below (text, and its video thumbnail if attached) answer ONLY with JSON:
-{"incident": true/false,          // a real event caught on camera (crime, accident, disaster, clash, rescue, notable moment) — not memes, ads, talking heads, maps, studio TV
+{"incident": true/false,
  "category": one of %s,
  "place": "city or area, '' if unknown",
  "country": "country name, '' if unknown",
@@ -33,8 +40,29 @@ For the post below (text, and its video thumbnail if attached) answer ONLY with 
  "english": "yes" | "no" | "unknown",   // is the speech/text in the video likely English
  "graphic": true/false,           // gore, a death on camera, a child hurt — not postable as is
  "title": "max 80 chars, plain English, what happened and where",
- "newsworthy": 0-100              // how likely a US viewer stops scrolling for this clip TODAY
+ "newsworthy": 0-100
 }
+
+"incident" is TRUE only when the video shows an event as it happens or its immediate aftermath.
+It is FALSE for: people talking (speeches, press conferences, interviews, TV studio, podcasts),
+statements and claims read out, politicians' photo-ops, maps, infographics, old/archive footage,
+propaganda or recruitment videos, ads, memes, video games, compilations.
+
+"newsworthy" — how likely a US viewer stops scrolling for this clip TODAY:
+ 90-100  huge story with strong footage: US mass shooting, train derailment, big explosion or disaster
+         on camera, a missile/warship/bomb strike that is itself major news (a NATO country hit, a warship
+         destroyed, a US base attacked)
+ 75-89   spectacular or dramatic footage anywhere: cartel battle with helicopters firing over a city,
+         volcano eruption, huge fire or building collapse, dramatic rescue, wild police chase,
+         record-breaking stunt, crowd chaos, freak accident
+ 60-74   real but ordinary incident: a US local fire/crash/police scene, a protest with clashes,
+         a factory fire abroad
+ 30-59   routine war footage (a drone hits a tank/refinery/position, troops advance, "forces claim",
+         another night of strikes with no standout image), minor local news abroad
+ 0-29    not footage of an event (see "incident": FALSE above) — a politician talking is 0-20
+         however famous they are
+
+US events count more: the same clip is worth ~15 points more when it happened in the US.
 Never invent a place or facts that the post doesn't give.""" % json.dumps(CATEGORIES)
 
 

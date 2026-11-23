@@ -147,6 +147,9 @@ class Radar:
         except Exception as exc:
             await self._fail("Reddit", exc)
             return
+        finally:
+            while reddit.notices:      # a spare account Reddit refused
+                await self.pipe.notifier.text("⚠️ " + A.esc(reddit.notices.pop(0)))
         await self._ok("Reddit")
         for it in items:
             await self.pipe.ingest(it)
@@ -307,10 +310,10 @@ class Radar:
             except Exception:
                 log.exception("Telegram listener failed to start")
             jq = app.job_queue
-            if S.REDDIT_CLIENT_ID and S.REDDIT_CLIENT_SECRET:
+            if reddit.enabled():
                 jq.run_repeating(self.poll_reddit, S.REDDIT_POLL_S, first=20, name="reddit")
             else:
-                log.info("Reddit off — no REDDIT_CLIENT_ID/SECRET (keyless JSON is 403)")
+                log.info("Reddit off — no spare-account cookies at %s", S.REDDIT_COOKIES_FILE)
             jq.run_repeating(self.poll_hazards, S.HAZARD_POLL_S, first=10, name="hazards")
             jq.run_repeating(self.check_spikes, S.SPIKE_CHECK_S, first=60, name="spikes")
             jq.run_repeating(self.prune, 86400, first=300, name="prune")

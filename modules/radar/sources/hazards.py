@@ -13,6 +13,7 @@ once, the first time it qualifies. Every hazard alert carries a Snap Map link
 to its coordinates, which is where the eyewitness clips are.
 """
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
@@ -50,6 +51,15 @@ def _get(url: str, **kw):
 
 
 # --- USGS -----------------------------------------------------------------
+_OFFSET = re.compile(r"^\s*\d+(?:\.\d+)?\s*km\s+[NSEW]{1,3}\s+of\s+", re.I)
+
+
+def area(place: str) -> str:
+    """USGS place without its distance prefix: "8 km NW of Pinnacles, CA" ->
+    "pinnacles, ca" — what makes two reports of one quake the same quake."""
+    return _OFFSET.sub("", place or "").strip().lower()
+
+
 def is_us_place(place: str) -> bool:
     tail = (place or "").rsplit(",", 1)[-1].strip()
     return tail in US_STATES
@@ -61,12 +71,17 @@ def quake_alert(p: dict) -> bool:
     A M6.1 on a mid-ocean ridge or a M5 off the Aleutians makes no video; a
     M4.9 under Los Angeles makes hundreds. USGS "felt" reports (Did You Feel
     It?) come in within minutes of a quake near people, so they are the test:
-      US:    100+ felt, or M >= QUAKE_MIN_US with 10+ felt, or M6.5+
+      US:    M >= QUAKE_FLOOR_US (4.0) first — a M2.5-3.4 in an aftershock
+             swarm still gets 100+ "felt" reports and alerted five times in
+             four days (2026-11-23); then 100+ felt, or M >= QUAKE_MIN_US
+             with 10+ felt, or M6.5+
       world: M >= QUAKE_MIN_WORLD with a yellow+ PAGER alert, a tsunami flag
              or 50+ felt — or M7+ anywhere."""
     mag = float(p.get("mag") or 0)
     felt = int(p.get("felt") or 0)
     if is_us_place(p.get("place", "")):
+        if mag < S.QUAKE_FLOOR_US:
+            return False
         return felt >= 100 or (mag >= S.QUAKE_MIN_US and felt >= 10) or mag >= 6.5
     if mag >= 7.0:
         return True
@@ -105,8 +120,8 @@ def fetch_usgs() -> list:
 NWS_EVENTS = [
     "Tornado Warning", "Flash Flood Warning", "Extreme Wind Warning",
     "Hurricane Warning", "Tsunami Warning", "Storm Surge Warning",
-    "Dust Storm Warning", "Snow Squall Warning",
-]
+    "Dust Storm Warning",
+]   # Snow Squall Warning dropped 2026-11-23 — two alerts, no clips.
 _NWS_CATEGORY = {"Tornado Warning": "weather", "Flash Flood Warning": "flood",
                  "Tsunami Warning": "disaster", "Storm Surge Warning": "flood"}
 
@@ -115,8 +130,8 @@ def nws_alert(p: dict) -> bool:
     """Only warnings that come with eyewitness video: a tornado CONFIRMED on the
     ground (not radar-indicated — there are dozens of those on a stormy day), a
     flash flood with considerable/catastrophic damage threat, and the rare big
-    ones (extreme wind, hurricane, tsunami, storm surge, dust storm, snow squall
-    — the last two cause the highway pile-ups)."""
+    ones (extreme wind, hurricane, tsunami, storm surge, dust storm — the
+    last causes the highway pile-ups)."""
     ev = p.get("event", "")
     params = p.get("parameters") or {}
     if ev == "Tornado Warning":

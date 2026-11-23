@@ -394,3 +394,243 @@ def test_upcoming_merges_custom_dates(tmp_path):
     up = calendar_.upcoming(dt.date(2026, 11, 19), path=str(f))
     titles = [t for _, t in up]
     assert titles[0] == "Derby" and any("Thanksgiving" in t for t in titles)
+
+
+def _jar(tmp_path, monkeypatch):
+    monkeypatch.setattr(reddit, "ARCTIC_PAUSE_S", 0)
+    monkeypatch.setattr(reddit, "LIVE_PAUSE_S", 0)
+    monkeypatch.setattr(reddit, "_dead", {})
+    monkeypatch.setattr(reddit, "_turn", {"n": 0})
+    monkeypatch.setattr(reddit, "notices", [])
+    monkeypatch.setattr(S, "REDDIT_CHECKS_MAX", 3)
+    monkeypatch.setattr(S, "REDDIT_RECHECK_M", 30)
+    jar = tmp_path / "reddit_cookies.txt"
+    jar.write_text("# Netscape HTTP Cookie File\n"
+                   ".reddit.com\tTRUE\t/\tTRUE\t0\treddit_session\tspare\n"
+                   ".example.com\tTRUE\t/\tTRUE\t0\tother\tx\n")
+    monkeypatch.setattr(S, "REDDIT_COOKIES_FILE", str(jar))
+    return jar
+
+
+def test_reddit_is_off_without_the_spare_accounts_cookies(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "REDDIT_COOKIES_FILE", str(tmp_path / "none.txt"))
+    assert not reddit.enabled()
+    _jar(tmp_path, monkeypatch)
+    assert reddit.enabled()
+    assert reddit._cookies() == {"reddit_session": "spare"}
+
+
+def test_reddit_never_defaults_to_the_news_bots_prod_session():
+    assert "credentials" not in S.REDDIT_COOKIES_FILE.replace("\\", "/").split("/")
+
+
+class _Resp:
+    def __init__(self, data, status=200, text=None):
+        self._d, self.status_code = data, status
+        self.text = text if text is not None else "{}"
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+    def json(self):
+        return self._d
+
+
+def _post(pid, ups, age_s, video=True):
+    return {"id": pid, "subreddit": "news", "title": f"Post {pid}", "is_video": video,
+            "domain": "v.redd.it" if video else "self.news",
+            "created_utc": NOW - age_s, "ups": ups, "permalink": f"/r/news/{pid}"}
+
+
+def _wire(monkeypatch, arctic_posts, live_ups, calls):
+    """Arctic Shift returns `arctic_posts`; Reddit says post id has live_ups[id]."""
+    monkeypatch.setattr(reddit.requests, "get",
+                        lambda url, params, **kw: _Resp({"data": arctic_posts}))
+
+    def post(url, params, cookies, **kw):
+        pid = url.split("/comments/")[1].split(".")[0]
+        calls.append((pid, cookies))
+        d = next(p for p in arctic_posts if p["id"] == pid)
+        body = [{"data": {"children": [{"data": dict(d, ups=live_ups[pid])}]}}, {}]
+        return _Resp(body, text="[...]")
+
+    monkeypatch.setattr(reddit, "_get", post)
+
+
+def test_reddit_finds_on_arctic_shift_and_reads_live_upvotes(tmp_path, monkeypatch):
+    _jar(tmp_path, monkeypatch)
+    monkeypatch.setattr(reddit, "_track", {})
+    monkeypatch.setattr(S, "REDDIT_SUBS", ["news"])
+    monkeypatch.setattr(S, "REDDIT_MAX_AGE_H", 4)
+    calls = []
+    _wire(monkeypatch, [_post("a", 1, 1200), _post("b", 1, 600, video=False)], {"a": 400}, calls)
+    items = reddit.fetch(NOW)
+    assert calls == [("a", {"reddit_session": "spare"})]       # the text post is never read
+    assert [i.ext_id for i in items] == ["a"]
+    assert items[0].metrics["ups"] == 400 and items[0].metrics["velocity"] == 20.0
+
+
+def test_reddit_spares_the_account_between_polls(tmp_path, monkeypatch):
+    _jar(tmp_path, monkeypatch)
+    monkeypatch.setattr(reddit, "_track", {})
+    monkeypatch.setattr(S, "REDDIT_SUBS", ["news"])
+    monkeypatch.setattr(S, "REDDIT_MAX_AGE_H", 4)
+    calls = []
+    _wire(monkeypatch, [_post("slow", 1, 600), _post("hot", 1, 600)],
+          {"slow": 2, "hot": 500}, calls)
+    reddit.fetch(NOW)
+    assert sorted(c[0] for c in calls) == ["hot", "slow"]
+    calls.clear()
+    reddit.fetch(NOW + 60)                       # too soon for a recheck
+    assert calls == []
+    recheck = S.REDDIT_RECHECK_M * 60
+    reddit.fetch(NOW + recheck)                  # "hot" already passed the bar
+    assert [c[0] for c in calls] == ["slow"]
+    for k in range(2, 7):
+        reddit.fetch(NOW + k * recheck)
+    assert sum(c[0] == "slow" for c in calls) == S.REDDIT_CHECKS_MAX - 1   # 3 in all
+
+
+def test_reddit_names_a_dead_spare_session(tmp_path, monkeypatch):
+    _jar(tmp_path, monkeypatch)
+    monkeypatch.setattr(reddit, "_track", {})
+    monkeypatch.setattr(S, "REDDIT_SUBS", ["news"])
+    monkeypatch.setattr(reddit.requests, "get",
+                        lambda *a, **k: _Resp({"data": [_post("a", 1, 60)]}))
+    monkeypatch.setattr(reddit, "_get", lambda *a, **k: _Resp({}, 403, "<html>blocked"))
+    assert reddit.fetch(NOW) == []
+    assert len(reddit.notices) == 1 and "reddit_cookies.txt" in reddit.notices[0]
+    with pytest.raises(RuntimeError, match="every spare account"):
+        reddit.fetch(NOW + 60)
+
+
+def test_reddit_requests_take_turns_across_spare_accounts(tmp_path, monkeypatch):
+    _jar(tmp_path, monkeypatch)
+    (tmp_path / "reddit_cookies_2.txt").write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".reddit.com\tTRUE\t/\tTRUE\t0\treddit_session\ttwo\n")
+    monkeypatch.setattr(reddit, "_track", {})
+    monkeypatch.setattr(S, "REDDIT_SUBS", ["news"])
+    posts = [_post(x, 1, 60) for x in "abcd"]
+    calls = []
+    _wire(monkeypatch, posts, {x: 1 for x in "abcd"}, calls)
+    reddit.fetch(NOW)
+    assert [c[1]["reddit_session"] for c in calls] == ["spare", "two", "spare", "two"]
+
+
+def test_reddit_carries_on_when_one_spare_account_is_refused(tmp_path, monkeypatch):
+    _jar(tmp_path, monkeypatch)
+    (tmp_path / "reddit_cookies_2.txt").write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".reddit.com\tTRUE\t/\tTRUE\t0\treddit_session\ttwo\n")
+    monkeypatch.setattr(reddit, "_track", {})
+    monkeypatch.setattr(S, "REDDIT_SUBS", ["news"])
+    posts = [_post(x, 1, 60) for x in "abc"]
+    monkeypatch.setattr(reddit.requests, "get", lambda *a, **k: _Resp({"data": posts}))
+    used = []
+
+    def post(url, params, cookies, **kw):
+        used.append(cookies["reddit_session"])
+        if cookies["reddit_session"] == "spare":
+            return _Resp({}, 403, "<html>blocked")
+        pid = url.split("/comments/")[1].split(".")[0]
+        d = next(p for p in posts if p["id"] == pid)
+        return _Resp([{"data": {"children": [{"data": dict(d, ups=500)}]}}, {}], text="[")
+
+    monkeypatch.setattr(reddit, "_get", post)
+    items = reddit.fetch(NOW)
+    assert used == ["spare", "two", "two"] and len(items) == 2
+    assert len(reddit.notices) == 1 and "1 account(s) left" in reddit.notices[0]
+
+
+def test_reddit_raises_only_when_every_sub_fails_on_arctic_shift(tmp_path, monkeypatch):
+    _jar(tmp_path, monkeypatch)
+    monkeypatch.setattr(S, "REDDIT_SUBS", ["a1", "b2"])
+
+    def flaky(url, params, **kw):
+        if params["subreddit"] == "a1":
+            raise ConnectionError("down")
+        return _Resp({"data": []})
+
+    monkeypatch.setattr(reddit.requests, "get", flaky)
+    assert reddit.fetch(NOW) == []
+    monkeypatch.setattr(reddit.requests, "get",
+                        lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down")))
+    with pytest.raises(RuntimeError, match="Arctic Shift"):
+        reddit.fetch(NOW)
+
+
+# --- 2026-11-23 alert-quality rules ---------------------------------------------
+def test_gate_wants_a_real_event_rated_high_enough():
+    assert not SC.passes([_label(95, incident=False)], us=True)       # a talking head
+    assert not SC.passes([_label(70, us=False)], us=False)            # routine, abroad
+    assert SC.passes([_label(75, us=False)], us=False)
+    assert SC.passes([_label(62)], us=True)                           # US bar is lower
+    assert not SC.passes([], us=True)                                 # no AI verdict
+    assert SC.passes([_label(20, incident=False), _label(80)], us=False)
+
+
+def test_talking_head_never_alerts_however_many_channels_post_it(env):
+    pipe, note, clock, _ = env
+    pipe.labeler = lambda *a: _label(90, incident=False, category="politics",
+                                     place="White House", title="Trump speaks")
+    for n, ch in enumerate(["ClashReport", "osintlive", "wfwitness", "remarks"]):
+        run(pipe.ingest(_tg(str(n), "Trump: we are doing great", size=n + 1, chan=ch)))
+    assert note.alerts == []
+
+
+def test_no_ai_verdict_means_no_alert(env, monkeypatch):
+    pipe, note, clock, labels = env
+    monkeypatch.setattr(S, "AI_MAX_PER_DAY", 0)
+    run(pipe.ingest(_tg("1", "Huge warehouse fire in Brooklyn")))
+    run(pipe.ingest(_tg("2", "Huge warehouse fire Brooklyn now", size=9, chan="osintlive")))
+    assert labels == [] and note.alerts == []
+
+
+def test_one_story_in_many_words_and_categories_is_one_alert(env):
+    pipe, note, clock, _ = env
+    posts = [("war", "Benghazi, Libya", "Russian warship destroyed by drones"),
+             ("explosion", "Benghazi port", "Corvette explodes, huge fireball"),
+             ("fire", "Benghazi", "Ship burning off the coast tonight")]
+    for n, (cat, place, text) in enumerate(posts):
+        pipe.labeler = lambda *a, c=cat, p=place, t=text: _label(
+            85, us=False, category=c, place=p, country="Libya", title=t)
+        clock.t = NOW + n * 3 * 3600          # hours apart, still within the window
+        run(pipe.ingest(_tg(str(n), text, size=n + 1, chan=f"c{n}", t=clock.t - 60)))
+    assert len(note.alerts) == 1 and len(note.updates) == 2
+
+
+def test_place_match_needs_a_real_place_and_agreeing_countries():
+    inc = {"kind": "post", "place": "southern Lebanon", "country": "Lebanon", "tokens": ""}
+    assert not cluster.matches(set(), {"place": "northern Lebanon", "country": "Lebanon"}, inc)
+    inc = {"kind": "post", "place": "Kyiv", "country": "Ukraine", "tokens": ""}
+    assert cluster.matches(set(), {"place": "Kyiv Oblast", "country": "Ukraine"}, inc)
+    inc = {"kind": "post", "place": "Paris", "country": "France", "tokens": ""}
+    assert not cluster.matches(set(), {"place": "Paris", "country": "United States"}, inc)
+
+
+def test_small_us_quakes_never_alert_however_many_felt_them(monkeypatch):
+    monkeypatch.setattr(S, "QUAKE_FLOOR_US", 4.0)
+    assert not hazards.quake_alert({"mag": 2.5, "place": "8 km NW of Pinnacles, CA", "felt": 400})
+    assert hazards.quake_alert({"mag": 4.4, "place": "1 km NNW of Commerce, CA", "felt": 150})
+
+
+def test_one_quake_filed_twice_alerts_once(env):
+    pipe, note, clock, _ = env
+    for n, place in enumerate(["8 km NW of Pinnacles, CA", "10 km NNW of Pinnacles, CA"]):
+        run(pipe.ingest(Item(source="usgs", kind="hazard", ext_id=f"q{n}", time=NOW,
+                             text=f"M5.{n} earthquake — {place}", place=place,
+                             metrics={"alert": True, "category": "earthquake"})))
+    assert len(note.hazards) == 1
+
+
+def test_snow_squalls_are_not_watched():
+    assert "Snow Squall Warning" not in hazards.NWS_EVENTS
+    assert not hazards.nws_alert({"event": "Snow Squall Warning"})
+
+
+def test_a_place_groups_a_story_for_a_day_at_most():
+    young = {"kind": "post", "place": "Kyiv", "country": "Ukraine", "tokens": "",
+             "created": NOW, "updated": NOW + 3600}
+    old = dict(young, updated=NOW + cluster.PLACE_STORY_MAX_S + 1)
+    lab = {"place": "Kyiv", "country": "Ukraine"}
+    assert cluster.matches(set(), lab, young) and not cluster.matches(set(), lab, old)
