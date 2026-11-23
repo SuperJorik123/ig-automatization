@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from telegram.ext import Application  # noqa: E402
 
 from shared import config  # noqa: E402
-from shared.monitoring import errmail, heartbeat  # noqa: E402
+from shared.monitoring import errmail, heartbeat, tg_errors  # noqa: E402
 from modules.newsroom import orders, pace, publish, rewrite, store, wp  # noqa: E402
 
 log = logging.getLogger("newsroom")
@@ -360,6 +360,9 @@ def main() -> int:
         return 0
 
     app = Application.builder().token(config.NR_BOT_TOKEN).build()
+    # Without a handler PTB logs every getUpdates blip at ERROR ("No error
+    # handlers are registered") and errmail mails it — 67 mails in 2 weeks.
+    app.add_error_handler(tg_errors.handler(log))
     for i, site in enumerate(sites):
         app.job_queue.run_repeating(
             _job(site),

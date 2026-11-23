@@ -285,3 +285,24 @@ def test_send_test_email_refuses_when_unconfigured(monkeypatch):
     monkeypatch.setattr(config, "ALERT_EMAIL_TO", "")
     monkeypatch.setattr(mailer, "send_alert", lambda s, b: pytest.fail("must not send"))
     assert checks.send_test_email() == 1
+
+
+def test_cpu_mails_only_after_several_high_checks_in_a_row(monkeypatch):
+    monkeypatch.setattr(config, "ALERT_CPU_PCT", 80.0)
+    monkeypatch.setattr(config, "ALERT_CPU_RUNS", 3)
+    sent = []
+    monkeypatch.setattr(checks.mailer, "send_alert", lambda s, b: sent.append(s) or True)
+    readings = iter([100, 100, 10, 100, 100, 100, 100, 5])   # a render, then a real peg
+    monkeypatch.setattr(checks.psutil, "cpu_percent", lambda **k: next(readings))
+    state = {}
+    for _ in range(3):
+        checks.check_cpu(state)
+    assert sent == []                                   # 2 high then normal: a render
+    checks.check_cpu(state)
+    checks.check_cpu(state)
+    assert sent == []
+    checks.check_cpu(state)                             # 3rd high in a row
+    assert len(sent) == 1 and "3 checks in a row" in sent[0]
+    checks.check_cpu(state)                             # still high: no repeat
+    checks.check_cpu(state)                             # back down: all-clear
+    assert len(sent) == 2 and "back under" in sent[1]

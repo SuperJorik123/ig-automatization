@@ -525,6 +525,9 @@ ALERT_MAX_PER_HOUR = _int_env("ALERT_MAX_PER_HOUR", 0)
 # Floors for shared/monitoring/checks.py. 0 disables that leg (one timer per
 # machine — it also reads the newsroom bot's NR_BULKFOLLOWS_API_KEY).
 ALERT_CPU_PCT = _float_env("ALERT_CPU_PCT", 80)
+# ...for this many 5-minute checks in a row before it mails (a render pegs the
+# CPU for a few minutes; 1 = the old one-sample behaviour).
+ALERT_CPU_RUNS = int(_float_env("ALERT_CPU_RUNS", 3))
 ALERT_DISK_PCT = _float_env("ALERT_DISK_PCT", 85)   # used % of the filesystem holding the repo
 ALERT_MEM_PCT = _float_env("ALERT_MEM_PCT", 90)     # used % of RAM (psutil "percent")
 ALERT_BULKFOLLOWS_MIN = _float_env("ALERT_BULKFOLLOWS_MIN", 2.0)

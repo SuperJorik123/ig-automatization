@@ -122,13 +122,26 @@ def _alert(state: dict, key: str, bad: bool, subject: str, body: str,
 
 
 def check_cpu(state: dict) -> None:
+    """Pegged for ALERT_CPU_RUNS checks in a row (~15 min), not one sample:
+    every video render holds ffmpeg at 100 % for a few minutes, and a single
+    5-second sample turned each one into a CPU-high + all-clear mail pair —
+    62 mails in 14 days (2026-11-23). A render is over in minutes; something
+    stuck at 100 % for a quarter of an hour is worth a mail."""
     if config.ALERT_CPU_PCT <= 0:
         return
     pct = psutil.cpu_percent(interval=CPU_SAMPLE_S)
-    log.info("cpu: %.0f%% (limit %.0f%%)", pct, config.ALERT_CPU_PCT)
-    _alert(state, "cpu", pct > config.ALERT_CPU_PCT,
-           f"[monitor] CPU at {pct:.0f}% (limit {config.ALERT_CPU_PCT:.0f}%)",
-           f"CPU usage is {pct:.0f}%, sampled over {CPU_SAMPLE_S}s on the VPS.\n"
+    high = pct > config.ALERT_CPU_PCT
+    runs = state.get("cpu_high_runs", 0) + 1 if high else 0
+    state["cpu_high_runs"] = runs
+    need = max(1, config.ALERT_CPU_RUNS)
+    log.info("cpu: %.0f%% (limit %.0f%%, %d/%d high in a row)",
+             pct, config.ALERT_CPU_PCT, runs, need)
+    _alert(state, "cpu", runs >= need,
+           f"[monitor] CPU at {pct:.0f}% for {runs} checks in a row "
+           f"(limit {config.ALERT_CPU_PCT:.0f}%)",
+           f"CPU usage has been above {config.ALERT_CPU_PCT:.0f}% for {runs} checks "
+           f"in a row (~{runs * 5} min; latest {pct:.0f}%, sampled over "
+           f"{CPU_SAMPLE_S}s) on the VPS — longer than any render takes.\n"
            f"Reminder comes daily while it stays above the limit.",
            "[monitor] CPU back under the limit")
 

@@ -101,7 +101,7 @@ from modules.youtube import shorts_format, uploader as yt_uploader  # noqa: E402
 from modules.instagram import caption as ig_caption, graph as ig_graph  # noqa: E402
 from modules.facebook import poster as fb_poster  # noqa: E402
 from shared import branding, ffrun, photo_card, public_media, render_lock, video_edit, vision  # noqa: E402
-from shared.monitoring import errmail, heartbeat  # noqa: E402
+from shared.monitoring import errmail, heartbeat, tg_errors  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 # python-telegram-bot's httpx client logs every 10 s getUpdates poll at INFO,
@@ -3781,12 +3781,15 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     Nothing failed to publish when it fires - only `q.answer()`, the spinner
     ack - but errmail mails every ERROR, and without an error handler PTB logs
-    each one. Everything else is logged at ERROR exactly as before, so real
-    failures still reach the operator.
+    each one. Telegram's network blips (Bad Gateway & co., retried by PTB) go
+    to shared/monitoring/tg_errors — WARNING, one ERROR only if they persist.
+    Everything else is logged at ERROR, so real failures reach the operator.
     """
     err = context.error
     if isinstance(err, BadRequest) and _STALE_CALLBACK in str(err).lower():
         log.warning("stale callback query ignored: %s", err)
+        return
+    if tg_errors.handled(err, log):    # Telegram's own network blips: no mail
         return
     log.error("unhandled error while processing %s", update, exc_info=err)
 

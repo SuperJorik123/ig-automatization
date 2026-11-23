@@ -331,6 +331,10 @@ class Radar:
         app = (Application.builder().token(S.BOT_TOKEN)
                .post_init(post_init).post_shutdown(post_shutdown).build())
         app.add_handler(CallbackQueryHandler(self.on_button, pattern=r"^r:"))
+        # Telegram blips at WARNING, real errors with their cause (no handler =
+        # "No error handlers are registered" mails for every Bad Gateway).
+        from shared.monitoring import tg_errors
+        app.add_error_handler(tg_errors.handler(log))
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("brief", self.cmd_brief))
         app.run_polling(allowed_updates=["message", "callback_query"])
