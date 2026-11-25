@@ -288,6 +288,7 @@ def _reel_row(media: dict, account: str) -> dict:
     insights, _ = reel_insights(media["id"], account)
     insights = insights or {}
     return {
+        "id": str(media.get("id") or ""),
         "url": media.get("permalink") or "",
         "posted_at": media.get("timestamp") or "",
         "caption": media.get("caption") or "",

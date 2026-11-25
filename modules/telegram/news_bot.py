@@ -3167,10 +3167,11 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             pages = reach_report.render(results)
         else:
             now = dt.datetime.now(dt.timezone.utc)
+            since = now - dt.timedelta(hours=hours)
             results = await asyncio.to_thread(
-                reach_report.collect_recent, config.BRANDS,
-                now - dt.timedelta(hours=hours))
-            pages = reach_report.render_recent(results, now, hours)
+                reach_report.collect_recent, config.BRANDS, since)
+            keys = await asyncio.to_thread(reach_report.logged_video_keys, since)
+            pages = reach_report.render_recent(results, now, hours, keys)
     except Exception as exc:  # collect never raises; render is pure — belt and braces
         log.error("report failed: %s", exc)
         await note.edit_text(f"❌ report failed: {str(exc)[:300]}")

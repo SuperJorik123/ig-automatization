@@ -385,3 +385,49 @@ def test_youtube_recent_shorts_stops_at_the_first_old_one(monkeypatch):
     reels, why = stats.recent_shorts("@chan", NOW - dt.timedelta(hours=24))
     assert why == "" and [r["views"] for r in reels] == [40, 9]
     assert opened[-1].endswith("/c")                    # d never opened
+
+
+def _v(vid, views, hours_ago, caption, url=None):
+    r = _reel(views, hours_ago, url=url or f"https://x/{vid}")
+    return dict(r, id=vid, caption=caption)
+
+
+def test_group_videos_ties_copies_through_the_reel_log():
+    squid = "Giant squid lunges at the camera\n\nMore text #squid"
+    dog = "Dog swept away by a wave #oregon"
+    results = [
+        _rr("atlas", "ig", [_v("i1", 1200, 3, squid), _v("i2", 40, 2, dog)]),
+        # the FB copy went up 2 minutes after atlas's IG squid reel
+        _rr("atlas", "fb", [dict(_v("f1", 300, 3, "x"),
+                                 posted_at=(NOW - dt.timedelta(hours=3, minutes=-2))
+                                 .strftime("%Y-%m-%dT%H:%M:%S+0000"))]),
+        _rr("wswire", "ig", [_v("i3", 900, 3, "Squid attacks a submarine camera")]),
+        _rr("solo", "ig", [_v("i9", 5, 1, "Hand-posted clip")]),
+    ]
+    keys = {"i1": "squid.mp4", "i3": "squid.mp4", "i2": "dog.mp4"}
+    videos = report.group_videos(results, keys)
+    assert [v["views"] for v in videos] == [2400, 40, 5]
+    squid_v = videos[0]
+    assert squid_v["title"] == "Giant squid lunges at the camera"   # best copy's hook
+    assert [(x["brand"], x["platform"]) for x in squid_v["reels"]] == \
+        [("atlas", "ig"), ("wswire", "ig"), ("atlas", "fb")]
+    assert videos[1]["title"] == "Dog swept away by a wave"          # hashtags dropped
+
+    text = report.render_recent(results, NOW, video_keys=keys)[0]
+    assert "🎬 <b>Each video</b> (3)" in text
+    assert "1. <b>Giant squid lunges at the camera</b> — 2.4K views, 3 reels" in text
+    assert "    atlas 📸1.2K 📘300 · wswire 📸900" in text
+    assert "3. <b>Hand-posted clip</b> — 5 views, 1 reel" in text
+
+
+def test_group_videos_without_the_log_keeps_every_reel_apart():
+    results = [_rr("a", "ig", [_v("i1", 10, 1, "Same"), _v("i2", 20, 2, "Same")])]
+    assert len(report.group_videos(results, {})) == 2
+
+
+def test_long_video_list_splits_into_pages():
+    results = [_rr(f"b{i}", "ig", [_v(f"i{i}", i, 1, f"Video number {i} " + "x" * 40)])
+               for i in range(200)]
+    pages = report.render_recent(results, NOW)
+    assert len(pages) > 1 and all(len(p) <= report.MSG_LIMIT for p in pages)
+    assert sum(p.count("<pre>") for p in pages) >= 1

@@ -255,7 +255,13 @@ def paginate(head: list, tables: list, tail: list) -> list:
     def pre(header, chunk):
         return "<pre>" + html.escape("\n".join([header] + chunk)) + "</pre>"
 
-    pages, cur = [], "\n".join(head)
+    pages, cur = [], ""
+    for line in head:
+        if cur and len(cur) + 1 + len(line) > MSG_LIMIT:
+            pages.append(cur)
+            cur = line
+        else:
+            cur = cur + "\n" + line if cur else line
     for caption, header, rows in tables:
         prefix = ("\n\n" if cur else "") + (caption + "\n" if caption else "")
         chunk = []
@@ -325,12 +331,101 @@ def collect_recent(brands: list, since: dt.datetime,
     return out
 
 
+def logged_video_keys(since: dt.datetime) -> dict:
+    """{IG media id: video key} for the reels the bot logged since a little
+    before `since` — {} when the reel log can't be read. Never raises."""
+    try:
+        from modules.telegram import queue_store
+        rows = queue_store.reels_since(since - dt.timedelta(hours=1))
+        return {str(r["media_id"]): r["video_key"] for r in rows if r.get("media_id")}
+    except Exception:
+        return {}
+
+
 def _sum_views(reels) -> int:
     return sum(r.get("views") or 0 for r in reels or ())
 
 
+PAIR_S = 15 * 60   # a brand's FB reel within this of its IG reel = the same video
+
+
+def _title(caption: str) -> str:
+    """A reel's hook: the caption's first line without hashtags, ≤ 60 chars."""
+    line = next((ln for ln in (caption or "").splitlines() if ln.strip()), "")
+    line = re.sub(r"(?:^|\s)#\w+", "", line).strip()
+    return line if len(line) <= 60 else line[:59].rstrip() + "…"
+
+
+def group_videos(results: list, video_keys: dict | None = None) -> list:
+    """Every reel in `collect_recent`'s results grouped by VIDEO, most views
+    first: [{title, views, url, reels: [reel + brand/platform]}].
+
+    `video_keys` = {Instagram media id: video key} from the bot's reel log
+    (queue_store.reels_since) — what ties the copies of one video on
+    different accounts together. Facebook isn't logged, so a brand's FB reel
+    joins the logged IG reel the same brand posted within PAIR_S (one publish
+    puts both up). A reel nothing ties to another (hand-posted, or posted
+    before the log) is a video of its own."""
+    video_keys = video_keys or {}
+    reels = [dict(x, brand=r["brand"], platform=r["platform"])
+             for r in results if r["reels"] for x in r["reels"]]
+    ig_keyed = []
+    for x in reels:
+        if x["platform"] == "ig" and video_keys.get(x.get("id")):
+            x["key"] = video_keys[x["id"]]
+            ig_keyed.append(x)
+    for x in reels:
+        if "key" in x:
+            continue
+        t = _parse_time(x.get("posted_at"))
+        if x["platform"] != "ig" and t is not None:
+            near = [y for y in ig_keyed if y["brand"] == x["brand"]
+                    and (u := _parse_time(y.get("posted_at"))) is not None
+                    and abs((u - t).total_seconds()) <= PAIR_S]
+            if near:
+                x["key"] = near[0]["key"]
+                continue
+        x["key"] = f"{x['platform']}:{x.get('id') or x.get('url')}"
+    groups: dict[str, list] = {}
+    for x in reels:
+        groups.setdefault(x["key"], []).append(x)
+    out = []
+    for copies in groups.values():
+        copies.sort(key=lambda x: -(x.get("views") or 0))
+        top = copies[0]
+        title = next((t for t in (_title(c.get("caption")) for c in copies) if t),
+                     "(no caption)")
+        out.append({"title": title, "views": _sum_views(copies),
+                    "url": top.get("url") or "", "reels": copies})
+    out.sort(key=lambda v: (-v["views"], v["title"]))
+    return out
+
+
+def video_lines(videos: list) -> list:
+    """The 🎬 section: one numbered line per video (title, total views, how
+    many reels, a link to its best copy), then its views per account."""
+    if not videos:
+        return []
+    lines = ["", f"🎬 <b>Each video</b> ({len(videos)})"]
+    for i, v in enumerate(videos, 1):
+        n = len(v["reels"])
+        link = f' · <a href="{html.escape(v["url"])}">open</a>' if v["url"] else ""
+        lines.append(f"{i}. <b>{html.escape(v['title'])}</b> — "
+                     f"{fmt_num(v['views'])} views, {n} reel{'s' if n != 1 else ''}{link}")
+        per: dict[str, list] = {}
+        for x in v["reels"]:
+            per.setdefault(x["brand"], []).append(x)
+        parts = []
+        for brand, xs in sorted(per.items(), key=lambda kv: -_sum_views(kv[1])):
+            nums = " ".join(f"{_ICON[x['platform']]}{fmt_num(x.get('views'))}"
+                            for x in sorted(xs, key=lambda x: x["platform"] != "ig"))
+            parts.append(f"{html.escape(brand)} {nums}")
+        lines.append("    " + " · ".join(parts))
+    return lines
+
+
 def render_recent(results: list, now: dt.datetime | None = None,
-                  hours: int = WINDOW_H) -> list:
+                  hours: int = WINDOW_H, video_keys: dict | None = None) -> list:
     """Telegram-HTML pages for `collect_recent`: total views of every reel
     posted in the window, the best / most engaging / weakest reel, accounts
     that posted nothing, one table of views (account x platform: the sum of
@@ -380,13 +475,15 @@ def render_recent(results: list, now: dt.datetime | None = None,
             w, end = where(low)
             out.append(f"🐢 Weakest: {w} — {fmt_num(low['views'])} views {end}")
 
+    out += video_lines(group_videos(results, video_keys))
+
     by_brand: dict[str, dict] = {}
     for r in results:
         by_brand.setdefault(r["brand"], {})[r["platform"]] = r
     idle = sorted(n for n, rows in by_brand.items()
                   if all(r["reels"] == [] for r in rows.values()))
     if idle:
-        out.append(f"😴 Nothing posted: {html.escape(', '.join(idle))}")
+        out += ["", f"😴 Nothing posted: {html.escape(', '.join(idle))}"]
 
     def cell(r):
         if r is None:
@@ -426,8 +523,9 @@ def main() -> None:
         pages = render(collect(config.BRANDS))
     else:
         now = dt.datetime.now(dt.timezone.utc)
-        pages = render_recent(collect_recent(
-            config.BRANDS, now - dt.timedelta(hours=WINDOW_H)), now)
+        since = now - dt.timedelta(hours=WINDOW_H)
+        pages = render_recent(collect_recent(config.BRANDS, since), now,
+                              video_keys=logged_video_keys(since))
     for msg in pages:
         print(html.unescape(re.sub(r"<[^>]+>", "", msg)))
         print()

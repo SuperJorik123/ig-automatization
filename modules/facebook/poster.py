@@ -495,6 +495,7 @@ def _reel_row(reel: dict, token: str, account: str) -> dict:
     except Exception:
         pass
     return {
+        "id": str(vid),
         "url": url,
         "posted_at": reel.get("created_time") or "",
         "caption": reel.get("description") or "",
