@@ -30,6 +30,7 @@ from modules.radar.store import Store
 log = logging.getLogger("radar")
 
 FAIL_WARN_AFTER = 3
+SEND_DEBOUNCE_S = 60     # a double tap on 📤 Send to bot doesn't open two plan cards
 
 
 def _markup(rows):
@@ -90,6 +91,46 @@ class Notifier:
         except Exception as exc:
             log.warning("couldn't copy the video: %s", exc)
             return None
+
+    async def send_to_bot(self, items):
+        """📤 Send to bot: the listening account hands the story to the news
+        bot's control group — the Telegram video forwarded (copied when the
+        channel forbids forwarding), or the Reddit/other link as text, which
+        the news bot downloads. Either opens its normal plan card; nothing is
+        published from here. Returns None on success, else why not."""
+        if not S.NEWS_BOT_CHAT_ID:
+            return "RADAR_NEWS_BOT_CHAT_ID isn't set in .env.radar"
+        if self.client is None:
+            return "the listening account isn't logged in"
+        kind, what = A.send_target(items)
+        if kind is None:
+            return "this alert has no video or link to send"
+        if kind == "link":
+            try:
+                await self.client.send_message(S.NEWS_BOT_CHAT_ID, what, link_preview=False)
+                return None
+            except Exception as exc:
+                log.warning("send to bot failed: %s", exc)
+                return f"couldn't post in the news bot's group: {exc}"[:190]
+        import json
+        ref = json.loads(what["ref"] or "{}")
+        try:
+            await self.client.forward_messages(S.NEWS_BOT_CHAT_ID, ref["msg_id"], ref["chat_id"])
+            return None
+        except Exception as exc:
+            log.info("forward to bot refused (%s) — copying instead", exc)
+        if what["media_size"] > S.MAX_COPY_MB * 1024 * 1024:
+            return "the channel forbids forwarding and the video is too big to copy"
+        try:
+            msg = await self.client.get_messages(ref["chat_id"], ids=ref["msg_id"])
+            with tempfile.TemporaryDirectory() as tmp:
+                path = await self.client.download_media(msg, file=os.path.join(tmp, "clip"))
+                await self.client.send_file(S.NEWS_BOT_CHAT_ID, path, supports_streaming=True,
+                                            caption=(msg.message or "")[:1000])
+            return None
+        except Exception as exc:
+            log.warning("couldn't copy the video to the bot: %s", exc)
+            return f"couldn't copy the video: {exc}"[:190]
 
     async def alert(self, inc, items, video_row):
         reply_to = await self._video(video_row)
@@ -204,7 +245,9 @@ class Radar:
             return
         wanted = {h.lower() for h in tgsrc.load_channels()}
         watch = {}
+        chats = set()
         async for d in client.iter_dialogs():
+            chats.add(d.id)
             hit = _handles(d.entity) & wanted if d.is_channel else set()
             if hit:
                 watch[d.id] = next(h for h in tgsrc.load_channels() if h.lower() in hit)
@@ -213,6 +256,13 @@ class Radar:
             log.warning("not joined (run --join): %s", ", ".join(sorted(missing)))
         self.client = client
         self.pipe.notifier.client = client
+        if S.NEWS_BOT_CHAT_ID and S.NEWS_BOT_CHAT_ID not in chats:
+            await self.pipe.notifier.text(
+                "⚠️ The listening account isn't in the news bot's group "
+                f"(<code>{S.NEWS_BOT_CHAT_ID}</code>) — 📤 Send to bot won't work until "
+                "it's added there.")
+        elif S.NEWS_BOT_CHAT_ID:
+            log.info("📤 Send to bot -> %s", S.NEWS_BOT_CHAT_ID)
 
         async def handle(msgs, chat_id):
             uname = watch.get(chat_id)
@@ -256,6 +306,9 @@ class Radar:
             await q.answer()
             return
         verb, inc_id, reason = parsed
+        if verb == "s":
+            await self._send_to_bot(q, inc_id)
+            return
         if verb == "x":
             await q.answer()
             await q.edit_message_reply_markup(_markup(A.reasons_keyboard(inc_id)))
@@ -269,6 +322,29 @@ class Radar:
             await q.edit_message_text(A.incident_text(inc, items, time.time()), parse_mode="HTML",
                                       reply_markup=_markup(A.keyboard(inc)),
                                       disable_web_page_preview=True)
+
+    async def _send_to_bot(self, q, inc_id):
+        inc = self.store.incident(inc_id)
+        items = self.store.incident_items(inc_id) if inc else []
+        if not items:
+            await q.answer("this alert is gone", show_alert=True)
+            return
+        if inc["sent"] and time.time() - inc["sent"] < SEND_DEBOUNCE_S:
+            await q.answer("already sent — check the news bot")
+            return
+        err = await self.pipe.notifier.send_to_bot(items)
+        if err:
+            await q.answer("❌ " + err, show_alert=True)
+            return
+        self.store.update_incident(inc_id, sent=time.time())
+        inc = self.store.incident(inc_id)
+        await q.answer("📤 sent to the news bot")
+        try:
+            await q.edit_message_text(A.incident_text(inc, items, time.time()), parse_mode="HTML",
+                                      reply_markup=_markup(A.keyboard(inc)),
+                                      disable_web_page_preview=True)
+        except Exception as exc:
+            log.info("alert edit skipped: %s", exc)
 
     async def cmd_status(self, update, context):
         if update.effective_chat.id != S.CHAT_ID:

@@ -38,6 +38,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BOT_TOKEN = _str("RADAR_BOT_TOKEN")
 CHAT_ID = _int("RADAR_CHAT_ID", 0)  # a SUPERgroup (-100…) — see docs/RADAR_PLAN.md
 
+# The NEWS BOT's control group (its TELEGRAM_CHAT_ID). 📤 Send to bot has the
+# listening account post there — it must be a member. Unset = button refuses.
+NEWS_BOT_CHAT_ID = _int("RADAR_NEWS_BOT_CHAT_ID", 0)
+
 # --- Telegram: the LISTENING user account (a spare one, not the bots') ------
 API_ID = _str("RADAR_API_ID") or _str("TELEGRAM_API_ID")
 API_HASH = _str("RADAR_API_HASH") or _str("TELEGRAM_API_HASH")

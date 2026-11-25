@@ -277,6 +277,7 @@ def test_spike_about_an_alerted_incident_stays_quiet(env, monkeypatch):
 # --- alert text / buttons -----------------------------------------------------
 def test_callbacks_round_trip():
     assert A.parse_callback("r:w:5") == ("w", 5, None)
+    assert A.parse_callback("r:s:5") == ("s", 5, None)
     assert A.parse_callback("r:xr:5:boring") == ("xr", 5, "boring")
     assert A.parse_callback("r:xr:5:nonsense") is None
     assert A.parse_callback("b:go") is None
@@ -288,7 +289,23 @@ def test_incident_text_escapes_and_names_sources(env):
     inc = pipe.store.incident(1)
     txt = A.incident_text(inc, pipe.store.incident_items(1), NOW)
     assert "FIRE" in txt and "BNONews" in txt and "<b>Brooklyn</b>" not in txt.split("\n", 1)[1]
-    assert "forward the video" in txt
+    assert "Send to bot" in txt
+    assert A.keyboard(inc)[0][0] == ("📤 Send to bot", "r:s:1")
+    pipe.store.update_incident(1, sent=NOW)
+    inc = pipe.store.incident(1)
+    assert "sent to the news bot" in A.incident_text(inc, pipe.store.incident_items(1), NOW)
+    assert A.keyboard(inc)[0][0][1] == "r:s:1"
+
+
+def test_send_target_forwards_telegram_video_else_sends_the_link(env):
+    pipe, *_ = env
+    run(pipe.ingest(_tg("1", "Fire Brooklyn warehouse huge")))
+    kind, it = A.send_target(pipe.store.incident_items(1))
+    assert kind == "forward" and it["source"] == "tg:@BNONews"
+    rows = [{"has_video": 1, "source": "reddit:PublicFreakout", "link": "https://www.reddit.com/r/x/comments/abc/t/"},
+            {"has_video": 0, "source": "tg:@c", "link": "https://t.me/c/1"}]
+    assert A.send_target(rows) == ("link", "https://www.reddit.com/r/x/comments/abc/t/")
+    assert A.send_target([{"has_video": 0, "source": "tg:@c", "link": "https://t.me/c/1"}]) == (None, None)
 
 
 def test_reasons_keyboard_has_every_reason_and_back():

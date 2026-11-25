@@ -1,7 +1,9 @@
 """Alert messages and buttons — pure (Telegram HTML strings + button specs).
 
 Callback namespace `r:`
-  r:w:<incident>        toggle 👀 Watch (watched incidents ping again when they grow)
+  r:s:<incident>        📤 Send to bot — the listening account hands the video
+                        (Telegram) or the link (Reddit…) to the news bot's group
+  r:w:<incident>        toggle 👀 Watch (no longer on new alerts; old ones still work)
   r:x:<incident>        ✕ Not interesting -> the reasons row
   r:xr:<incident>:<k>   the reason (kept for learning) — closes the alert
   r:b:<incident>        back from the reasons row
@@ -85,9 +87,10 @@ def incident_text(inc, items, now: float, note: str = "") -> str:
     facts.append(f"score {inc['score']}")
     lines.append(" · ".join(facts))
     lines.append("🔗 " + _links(items))
-    reddit_only = all(i["source"].startswith("reddit:") for i in items if i["has_video"])
-    lines.append("<i>→ send the link to the news bot</i>" if reddit_only
-                 else "<i>→ forward the video above to the news bot</i>")
+    if inc["sent"]:
+        lines.append("📤 sent to the news bot")
+    else:
+        lines.append("<i>→ 📤 Send to bot hands it to the news bot</i>")
     if inc["watch"]:
         lines.append("👀 watching")
     if inc["ignored"]:
@@ -101,8 +104,22 @@ def keyboard(inc) -> list:
     """Rows of (label, callback_data); [] once the alert is closed."""
     if inc["ignored"]:
         return []
-    watch = "👀 Watching ✓" if inc["watch"] else "👀 Watch"
-    return [[(watch, f"r:w:{inc['id']}"), ("✕ Not interesting", f"r:x:{inc['id']}")]]
+    send = "📤 Sent ✓ (again?)" if inc["sent"] else "📤 Send to bot"
+    return [[(send, f"r:s:{inc['id']}"), ("✕ Not interesting", f"r:x:{inc['id']}")]]
+
+
+def send_target(items):
+    """What 📤 Send to bot hands over: ("forward", item) for a Telegram video
+    (forwarded as-is — no download), else ("link", url) for the first video
+    with a link (Reddit…: the news bot downloads it), else (None, None)."""
+    videos = [i for i in items if i["has_video"]]
+    for it in videos:
+        if it["source"].startswith("tg:"):
+            return "forward", it
+    for it in videos + list(items):
+        if it["link"] and not it["source"].startswith("tg:"):
+            return "link", it["link"]
+    return None, None
 
 
 def reasons_keyboard(inc_id: int) -> list:
@@ -114,9 +131,9 @@ def reasons_keyboard(inc_id: int) -> list:
 
 
 def parse_callback(data: str):
-    """('w'|'x'|'xr'|'b', incident id, reason|None) or None."""
+    """('s'|'w'|'x'|'xr'|'b', incident id, reason|None) or None."""
     parts = (data or "").split(":")
-    if len(parts) < 3 or parts[0] != "r" or parts[1] not in ("w", "x", "xr", "b"):
+    if len(parts) < 3 or parts[0] != "r" or parts[1] not in ("s", "w", "x", "xr", "b"):
         return None
     try:
         inc = int(parts[2])

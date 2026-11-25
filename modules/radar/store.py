@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     english TEXT DEFAULT '',
     alert_msg_id INTEGER, alerted_at REAL, alerted_sources INTEGER DEFAULT 0,
     alerted_videos INTEGER DEFAULT 0,
-    watch INTEGER DEFAULT 0, ignored TEXT DEFAULT ''
+    watch INTEGER DEFAULT 0, ignored TEXT DEFAULT '', sent REAL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS incidents_updated ON incidents(updated);
 CREATE TABLE IF NOT EXISTS term_hits (
@@ -57,6 +57,9 @@ class Store:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(incidents)")}
+        if "sent" not in cols:      # DBs from before 📤 Send to bot
+            self.db.execute("ALTER TABLE incidents ADD COLUMN sent REAL DEFAULT 0")
         self.db.commit()
 
     # --- items --------------------------------------------------------------
