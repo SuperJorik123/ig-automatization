@@ -282,7 +282,7 @@ def test_render_recent_sums_every_reel_of_the_window():
     assert '🏆 Best reel: <b>big</b> on Instagram — 5K views (3h ago) · <a href="https://ig/a">open</a>' in text
     assert "🐢 Weakest: <b>small</b> on Instagram — 50 views" in text
     assert "😴 Nothing posted: quiet" in text
-    table = [l.split() for l in text[text.index("<pre>") + 5:text.index("</pre>")].splitlines()]
+    table = _pre_tables(text)[-1]                     # the account table comes last
     assert table[0] == ["IG", "FB", "#"]
     assert table[1] == ["big", "7K", "1K", "3"]
     assert table[2] == ["small", "50", "·", "1"]
@@ -392,6 +392,15 @@ def _v(vid, views, hours_ago, caption, url=None):
     return dict(r, id=vid, caption=caption)
 
 
+def _pre_tables(text):
+    out, rest = [], text
+    while "<pre>" in rest:
+        body = rest[rest.index("<pre>") + 5:rest.index("</pre>")]
+        out.append([line.split() for line in body.splitlines()])
+        rest = rest[rest.index("</pre>") + 6:]
+    return out
+
+
 def test_group_videos_ties_copies_through_the_reel_log():
     squid = "Giant squid lunges at the camera\n\nMore text #squid"
     dog = "Dog swept away by a wave #oregon"
@@ -414,10 +423,16 @@ def test_group_videos_ties_copies_through_the_reel_log():
     assert videos[1]["title"] == "Dog swept away by a wave"          # hashtags dropped
 
     text = report.render_recent(results, NOW, video_keys=keys)[0]
-    assert "🎬 <b>Each video</b> (3)" in text
-    assert "1. <b>Giant squid lunges at the camera</b> — 2.4K views, 3 reels" in text
-    assert "    atlas 📸1.2K 📘300 · wswire 📸900" in text
-    assert "3. <b>Hand-posted clip</b> — 5 views, 1 reel" in text
+    assert "🎬 <b>Each video</b>" in text
+    assert "<b>1. Giant squid lunges at the camera</b>\n👁 2.4K views · 3 reels" in text
+    tables = _pre_tables(text)
+    squid_t = tables[0]
+    assert squid_t[0] == ["IG", "FB", "Total"]
+    assert squid_t[1] == ["atlas", "1.2K", "300", "1.5K"]
+    assert squid_t[2] == ["wswire", "900", "·", "900"]
+    assert tables[2] == [["IG"], ["solo", "5"]]          # one platform: no Total
+    assert "<b>3. Hand-posted clip</b>\n👁 5 views · 1 reel" in text
+    assert "👤 <b>Each account</b>" in text
 
 
 def test_group_videos_without_the_log_keeps_every_reel_apart():

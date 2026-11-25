@@ -393,7 +393,9 @@ def group_videos(results: list, video_keys: dict | None = None) -> list:
     for copies in groups.values():
         copies.sort(key=lambda x: -(x.get("views") or 0))
         top = copies[0]
-        title = next((t for t in (_title(c.get("caption")) for c in copies) if t),
+        # The hook from an Instagram copy first: that caption opens on it.
+        named = sorted(copies, key=lambda c: c["platform"] != "ig")
+        title = next((t for t in (_title(c.get("caption")) for c in named) if t),
                      "(no caption)")
         out.append({"title": title, "views": _sum_views(copies),
                     "url": top.get("url") or "", "reels": copies})
@@ -401,27 +403,38 @@ def group_videos(results: list, video_keys: dict | None = None) -> list:
     return out
 
 
-def video_lines(videos: list) -> list:
-    """The 🎬 section: one numbered line per video (title, total views, how
-    many reels, a link to its best copy), then its views per account."""
-    if not videos:
-        return []
-    lines = ["", f"🎬 <b>Each video</b> ({len(videos)})"]
+def video_tables(videos: list) -> list:
+    """The 🎬 section as paginate() tables, one per video: a caption (number,
+    hook, total views, reel count, link to the best copy) over a small table
+    — an account per row (most views first), a column per platform the
+    video went to, and a Total column when there is more than one."""
+    out = []
     for i, v in enumerate(videos, 1):
         n = len(v["reels"])
         link = f' · <a href="{html.escape(v["url"])}">open</a>' if v["url"] else ""
-        lines.append(f"{i}. <b>{html.escape(v['title'])}</b> — "
-                     f"{fmt_num(v['views'])} views, {n} reel{'s' if n != 1 else ''}{link}")
-        per: dict[str, list] = {}
+        caption = (("🎬 <b>Each video</b>\n\n" if i == 1 else "")
+                   + f"<b>{i}. {html.escape(v['title'])}</b>\n"
+                   f"👁 {fmt_num(v['views'])} views · {n} reel{'s' if n != 1 else ''}{link}")
+        plats = [p for p, _, _ in PLATFORMS if any(x["platform"] == p for x in v["reels"])]
+        per: dict[str, dict] = {}
         for x in v["reels"]:
-            per.setdefault(x["brand"], []).append(x)
-        parts = []
-        for brand, xs in sorted(per.items(), key=lambda kv: -_sum_views(kv[1])):
-            nums = " ".join(f"{_ICON[x['platform']]}{fmt_num(x.get('views'))}"
-                            for x in sorted(xs, key=lambda x: x["platform"] != "ig"))
-            parts.append(f"{html.escape(brand)} {nums}")
-        lines.append("    " + " · ".join(parts))
-    return lines
+            per.setdefault(x["brand"], {}).setdefault(x["platform"], []).append(x)
+        ranked = sorted(per, key=lambda b: (-sum(_sum_views(xs) for xs in per[b].values()), b))
+        name_w = min(NAME_W, max(len(b) for b in ranked))
+
+        def name(b):
+            return b if len(b) <= name_w else b[:name_w - 1] + "…"
+        total = len(plats) > 1
+        header = (" " * name_w + "".join(_SHORT[p].rjust(COL_W) for p in plats)
+                  + ("Total".rjust(COL_W + 1) if total else ""))
+        rows = []
+        for b in ranked:
+            cells = "".join((fmt_num(_sum_views(per[b][p])) if p in per[b] else "·").rjust(COL_W)
+                            for p in plats)
+            tot = fmt_num(sum(_sum_views(xs) for xs in per[b].values())).rjust(COL_W + 1)
+            rows.append(name(b).ljust(name_w) + cells + (tot if total else ""))
+        out.append((caption, header, rows))
+    return out
 
 
 def render_recent(results: list, now: dt.datetime | None = None,
@@ -475,7 +488,7 @@ def render_recent(results: list, now: dt.datetime | None = None,
             w, end = where(low)
             out.append(f"🐢 Weakest: {w} — {fmt_num(low['views'])} views {end}")
 
-    out += video_lines(group_videos(results, video_keys))
+    videos = video_tables(group_videos(results, video_keys))
 
     by_brand: dict[str, dict] = {}
     for r in results:
@@ -514,7 +527,8 @@ def render_recent(results: list, now: dt.datetime | None = None,
         tail += [f"• {html.escape(r['brand'])} {_SHORT[r['platform']]}: "
                  f"{html.escape(short_error(r['error']))}"
                  for r in sorted(broken, key=lambda r: (r["brand"], r["platform"]))]
-    return paginate(out, [("", header, rows)], tail)
+    account = ("👤 <b>Each account</b>" if videos else "", header, rows)
+    return paginate(out, videos + [account], tail)
 
 
 def main() -> None:
