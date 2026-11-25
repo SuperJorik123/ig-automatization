@@ -462,13 +462,11 @@ BRANDS = _parse_brands(os.environ.get("BRANDS", ""), os.environ)
 BUNDLE_ACCOUNTS = [
     a.strip() for a in os.environ.get("BUNDLE_ACCOUNTS", "").split(",") if a.strip()
 ] or [b["name"] for b in BRANDS if b["ig"]]
-# The random gap between two consecutive bundle posts, in seconds (2-8 min).
-BUNDLE_GAP_MIN_S = _int_env("BUNDLE_GAP_MIN_S", 120)
-BUNDLE_GAP_MAX_S = _int_env("BUNDLE_GAP_MAX_S", 480)
-# Never more than BUNDLE_MAX_COPIES posts of one video in BUNDLE_COPY_WINDOW_S
-# — this outranks the gap, so a one-video bundle (ten copies) takes ~2.5 h.
-BUNDLE_MAX_COPIES = _int_env("BUNDLE_MAX_COPIES", 2)
-BUNDLE_COPY_WINDOW_S = _int_env("BUNDLE_COPY_WINDOW_S", 1800)
+# The random gap between two consecutive bundle posts, in seconds (1-3 min; was 2-8, too slow — owner 2026-11-23).
+BUNDLE_GAP_MIN_S = _int_env("BUNDLE_GAP_MIN_S", 60)
+BUNDLE_GAP_MAX_S = _int_env("BUNDLE_GAP_MAX_S", 180)
+# (No per-video copy cap any more — BUNDLE_MAX_COPIES / BUNDLE_COPY_WINDOW_S
+# were removed 2026-11-25, owner.)
 # The first bundle post goes out this long after 🚀 Publish — room to cancel.
 BUNDLE_FIRST_POST_S = _int_env("BUNDLE_FIRST_POST_S", 120)
 

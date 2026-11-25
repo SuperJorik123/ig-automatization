@@ -251,14 +251,17 @@ def countdown_keyboard() -> InlineKeyboardMarkup:
 #
 # A branded post used to be a wizard — gate, brand picker, render, platform
 # picker — and every feature added a step. The plan card fills every answer
-# in up front (the house default below) and asks for one approval: 🎬 Render
-# renders, and the publish picker then opens with the plan's platforms already
-# ticked. ✏️ Change opens one editor holding all the choices at once, for this
+# in up front (the house default below) and asks for one approval: 🕒 Schedule
+# asks WHEN (`when_keyboard`), then renders and publishes the plan's platforms
+# at that time with no further tap — Now through the usual 60 s countdown, a
+# later time as a scheduled post (✕ Cancel schedule until it fires). 🎬 Just
+# render keeps the old path: render, then the publish picker. ✏️ Change opens one editor holding all the choices at once, for this
 # post only. A new option becomes a line on the card with a default, not
 # another screen.
 #
 # Callback verbs (all under "b:"):
-#     b:go  b:edit  b:asis  b:cancel      the card (b:go is 🎬 Render)
+#     b:when  b:edit  b:asis  b:cancel    the card (b:when is 🕒 Schedule)
+#     b:w:<now|us|go|+secs>  b:wback      the time picker (b:go = lite Render)
 #     b:g:<i> b:custom b:groups b:t:<i>   editor — brands (as in the picker)
 #     b:lay:<layout>  b:pk:<key>  b:done  editor — design, platforms, back
 
@@ -351,15 +354,35 @@ def _design_row(layouts: list, layout) -> list:
 PREVIEW_EDIT_BUTTON = InlineKeyboardButton("▶ Preview edit", callback_data="b:pv")
 
 
+# 🕒 Schedule on the plan card: when the post goes out. The delays are sent
+# as "+<seconds>" and turned into a time on the TAP (news_bot), so +1h means
+# an hour from when it was tapped, not from when the render finishes.
+WHEN_DELAYS = (("+1h", 3600), ("+3h", 3 * 3600), ("+6h", 6 * 3600))
+
+
+def when_keyboard() -> InlineKeyboardMarkup:
+    """The plan card's time picker: Now / +1h / +3h / +6h / 🇺🇸 US evening.
+    Any of them renders and then publishes with no further tap; 🎬 Just
+    render stops at the publish picker like before."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶ Now", callback_data="b:w:now")]
+        + [InlineKeyboardButton(label, callback_data=f"b:w:+{secs}")
+           for label, secs in WHEN_DELAYS],
+        [InlineKeyboardButton("🇺🇸 US evening", callback_data="b:w:us")],
+        [InlineKeyboardButton("🎬 Just render", callback_data="b:w:go"),
+         InlineKeyboardButton("⬅ Back", callback_data="b:wback")],
+    ])
+
+
 def plan_keyboard(layouts: list = (), layout=None, n_headlines: int = 0,
                   chosen=None, bundle: bool = False,
                   preview: bool = False) -> InlineKeyboardMarkup:
-    """Render / Change / Download / Post as-is / Cancel, with the design row
+    """Schedule / Change / Download / Post as-is / Cancel, with the design row
     right on the card when a photo post has more than one design to choose
     from, and a 1-N row when AI headline options are on offer (`chosen` is
     the one currently set, marked ●). `preview`: the post has an `edit:`, so
-    ▶ Preview edit is offered under Render."""
-    rows = [[InlineKeyboardButton("🎬 Render", callback_data="b:go"),
+    ▶ Preview edit is offered under Schedule."""
+    rows = [[InlineKeyboardButton("🕒 Schedule", callback_data="b:when"),
              InlineKeyboardButton("✏️ Change", callback_data="b:edit")]]
     if len(layouts) > 1:
         rows.insert(0, _design_row(layouts, layout))

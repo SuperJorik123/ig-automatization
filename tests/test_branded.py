@@ -92,7 +92,7 @@ def _editor(brands, selected, custom=False, layouts=(), layout=None,
 
 def test_plan_keyboard_is_go_change_asis_cancel():
     data = [b.callback_data for b in _buttons(branded.plan_keyboard())]
-    assert data == ["b:go", "b:edit", "b:dl", "b:asis", "b:cancel"]
+    assert data == ["b:when", "b:edit", "b:dl", "b:asis", "b:cancel"]
 
 
 def test_plan_keyboard_offers_headline_options_on_top():
@@ -430,9 +430,15 @@ def test_default_design_is_circles_for_an_album_and_solo_for_one_photo():
     assert branded.default_plan(_plan_brands(), "photo", 1)["layout"] == "solo"
 
 
-def test_render_is_the_first_button_on_the_card():
+def test_schedule_is_the_first_button_on_the_card():
     btn = branded.plan_keyboard().inline_keyboard[0][0]
-    assert (btn.text, btn.callback_data) == ("🎬 Render", "b:go")
+    assert (btn.text, btn.callback_data) == ("🕒 Schedule", "b:when")
+
+
+def test_when_keyboard_offers_now_delays_us_and_just_render():
+    data = [b.callback_data for b in _buttons(branded.when_keyboard())]
+    assert data == ["b:w:now", "b:w:+3600", "b:w:+10800", "b:w:+21600",
+                    "b:w:us", "b:w:go", "b:wback"]
 
 
 def test_card_shows_the_designs_on_top_for_an_album():
@@ -440,12 +446,12 @@ def test_card_shows_the_designs_on_top_for_an_album():
     assert [b.callback_data for b in kb[0]] == [
         "b:lay:insets", "b:lay:split2", "b:lay:split3", "b:lay:solo"]
     assert kb[0][2].text.startswith("● ")
-    assert kb[1][0].callback_data == "b:go"
+    assert kb[1][0].callback_data == "b:when"
 
 
 def test_card_has_no_design_row_for_one_photo():
     kb = branded.plan_keyboard(branded.card_layouts(1), "solo").inline_keyboard
-    assert kb[0][0].callback_data == "b:go"
+    assert kb[0][0].callback_data == "b:when"
 
 
 def test_brands_summary_names_whole_groups():
