@@ -65,6 +65,7 @@ import itertools
 import logging
 import os
 import sys
+import time
 
 # Make the repo root importable so `from shared` / `from modules` resolve when
 # run directly (`py modules/telegram/news_bot.py`).
@@ -482,9 +483,9 @@ async def _on_edit_reply(state: dict, value: str, reply, msg) -> None:
         return
     if mode not in ("plan", "bundle"):
         _track(await msg.reply_text(
-            "✂️ too late for an edit — it is applied when 🎬 Render runs"
+            "✂️ too late for an edit — it is applied when the render runs"
             if mode in ("rendering", "publish", "countdown", "schedule")
-            else "✂️ an edit applies to branded renders — use 🎬 Render"))
+            else "✂️ an edit applies to branded renders — use 🕒 Schedule"))
         return
     try:
         spec = video_edit.parse(value)
@@ -545,7 +546,7 @@ async def _preview_edit(q, context, state: dict) -> None:
                 _track(await q.message.reply_text(
                     f"✂️ the edited clip is {mtproto.human_size(size)} — too "
                     f"big to send back ({mtproto.unavailable_reason()}); "
-                    "🎬 Render still works"))
+                    "the render still works"))
             else:
                 with open(path, "rb") as fh:
                     _track(await q.message.reply_video(
@@ -604,9 +605,12 @@ def _task_running(task) -> bool:
 
 
 def _plan_markup(state: dict) -> InlineKeyboardMarkup:
-    """🎬 Render / ✏️ Change, or — while editing — every choice on one screen."""
+    """🕒 Schedule / ✏️ Change, its time picker, or — while editing — every
+    choice on one screen."""
     if config.LITE:
         return _lite_plan_markup(state)
+    if state.get("picking_when"):
+        return branded.when_keyboard()
     layouts = (branded.card_layouts(_photo_count(state["media"]))
                if state["gate_kind"] == "photo" else [])
     if not state.get("editing"):
@@ -1559,8 +1563,40 @@ async def _on_plan_callback(q, context, state: dict, verb: str) -> None:
         await _preview_edit(q, context, state)
         return
 
+    if verb == "when":
+        # 🕒 Schedule: the card's buttons become the time picker.
+        await q.answer()
+        state["picking_when"] = True
+        state["editing"] = False
+        await redraw()
+        return
+
+    if verb == "wback":
+        await q.answer()
+        state["picking_when"] = False
+        await redraw()
+        return
+
+    if verb.startswith("w:"):
+        # A time from the picker: remember it, then render exactly like
+        # 🎬 Render did. `_after_render` publishes / schedules at that time.
+        choice = verb.split(":", 1)[1]
+        if choice.startswith("+"):
+            try:
+                choice = int(time.time()) + int(choice[1:])
+            except ValueError:
+                await q.answer()
+                return
+        elif choice not in ("now", "us", "go"):
+            await q.answer()
+            return
+        state["when"] = choice
+        state["picking_when"] = False
+        verb = "go"
+
     if verb == "go":
-        # "b:go" is the 🎬 Render button. Validate BEFORE answering: a query
+        # "b:go" renders (the lite bot's 🎬 Render; the full bot gets here
+        # from the 🕒 Schedule time picker). Validate BEFORE answering: a query
         # can only be answered once, so an alert sent after a bare q.answer()
         # never reaches the operator.
         if not state["sel_brands"]:
@@ -2059,6 +2095,50 @@ async def _do_render(q, context, state: dict) -> None:
 
     _pending.pop(q.message.message_id, None)
     _pending[prompt.message_id] = state
+    await _after_render(context, state, prompt)
+
+
+async def _after_render(context, state: dict, prompt) -> None:
+    """The time picked on 🕒 Schedule, applied to the publish picker that the
+    render just opened (`prompt`): Now → the usual 60 s countdown with
+    ✕ Cancel, a later time / 🇺🇸 → a scheduled post, nothing picked (lite,
+    🎬 Just render) → the picker stays for a hand pick. Whenever the time
+    can't be honoured the picker stays open and says why, so the post is
+    never lost and never goes out at a time nobody chose."""
+    when = state.pop("when", None)
+    if when in (None, "go"):
+        return
+
+    async def keep_picker(why: str) -> None:
+        try:
+            await prompt.edit_text(
+                f"⚠️ {why} — pick here instead.\n\n"
+                + _publish_prompt_text(state),
+                reply_markup=branded.platform_keyboard(state["platforms"],
+                                                      state["sel_platforms"]))
+        except Exception as exc:
+            log.error("after-render note failed: %s", exc)
+
+    if not state["sel_platforms"]:
+        await keep_picker("none of the plan's platforms has an account on "
+                          "these brands")
+        return
+    if when == "now":
+        _start_countdown(context.bot, state, prompt)
+        return
+    if when == "us":
+        slot = schedule.next_us_slot(_taken_slots())
+        if slot is None:
+            await keep_picker("no free US-evening slot in the next week")
+            return
+    else:
+        slot = dt.datetime.fromtimestamp(int(when), schedule.TZ)
+        why = schedule.check(slot)
+        if why:
+            await keep_picker(f"can't schedule for "
+                              f"{slot.strftime('%H:%M')}: {why}")
+            return
+    await _schedule_post(context, state, prompt, slot)
 
 
 async def _ensure_local_photos(bot, state: dict) -> list[str]:
@@ -2187,6 +2267,7 @@ async def _do_render_card(q, context, state: dict) -> None:
 
     _pending.pop(q.message.message_id, None)
     _pending[prompt.message_id] = state
+    await _after_render(context, state, prompt)
 
 
 # Telegram's limit on a media caption. A longer IG caption goes in a reply.
@@ -2779,9 +2860,7 @@ def _slots_for(plan: dict) -> list:
     rendered = {a: v for a, v in plan["assignment"].items()
                 if a in plan["renders"].get(v, {})}
     return bundle.timetable(
-        rendered, gap=(config.BUNDLE_GAP_MIN_S, config.BUNDLE_GAP_MAX_S),
-        max_copies=config.BUNDLE_MAX_COPIES,
-        window=config.BUNDLE_COPY_WINDOW_S)
+        rendered, gap=(config.BUNDLE_GAP_MIN_S, config.BUNDLE_GAP_MAX_S))
 
 
 def _summary(bid: int, plan: dict, platforms, start=None,

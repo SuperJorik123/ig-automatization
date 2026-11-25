@@ -85,37 +85,24 @@ def test_no_accounts_carries_everything():
 
 @pytest.mark.parametrize("videos", [["a"], ["a", "b", "c"], list("abcdefghij")])
 @pytest.mark.parametrize("seed", range(10))
-def test_timetable_respects_the_copy_cap_and_the_gaps(videos, seed):
+def test_timetable_is_one_post_every_1_to_3_minutes(videos, seed):
     rng = random.Random(seed)
     out, _ = bundle.assign(videos, ACCOUNTS, rng=rng)
     slots = bundle.timetable(out, rng=rng)
     assert sorted(a for _, a, _ in slots) == sorted(ACCOUNTS)
-    assert bundle.check_timetable(slots)
     times = [t for t, _, _ in slots]
     assert times == sorted(times) and times[0] == 0
     gaps = [b - a for a, b in zip(times, times[1:])]
-    assert all(g >= 119 for g in gaps)
+    assert all(59 <= g <= 181 for g in gaps)
+    if len(videos) > 1:      # interleaved: never the same video twice in a row
+        vids = [v for _, _, v in slots]
+        assert all(a != b for a, b in zip(vids, vids[1:]))
 
 
-def test_ten_different_videos_go_out_in_2_to_8_minute_gaps():
-    out, _ = bundle.assign(list("abcdefghij"), ACCOUNTS)
-    times = [t for t, _, _ in bundle.timetable(out)]
-    gaps = [b - a for a, b in zip(times, times[1:])]
-    assert all(119 <= g <= 481 for g in gaps)
-
-
-def test_one_video_waits_for_the_cap():
+def test_one_video_no_longer_waits_for_a_copy_cap():
     out, _ = bundle.assign(["a"], ACCOUNTS)
     slots = bundle.timetable(out, rng=random.Random(1))
-    assert bundle.check_timetable(slots)
-    assert slots[-1][0] >= 4 * 1800       # 5 pairs, 30 min apart
-
-
-def test_check_timetable_catches_three_in_thirty_minutes():
-    assert not bundle.check_timetable([(0, "x", "a"), (600, "y", "a"),
-                                       (1200, "z", "a")])
-    assert bundle.check_timetable([(0, "x", "a"), (600, "y", "a"),
-                                   (1800, "z", "a")])
+    assert len(slots) == len(ACCOUNTS) and slots[-1][0] <= 9 * 180
 
 
 # --------------------------------------------------------------------------- #

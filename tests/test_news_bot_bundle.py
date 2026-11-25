@@ -333,7 +333,7 @@ def test_publish_schedules_one_post_per_account_spread_out(env):
     slots = [(int((r["due_at"] - rows[0]["due_at"]).total_seconds()),
               r["payload"]["renders"][0]["brand"],
               r["payload"]["bundle"]["video_key"]) for r in rows]
-    assert bundle.check_timetable(slots)
+    assert slots[-1][0] <= 9 * 180       # ten posts, 1-3 min apart, no copy cap
     p = rows[0]["payload"]
     acc = p["renders"][0]["brand"]
     assert p["captions"][acc].startswith("caption for Headline")

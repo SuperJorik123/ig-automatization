@@ -20,11 +20,10 @@ are carried over to the next bundle — one account never posts two bundle
 videos at once.
 
 TIMETABLE (`timetable`): the posts go out one after another with a random
-2-8 minute gap (BUNDLE_GAP_MIN_S..MAX_S), and never more than
-BUNDLE_MAX_COPIES (2) copies of the same video inside BUNDLE_COPY_WINDOW_S
-(30 min) — a slot for a video that would break that waits until it is
-allowed, so a one-video bundle (ten copies) takes about two and a half hours
-and a ten-video bundle about forty minutes.
+1-3 minute gap (BUNDLE_GAP_MIN_S..MAX_S), the videos interleaved — ten posts
+take ~20 minutes however many videos they are. (The old cap of 2 copies of
+one video per 30 min was removed 2026-11-25, owner: it stretched a 3-video
+bundle to ~45 min and a 1-video one to ~2.5 h.)
 """
 
 import html
@@ -128,58 +127,31 @@ def clashes(assignment: dict, history: dict) -> list:
 
 
 def timetable(assignment: dict, rng: random.Random | None = None,
-              gap=(120, 480), max_copies: int = 2, window: int = 1800,
-              first: int = 0) -> list:
+              gap=(60, 180), first: int = 0) -> list:
     """[(seconds from now, account, video)], soonest first.
 
-    One post at a time with a random `gap` between them; never more than
-    `max_copies` posts of one video in any `window` seconds — a video that
-    would break that is deferred, and when only such videos are left the
-    clock jumps to the moment the oldest of them leaves the window. Among the
-    videos allowed, the one with the most copies still to go is posted next
-    (ties random), which spreads every video across the whole run."""
+    One post at a time with a random `gap` between them. The video with the
+    most copies still to go is posted next (ties random; never the same video
+    twice in a row while another is left), which spreads every video across
+    the whole run."""
     rng = rng or random.Random()
     left = {}
     for account, video in assignment.items():
         left.setdefault(video, []).append(account)
     for accs in left.values():
         rng.shuffle(accs)
-    posted = {v: [] for v in left}          # video -> its slot times
-    # Whole seconds throughout: a float clock jumped to `oldest + window`
-    # can land a hair inside the window and never get out of it.
-    out, t = [], int(first)
-
-    def allowed(video, at):
-        recent = [x for x in posted[video] if at - x < window]
-        return len(recent) < max_copies
-
+    out, t, last = [], int(first), None
     while any(left.values()):
-        ready = [v for v, a in left.items() if a and allowed(v, t)]
-        if not ready:
-            # The earliest moment any pending video is allowed again.
-            t = min(sorted(x for x in posted[v] if t - x < window)[
-                -max_copies] + window for v, a in left.items() if a)
-            continue
+        ready = [v for v, a in left.items() if a]
+        if len(ready) > 1 and last in ready:
+            ready.remove(last)
         most = max(len(left[v]) for v in ready)
         video = rng.choice([v for v in ready if len(left[v]) == most])
         account = left[video].pop()
         out.append((t, account, video))
-        posted[video].append(t)
+        last = video
         t += int(rng.uniform(*gap))
     return out
-
-
-def check_timetable(slots: list, max_copies: int = 2, window: int = 1800) -> bool:
-    """True when no video has more than `max_copies` slots in any `window`."""
-    by_video = {}
-    for at, _, video in slots:
-        by_video.setdefault(video, []).append(at)
-    for times in by_video.values():
-        times.sort()
-        for i in range(len(times) - max_copies):
-            if times[i + max_copies] - times[i] < window:
-                return False
-    return True
 
 
 # --------------------------------------------------------------------------- #

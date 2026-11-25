@@ -84,12 +84,14 @@ def _dump_screen(d, tag):
     return path
 
 
-def push_media_to_phone(d, local_path):
+def push_media_to_phone(d, local_path, suffix=""):
     """Push to /sdcard/DCIM/Camera/ and fire MediaScanner so IG's gallery
     picker sees the new file immediately rather than after the next rescan.
-    Works for both photos (.jpg/.png) and videos (.mp4/.mov)."""
+    Works for both photos (.jpg/.png) and videos (.mp4/.mov). `suffix`
+    keeps the names of a carousel's files apart when they are pushed in
+    the same second."""
     ext = os.path.splitext(local_path)[1] or ".jpg"
-    filename = f"post_{int(time.time())}{ext}"
+    filename = f"post_{int(time.time())}{suffix}{ext}"
     remote_path = f"/sdcard/DCIM/Camera/{filename}"
     d.push(local_path, remote_path)
     d.shell(
@@ -97,6 +99,22 @@ def push_media_to_phone(d, local_path):
         f"-d file://{remote_path}"
     )
     return remote_path
+
+
+def push_carousel_to_phone(d, paths):
+    """Push a carousel's files so the gallery shows them in carousel order.
+
+    IG's gallery is newest first, so the files go up in REVERSE (last
+    slide first, first slide last) with a gap of over a second between
+    them: the first slide ends up as the gallery's top-left thumbnail,
+    the second next to it, and so on — and IG numbers a multi-select in
+    the order the thumbnails are tapped, so tapping them left to right
+    gives the carousel order. Without the gap the files share a
+    timestamp and the gallery order between them is undefined."""
+    for i, path in reversed(list(enumerate(paths, 1))):
+        push_media_to_phone(d, path, suffix=f"_{i:02d}")
+        if i > 1:
+            time.sleep(1.2)
 
 
 # --------------------------------------------------------------------------- #
@@ -143,24 +161,72 @@ def _resolve_hashtags(value):
 def find_next_post(posts_dir):
     """Return (image_path, caption_body, hashtags) for the next queued post,
     or (None, "", []) if the queue is empty. Alphabetical order — prefix
-    file names (001_, 002_, ...) to control posting sequence."""
+    file names (001_, 002_, ...) to control posting sequence. A carousel's
+    slides are skipped — `find_next_carousel` owns those."""
+    in_carousel = {p for paths in find_carousels(posts_dir).values() for p in paths}
     images = sorted(
         os.path.join(posts_dir, f)
         for f in os.listdir(posts_dir)
         if f.lower().endswith((".jpg", ".jpeg", ".png"))
         and os.path.isfile(os.path.join(posts_dir, f))
+        and os.path.join(posts_dir, f) not in in_carousel
     )
     if not images:
         return None, "", []
     image_path = images[0]
-    meta_path = os.path.splitext(image_path)[0] + ".json"
-    body, hashtags = "", []
-    if os.path.exists(meta_path):
-        with open(meta_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        body = _resolve_caption_body(data.get("caption"))
-        hashtags = _resolve_hashtags(data.get("hashtags"))
+    body, hashtags = _read_meta(os.path.splitext(image_path)[0] + ".json")
     return image_path, body, hashtags
+
+
+def _read_meta(meta_path):
+    """(caption_body, hashtags) from a sidecar JSON; ("", []) when absent."""
+    if not os.path.exists(meta_path):
+        return "", []
+    with open(meta_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return (
+        _resolve_caption_body(data.get("caption")),
+        _resolve_hashtags(data.get("hashtags")),
+    )
+
+
+# A carousel in the queue is `<stub>_1.jpg`, `<stub>_2.mp4`, … plus ONE
+# `<stub>.json` — the same `<stub>_<n>` naming reel_downloader.download_photos
+# gives a downloaded album. Photos and videos can be mixed.
+CAROUSEL_MAX = 20  # IG's own limit per carousel post
+_CAROUSEL_EXT = (".jpg", ".jpeg", ".png", ".mp4", ".mov")
+_CAROUSEL_RE = re.compile(r"^(?P<stub>.+)_(?P<n>\d+)\.[^.]+$")
+
+
+def find_carousels(posts_dir):
+    """{stub: [paths in slide order]} for every carousel queued in
+    `posts_dir`. A stub counts only when it has at least two numbered
+    files, so a lone `x_1.jpg` stays an ordinary single post."""
+    groups = {}
+    for f in os.listdir(posts_dir):
+        full = os.path.join(posts_dir, f)
+        if not (f.lower().endswith(_CAROUSEL_EXT) and os.path.isfile(full)):
+            continue
+        m = _CAROUSEL_RE.match(f)
+        if m:
+            groups.setdefault(m["stub"], []).append((int(m["n"]), full))
+    return {
+        stub: [p for _n, p in sorted(items)]
+        for stub, items in sorted(groups.items())
+        if len(items) >= 2
+    }
+
+
+def find_next_carousel(posts_dir):
+    """(paths, caption_body, hashtags, meta_path) for the alphabetically
+    first queued carousel, or (None, "", [], None) when there is none."""
+    carousels = find_carousels(posts_dir)
+    if not carousels:
+        return None, "", [], None
+    stub, paths = next(iter(carousels.items()))
+    meta_path = os.path.join(posts_dir, f"{stub}.json")
+    body, hashtags = _read_meta(meta_path)
+    return paths, body, hashtags, meta_path
 
 
 # --------------------------------------------------------------------------- #
@@ -424,6 +490,154 @@ def tap_latest_gallery_item(d):
     return False
 
 
+_NODE_RE = re.compile(r"<node\b[^>]*>")
+_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
+_BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+
+def gallery_thumbnails(xml):
+    """The gallery's thumbnails in a hierarchy dump, in visual order (row
+    by row, left to right): a list of dicts {bounds, desc, selected}.
+
+    `selected` is True / False / None. IG describes an unpicked thumbnail
+    as "Unselected Photo thumbnail created on …", so a description that
+    doesn't start with "Unselected" is a picked one; the node's own
+    `selected`/`checked` flag counts too. None means the dump gives no way
+    to tell (no description at all) — the caller then taps blind.
+
+    Read from the dump rather than through selector RPCs for the same
+    reason as the hashtag strip: on the S23 the RPC has returned count=0
+    for views the dump can see."""
+    thumbs = []
+    rid = f'{PKG}:id/gallery_grid_item_thumbnail'
+    for node in _NODE_RE.findall(xml):
+        attrs = dict(_ATTR_RE.findall(node))
+        if attrs.get("resource-id") != rid:
+            continue
+        m = _BOUNDS_RE.fullmatch(attrs.get("bounds", ""))
+        if not m:
+            continue
+        lx, ly, rx, ry = (int(g) for g in m.groups())
+        if rx - lx < 20 or ry - ly < 20:  # clipped off the edge of the grid
+            continue
+        desc = attrs.get("content-desc", "")
+        if attrs.get("selected") == "true" or attrs.get("checked") == "true":
+            selected = True
+        elif desc:
+            selected = not desc.lower().startswith("unselected")
+        else:
+            selected = None
+        thumbs.append({"bounds": (lx, ly, rx, ry), "desc": desc, "selected": selected})
+    thumbs.sort(key=lambda t: (t["bounds"][1], t["bounds"][0]))
+    return thumbs
+
+
+def enable_multi_select(d):
+    """Turn on the gallery's multi-select ("Select multiple" — the stacked
+    squares icon above the grid). Returns True when a button was tapped.
+    IG renames this one often; on a miss the caller falls back to a long
+    press on the first thumbnail, which also enters multi-select on
+    current builds."""
+    candidates = [
+        d(resourceId=f"{PKG}:id/multi_select_slide_button"),
+        d(resourceId=f"{PKG}:id/gallery_multi_select_button"),
+        d(resourceId=f"{PKG}:id/multi_select_button"),
+        d(description="Select multiple"),
+        d(text="Select multiple"),
+        d(text="SELECT MULTIPLE"),
+        d(descriptionContains="Select multiple"),
+        d(descriptionContains="multiple"),
+        d(textContains="Select multiple"),
+    ]
+    for sel in candidates:
+        try:
+            if sel.click_exists(timeout=2):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _tap_thumb(d, bounds, long=False):
+    lx, ly, rx, ry = bounds
+    x = random.randint(lx + (rx - lx) // 4, rx - (rx - lx) // 4)
+    y = random.randint(ly + (ry - ly) // 4, ry - (ry - ly) // 4)
+    if long:
+        d.long_click(x, y, 0.8)
+    else:
+        d.click(x, y)
+
+
+def select_carousel_items(d, n):
+    """Pick the gallery's first `n` thumbnails, in order, as a carousel.
+
+    push_carousel_to_phone put slide 1 at the top-left, slide 2 next to
+    it, … so tapping them left to right numbers them 1..n. Two traps:
+
+    * IG often counts the thumbnail that was being previewed as already
+      picked (#1) the moment multi-select turns on — tapping it again
+      would UNpick it. So each thumbnail is tapped only while the dump
+      says it is unpicked.
+    * Thumbnails past the visible grid aren't in the dump at all. With
+      that many slides we stop with a dump instead of picking the wrong
+      files.
+
+    Raises RuntimeError (with a UI dump) when the count can't be met."""
+    thumbs = gallery_thumbnails(d.dump_hierarchy())
+    if len(thumbs) < n:
+        dump = _dump_screen(d, "carousel_grid")
+        raise RuntimeError(
+            f"Only {len(thumbs)} gallery thumbnails are on screen, the carousel "
+            f"needs {n}. UI dumped to {dump}."
+        )
+
+    if enable_multi_select(d):
+        print("    (tapped Select multiple)")
+        pause(0.8, 1.3)
+    else:
+        print("    (no Select multiple button — long-pressing the first thumbnail)")
+        _tap_thumb(d, thumbs[0]["bounds"], long=True)
+        pause(0.8, 1.3)
+
+    blind = False
+    for i in range(n):
+        thumbs = gallery_thumbnails(d.dump_hierarchy())
+        if len(thumbs) <= i:
+            dump = _dump_screen(d, "carousel_grid")
+            raise RuntimeError(
+                f"Thumbnail {i + 1} of {n} disappeared from the grid. "
+                f"UI dumped to {dump}."
+            )
+        state = thumbs[i]["selected"]
+        if state is True:
+            print(f"    slide {i + 1}: already picked")
+            continue
+        if state is None:
+            blind = True
+        print(f"    slide {i + 1}: tap")
+        _tap_thumb(d, thumbs[i]["bounds"])
+        pause(0.5, 1.0)
+
+    thumbs = gallery_thumbnails(d.dump_hierarchy())
+    picked = [t["selected"] for t in thumbs]
+    if blind or None in picked[:n]:
+        dump = _dump_screen(d, "carousel_grid")
+        print(
+            "    ⚠ couldn't read which thumbnails are picked; continuing blind. "
+            f"Check the slides on the next screen. UI dumped to {dump}."
+        )
+        return
+    wrong = [i + 1 for i in range(n) if not picked[i]]
+    extra = sum(1 for p in picked[n:] if p)
+    if wrong or extra:
+        dump = _dump_screen(d, "carousel_grid")
+        raise RuntimeError(
+            f"Carousel selection is off: slides {wrong or '-'} unpicked, "
+            f"{extra} extra thumbnail(s) picked. UI dumped to {dump}."
+        )
+    print(f"    ({n} slides picked)")
+
+
 def tap_next(d, timeout=8):
     """Tap a Next button on the current screen.
 
@@ -554,9 +768,18 @@ def upload_post(d, image_path, caption_body, hashtags, kind="post", target_accou
     switches to that account via the quick-switch sheet after landing on
     the Profile tab. None means "use whichever account IG opens with",
     which preserves single-account behavior for legacy callers (e.g.
-    server.py's `/api/posts publish=true` path)."""
+    server.py's `/api/posts publish=true` path).
 
-    push_media_to_phone(d, image_path)
+    `image_path` may also be a LIST of files: that is a carousel (see
+    `upload_carousel`), posted through the Post tab with multi-select."""
+
+    carousel = isinstance(image_path, (list, tuple))
+    if carousel:
+        if kind != "post":
+            raise ValueError("A carousel goes through the Post tab (kind='post').")
+        push_carousel_to_phone(d, image_path)
+    else:
+        push_media_to_phone(d, image_path)
     pause()
 
     # Wake the screen explicitly. `am start` (via app_start below) usually
@@ -618,12 +841,16 @@ def upload_post(d, image_path, caption_body, hashtags, kind="post", target_accou
         if dismiss_reel_draft_modal(d):
             pause()
 
-    print("  → tap latest thumbnail in gallery")
-    if not tap_latest_gallery_item(d):
-        raise RuntimeError(
-            "Couldn't tap the latest thumbnail. Run `py modules/instagram/dump_ui.py` and check "
-            "ui_dump.xml for the gallery grid item selector."
-        )
+    if carousel:
+        print(f"  → multi-select {len(image_path)} slides in gallery")
+        select_carousel_items(d, len(image_path))
+    else:
+        print("  → tap latest thumbnail in gallery")
+        if not tap_latest_gallery_item(d):
+            raise RuntimeError(
+                "Couldn't tap the latest thumbnail. Run `py modules/instagram/dump_ui.py` and check "
+                "ui_dump.xml for the gallery grid item selector."
+            )
     pause(0.6, 1.2)
 
     print("  → tap Next after gallery")
@@ -744,7 +971,25 @@ def upload_post(d, image_path, caption_body, hashtags, kind="post", target_accou
         )
 
     print("  → waiting for upload to finish...")
-    time.sleep(random.uniform(8, 12))
+    # A carousel uploads every slide before IG lets go of it.
+    extra = 3 * (len(image_path) - 1) if carousel else 0
+    time.sleep(random.uniform(8, 12) + extra)
+
+
+def upload_carousel(d, paths, caption_body, hashtags, target_account=None):
+    """Post 2..CAROUSEL_MAX photos/videos as ONE carousel post, in the
+    order given, through the phone (ADB) — Post tab → Select multiple →
+    the slides → Next → Next → caption → Share."""
+    paths = list(paths)
+    if not 2 <= len(paths) <= CAROUSEL_MAX:
+        raise ValueError(f"A carousel takes 2-{CAROUSEL_MAX} files, got {len(paths)}.")
+    for p in paths:
+        if not os.path.isfile(p):
+            raise FileNotFoundError(p)
+        if not p.lower().endswith(_CAROUSEL_EXT):
+            raise ValueError(f"Not a photo/video IG takes in a carousel: {p}")
+    upload_post(d, paths, caption_body, hashtags, kind="post",
+                target_account=target_account)
 
 
 def archive_post(posts_dir, image_path):
@@ -757,9 +1002,53 @@ def archive_post(posts_dir, image_path):
         shutil.move(meta_path, os.path.join(archive_dir, os.path.basename(meta_path)))
 
 
+def archive_carousel(posts_dir, paths, meta_path=None):
+    """Move a carousel's slides + its `<stub>.json` into posts/posted/."""
+    archive_dir = os.path.join(posts_dir, "posted")
+    os.makedirs(archive_dir, exist_ok=True)
+    for p in list(paths) + ([meta_path] if meta_path else []):
+        if p and os.path.exists(p):
+            shutil.move(p, os.path.join(archive_dir, os.path.basename(p)))
+
+
+def main_carousel(posts_dir, account=None):
+    paths, caption_body, hashtags, meta_path = find_next_carousel(posts_dir)
+    if not paths:
+        print(f"No carousels in: {posts_dir}")
+        print("Queue one as <name>_1.jpg, <name>_2.jpg, … (+ optional <name>.json) and rerun.")
+        return
+    if len(paths) > CAROUSEL_MAX:
+        raise SystemExit(f"{len(paths)} slides queued; IG takes at most {CAROUSEL_MAX}.")
+
+    print(f"Next carousel: {len(paths)} slides — {', '.join(os.path.basename(p) for p in paths)}")
+    preview = caption_body[:80].replace("\n", " ")
+    print(f"Caption: {preview + ('...' if len(caption_body) > 80 else '') if caption_body else '(empty)'}")
+    print(f"Hashtags: {', '.join('#' + h for h in hashtags) if hashtags else '(none)'}")
+
+    print(f"Connecting to {DEVICE_ID}...")
+    d = u2.connect(DEVICE_ID)
+    print(f"Connected: {d.info.get('productName', 'unknown')}")
+
+    upload_carousel(d, paths, caption_body, hashtags, target_account=account)
+    archive_carousel(posts_dir, paths, meta_path)
+    print(f"\nDone. Moved {len(paths)} slides → posts/posted/")
+
+
 def main():
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Post the next queued item to Instagram via ADB.")
+    ap.add_argument("--carousel", action="store_true",
+                    help="post the next queued carousel (<name>_1.jpg, <name>_2.jpg, … + <name>.json)")
+    ap.add_argument("--account", help="IG username to switch to first (no @)")
+    args = ap.parse_args()
+
     posts_dir = config.POSTS_DIR
     os.makedirs(posts_dir, exist_ok=True)
+
+    if args.carousel:
+        main_carousel(posts_dir, args.account)
+        return
 
     image_path, caption_body, hashtags = find_next_post(posts_dir)
     if image_path is None:
@@ -778,7 +1067,7 @@ def main():
     d = u2.connect(DEVICE_ID)
     print(f"Connected: {d.info.get('productName', 'unknown')}")
 
-    upload_post(d, image_path, caption_body, hashtags)
+    upload_post(d, image_path, caption_body, hashtags, target_account=args.account)
     archive_post(posts_dir, image_path)
     print(f"\nDone. Moved {os.path.basename(image_path)} → posts/posted/")
 

@@ -1,0 +1,24 @@
+{
+  "_note": "DRAFT for the owner to strike/add — the X accounts the radar will read (through one private X List per spare account; the X source is not built yet, format may change). `owner` = picked by the owner, `suggested` = proposed as similar, to be measured (tweets/day, % with video, how early) before it goes live.",
+  "accounts": [
+    {"handle": "visegrad24",     "status": "owner",     "why": "breaking news + video, Europe/world, very fast (often community-noted — verify)"},
+    {"handle": "ClashReport",    "status": "owner",     "why": "clashes, protests, incidents — video"},
+    {"handle": "EndWokeness",    "status": "owner",     "why": "viral US culture clips"},
+    {"handle": "leftismforu",    "status": "owner",     "why": "viral US culture clips"},
+    {"handle": "disclosetv",     "status": "owner",     "why": "breaking headlines + viral clips (often unverified — verify)"},
+
+    {"handle": "libsoftiktok",   "status": "suggested", "why": "same niche as EndWokeness, very high reach"},
+    {"handle": "CollinRugg",     "status": "suggested", "why": "viral US + world clips, many a day"},
+    {"handle": "MarioNawfal",    "status": "suggested", "why": "huge volume of breaking clips, often early"},
+    {"handle": "WallStreetApes", "status": "suggested", "why": "viral US clips"},
+    {"handle": "TheRabbitHole84","status": "suggested", "why": "viral clips + charts"},
+    {"handle": "Breaking911",    "status": "suggested", "why": "US police / fires / crashes / weather — the US event footage the pages lack"},
+    {"handle": "nicksortor",     "status": "suggested", "why": "on-the-ground US events"},
+    {"handle": "OliLondonTV",    "status": "suggested", "why": "viral culture clips, US + UK"},
+    {"handle": "RadioGenoa",     "status": "suggested", "why": "Visegrad-style European street clips (good for eur24news)"},
+    {"handle": "PeterSweden7",   "status": "suggested", "why": "Visegrad-style European clips"},
+    {"handle": "BNONews",        "status": "suggested", "why": "fastest neutral breaking news — the freshness reference"},
+    {"handle": "WarMonitors",    "status": "suggested", "why": "conflict/incident footage"},
+    {"handle": "sentdefender",   "status": "suggested", "why": "OSINT breaking (has posted false claims — verify)"}
+  ]
+}
