@@ -26,12 +26,13 @@ def fx(name):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("name,expected", [
-    ("home", "home"), ("profile", "profile"), ("gallery", "gallery"), ("gallery_12", "gallery"),
+    ("home", "home"), ("home_foryou", "home"), ("profile", "profile"), ("gallery", "gallery"), ("gallery_12", "gallery"),
     ("gallery_123", "gallery"), ("editor", "editor"), ("editor_music", "editor"),
     ("music_picker", "music_picker"), ("music_search_open", "music_picker"),
     ("music_search", "music_picker"), ("music_preview", "music_preview"),
     ("popup_sharing_info", "popup:sharing_info"), ("composer", "composer"),
-    ("caption_editor", "caption_editor"), ("caption_set", "caption_editor"),
+    ("caption_editor", "caption_editor"), ("caption_editor_ok", "caption_editor"),
+    ("caption_set", "caption_editor"),
     ("composer_final", "composer"),
 ])
 def test_classify_recorded_screens(name, expected):
@@ -416,9 +417,12 @@ def test_music_library_tells_creator_from_business():
     rf = {"title": "Move", "desc": "Select track Move by X, royalty-free, 1:45"}
     own = {"title": "Original audio", "desc": "Select track Original audio by someone, 0:16"}
     licensed = {"title": "Shape of You", "desc": "Select track Shape of You by Ed Sheeran, 3:53"}
-    assert flows.music_library([rf, own]) == "royalty-free only"
-    assert flows.music_library([rf, licensed]) == "full"
-    assert flows.music_library([]) is None
+    cover = {"title": "Perfect", "artist": "Jonny Houlihan",
+             "desc": "Select track Perfect by Jonny Houlihan, 2:10"}  # RF cover shown without the badge
+    rf["artist"], own["artist"], licensed["artist"] = "X", "someone", "Ed Sheeran"
+    assert flows.music_library([rf, own, cover], "Ed Sheeran") == "royalty-free only"
+    assert flows.music_library([cover, licensed], "ed sheeran") == "full"
+    assert flows.music_library([], "Ed Sheeran") is None
 
 
 def test_list_accounts_reads_the_switcher_and_closes_it():
@@ -479,3 +483,19 @@ def test_run_cli_sweep_never_shares():
 
     with pytest.raises(SystemExit):
         run.main(["--sweep", "--share", "--i-confirm-share"])
+
+
+def test_caption_editor_ok_variant_is_confirmed_with_its_ok_button(tmp_path):
+    # westorn.24's Caption editor confirms with "OK" (next_button_textview), not ✓ Done
+    phone = _phone()
+    ok = fx("caption_editor_ok")
+    phone.screens["caption_editor"] = ok
+    typed = scr.dump_form(CAPTION).replace("\n", "&#10;")
+    phone.screens["caption_set"] = ok.replace('text="Add a caption…"', f'text="{typed}"')
+    phone.routes["caption_set"] = [("next_button_textview", "composer_final")]
+    drv = _driver(phone)
+    flows.carousel_with_music(drv, _slides(tmp_path), CAPTION, "test_account", track="Lazy River", push=_push)
+    assert phone.state == "composer_final"
+    expected = ("fallback", "Done (caption)",
+                "matched by 'rid=next_button_textview', not 'rid=caption_done_button'")
+    assert expected in drv.events

@@ -100,7 +100,12 @@ def classify(xml_or_nodes):
         if "audio_bar_select_tap_target" in rids:
             return Screen("music_preview", ns)
         return Screen("music_picker", ns)
-    if "caption_done_button" in rids and "caption_input_text_view" in rids:
+    # Two layouts per account: a ✓ `caption_done_button` (vestra.24) or an
+    # "OK" `next_button_textview` (westorn.24, 2026-11-25) — both titled Caption.
+    if "caption_input_text_view" in rids and (
+        "caption_done_button" in rids
+        or any(n.rid == "action_bar_textview_title" and n.text == "Caption" for n in ig)
+    ):
         return Screen("caption_editor", ns)
     if {"share_footer_button", "share_button"} & rids and "caption_input_text_view" in rids:
         return Screen("composer", ns)
@@ -116,8 +121,16 @@ def classify(xml_or_nodes):
         return Screen("account_switcher", ns)
     if "action_bar_title" in rids and any(r.startswith("profile_header_") for r in rids):
         return Screen("profile", ns)
+    # Home comes in (at least) two layouts per account: the Instagram logo
+    # title, or a "For you ⌄" feed picker (seen on eur24news, 2026-11-25).
+    # What they share: the tab bar + the action-bar Create button.
+    tab_bar = {"feed_tab", "profile_tab"} <= rids
     if any(n.desc == "Instagram Home Feed" for n in ig) or (
-        "feed_tab" in rids and any(n.rid == "feed_tab" and n.flag("selected") for n in ig)
+        tab_bar and (
+            any(n.rid == "action_bar_left_button" and n.desc == "Create" for n in ig)
+            or "title_text" in rids
+            or any(n.rid == "feed_tab" and n.flag("selected") for n in ig)
+        )
     ):
         return Screen("home", ns)
     # Shaped like a dialog (a few buttons, no tab bar) but not one we know.

@@ -18,8 +18,14 @@ free text that survived so you can check.
 """
 
 import argparse
+import os
 import re
+import sys
 import xml.etree.ElementTree as ET
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 PKG = "com.instagram.android"
 

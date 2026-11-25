@@ -119,6 +119,20 @@ Things learnt the hard way (all handled in the driver):
 * Autoplaying video (Home feed) never gives two identical screenshots; a dump
   unchanged over three reads counts as settled.
 
+### Per-account layouts (first sweep, all 9 accounts, 2026-11-25)
+
+Instagram runs layout experiments per ACCOUNT — same phone, same app version:
+
+| Where | Variant A | Variant B (seen on) | How the driver copes |
+| ----- | --------- | ------------------- | -------------------- |
+| Home | Instagram logo title | "For you ⌄" feed picker (eur24news) | Home = tab bar + Create button / feed title, not the logo |
+| Caption editor | ✓ `caption_done_button` | "OK" `next_button_textview` (westorn.24) | editor = title "Caption" + caption field; either button (B is logged as a fallback) |
+| Music rows | "RF" badge on royalty-free tracks | same tracks, no badge (frontiva24, wswiremedia, pioneerwire) | the badge is never used to decide anything |
+
+Music library: searching "Ed Sheeran" returns his own tracks only on
+**atlasnews.us — the one Creator account**; every other account (Business)
+gets royalty-free covers. `--sweep` reports this per account.
+
 ## The drift log — does it need AI?
 
 `data/ig_screens/drift.jsonl` gets one JSON line for every fallback selector,

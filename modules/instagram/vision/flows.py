@@ -87,7 +87,7 @@ F_SEARCH = [_rid("row_search_edit_text")]
 F_SELECT_TRACK = [_rid("audio_bar_select_tap_target"), _desc_prefix("Select track")]
 F_EDITOR_NEXT = [_rid("media_thumbnail_tray_button"), _text("Next"), _desc("Next")]
 F_CAPTION = [_rid("caption_input_text_view"), _desc("Write a caption")]
-F_CAPTION_DONE = [_rid("caption_done_button"), _desc("Done"), _text("OK")]
+F_CAPTION_DONE = [_rid("caption_done_button"), _desc("Done"), _rid("next_button_textview"), _text("OK")]
 F_SHARE = [_rid("share_footer_button"), _rid("share_button"), _desc("Share"), _text("Share")]
 
 
@@ -246,27 +246,29 @@ def select_slides(drv, n, pushed_at=None):
     drv.log(f"    {n} slides picked in order")
 
 
-def music_library(rows):
-    """'full' when a search shows licensed tracks (no "royalty-free" in the
-    row, not someone's "Original audio") — a Creator account's library;
-    'royalty-free only' otherwise (what Business accounts get); None for
-    no rows at all."""
+def music_library(rows, artist):
+    """'full' when searching a famous `artist` returns tracks BY that artist
+    (licensed music — a Creator account's library), 'royalty-free only'
+    when it returns only other people's covers/RF tracks (what Business
+    accounts get), None for no rows at all.
+
+    The RF label itself is no proof: on 2026-11-25 two accounts showed the
+    very same royalty-free covers WITHOUT the RF badge."""
     if not rows:
         return None
-    licensed = [r for r in rows if "royalty-free" not in r["desc"]
-                and r["title"].casefold() != "original audio"]
-    return "full" if licensed else "royalty-free only"
+    want = artist.casefold()
+    return "full" if any(want in r["artist"].casefold() for r in rows) else "royalty-free only"
 
 
 def probe_library(drv, query):
-    """Search `query` (pick a hugely popular artist) in the open music
+    """Search `query` — a hugely popular ARTIST's name — in the open music
     picker and note which library this account gets in drv.notes."""
     if not drv.dev.set_text(f"{PKG}:id/row_search_edit_text", query):
         drv.stop("text_input", "Couldn't put the probe query into the music search box.")
     drv.sleep(3.0)
     s = drv.resolve(("music_picker", "music_preview"))
     rows = scr.track_rows(s)
-    drv.notes["library"] = music_library(rows)
+    drv.notes["library"] = music_library(rows, query)
     drv.notes["library_probe"] = [f"{r['title']} — {r['artist']}"
                                   + ("" if "royalty-free" not in r["desc"] else " (RF)") for r in rows[:6]]
     drv.log(f"    music library for {query!r}: {drv.notes['library']}")
