@@ -445,32 +445,27 @@ def _summary_count(video_id: str, token: str, edge: str) -> int | None:
     return int(count) if count is not None else None
 
 
-def latest_reel(account: str) -> tuple[dict | None, str]:
-    """The Page's most recent Reel: ({url, posted_at, caption, views, likes,
-    comments, shares}, "") — (None, "no reels yet") or (None, why). Each
-    number is read on its own and is None when that read fails (views need
-    the read_insights permission on top of pages_read_engagement), so one
-    missing permission blanks one column, not the row. Never raises."""
-    try:
-        token, page_id = _creds(account)
-    except Exception as exc:
-        return None, str(exc)[:300]
-    body = None
+def _reels(account: str, limit: int):
+    """(token, the Page's reels newest first) — the `views` field when the
+    Graph version has it, else without. Raises on failure."""
+    token, page_id = _creds(account)
+    why = None
     for fields in ("id,description,created_time,permalink_url,views",
                    "id,description,created_time,permalink_url"):
         try:
             body = _call("GET", f"{API}/{page_id}/video_reels",
-                         params={"fields": fields, "limit": 1,
+                         params={"fields": fields, "limit": limit,
                                  "access_token": token})
-            break
+            return token, body.get("data") or []
         except Exception as exc:
-            why = str(exc)[:300]
-    if body is None:
-        return None, why
-    reels = body.get("data") or []
-    if not reels:
-        return None, "no reels yet"
-    reel = reels[0]
+            why = exc
+    raise why
+
+
+def _reel_row(reel: dict, token: str, account: str) -> dict:
+    """One reel's numbers. Each is read on its own and is None when that read
+    fails (views need read_insights on top of pages_read_engagement), so one
+    missing permission blanks one column, not the row."""
     vid = reel["id"]
     url = reel.get("permalink_url") or f"/reel/{vid}"
     if url.startswith("/"):
@@ -507,7 +502,40 @@ def latest_reel(account: str) -> tuple[dict | None, str]:
         "likes": counts["likes"],
         "comments": counts["comments"],
         "shares": shares,
-    }, ""
+    }
+
+
+def latest_reel(account: str) -> tuple[dict | None, str]:
+    """The Page's most recent Reel: ({url, posted_at, caption, views, likes,
+    comments, shares}, "") — (None, "no reels yet") or (None, why). Never
+    raises."""
+    try:
+        token, reels = _reels(account, 1)
+    except Exception as exc:
+        return None, str(exc)[:300]
+    if not reels:
+        return None, "no reels yet"
+    return _reel_row(reels[0], token, account), ""
+
+
+def recent_reels(account: str, since) -> tuple[list | None, str]:
+    """Every Reel the Page posted at or after `since` (an aware datetime),
+    newest first, with `latest_reel`'s numbers — ([], "") when none, or
+    (None, why). Never raises."""
+    import datetime as dt
+    try:
+        token, reels = _reels(account, 25)
+    except Exception as exc:
+        return None, str(exc)[:300]
+    out = []
+    for reel in reels:
+        try:
+            t = dt.datetime.strptime(reel.get("created_time") or "", "%Y-%m-%dT%H:%M:%S%z")
+        except ValueError:
+            continue
+        if t >= since:
+            out.append(_reel_row(reel, token, account))
+    return out, ""
 
 
 def followers(account: str) -> tuple[int | None, str]:

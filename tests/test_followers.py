@@ -122,6 +122,15 @@ def _table(text):
             text[text.index("<pre>") + 5:text.index("</pre>")].splitlines()]
 
 
+def _tables(text):
+    out, rest = [], text
+    while "<pre>" in rest:
+        body = rest[rest.index("<pre>") + 5:rest.index("</pre>")]
+        out.append([line.split() for line in body.splitlines()])
+        rest = rest[rest.index("</pre>") + 6:]
+    return out
+
+
 def test_render_weekly_change():
     results = [
         _r("big", "ig", 5600), _r("big", "x", 900),
@@ -145,7 +154,12 @@ def test_render_weekly_change():
     assert ["fresh", "new", "·", "·"] in table        # no count from last week
     assert ["broken", "·", "!", "·"] in table
     assert "• broken FB: token expired" in text
-    assert "Followers now: 📸 5.9K · 📘 1K · 𝕏 900" in text
+    now = _tables(text)[1]                             # the "Followers now" table
+    assert "<b>Followers now</b>" in text
+    assert now[0] == ["IG", "FB", "X"]
+    assert now[1] == ["big", "5.6K", "·", "900"]       # biggest account first
+    assert ["broken", "·", "!", "·"] in now
+    assert now[-1] == ["Total", "5.9K", "1K", "900"]
 
 
 def test_render_names_a_short_span():
@@ -196,3 +210,14 @@ def test_youtube_subscribers_falls_back_to_the_page(monkeypatch):
     monkeypatch.setattr(stats, "_subscribers_from_page",
                         lambda h: (None, "count not shown"))
     assert stats.subscribers("@x") == (None, "count not shown")
+
+
+def test_render_keeps_both_tables_whole_across_pages():
+    results = [_r(f"brand{i:03}", "ig", 1000 + i) for i in range(300)]
+    then = {(r["brand"], "ig"): 1000 for r in results}
+    pages = followers.render(results, then, WEEK_AGO, TODAY)
+    assert len(pages) > 1
+    assert all(len(p) <= 4000 for p in pages)
+    assert all(p.count("<pre>") == p.count("</pre>") for p in pages)
+    rows = [row for p in pages for t in _tables(p) for row in t[1:]]
+    assert len(rows) == 300 + 301                     # change + now (+ Total)

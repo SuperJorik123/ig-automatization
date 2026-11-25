@@ -86,6 +86,56 @@ def latest_short(handle: str) -> tuple[dict | None, str]:
     }, ""
 
 
+RECENT_MAX = 15   # Shorts read per channel for the 24 h report, at most
+
+
+def recent_shorts(handle: str, since: dt.datetime) -> tuple[list | None, str]:
+    """Every Short the channel posted at or after `since` (newest first) with
+    `latest_short`'s numbers — ([], "") when none, or (None, why). The Shorts
+    tab lists newest first without dates, so each one is opened until the
+    first older than `since` (at most RECENT_MAX). Never raises."""
+    try:
+        import yt_dlp
+    except ImportError:
+        return None, "yt-dlp not installed"
+    try:
+        with yt_dlp.YoutubeDL({**_OPTS, "extract_flat": True,
+                               "playlistend": RECENT_MAX}) as ydl:
+            tab = ydl.extract_info(channel_url(handle), download=False)
+    except Exception as exc:
+        msg = str(exc).replace("ERROR: ", "")
+        if "does not have a shorts tab" in msg.lower():
+            return [], ""
+        return None, msg[:300]
+    out = []
+    for e in [e for e in (tab or {}).get("entries") or [] if e]:
+        url = e.get("url") or f"https://www.youtube.com/shorts/{e['id']}"
+        try:
+            with yt_dlp.YoutubeDL(_OPTS) as ydl:
+                info = ydl.extract_info(url, download=False) or {}
+        except Exception as exc:
+            log.info("[YT:%s] %s unreadable: %s", handle, url, exc)
+            continue
+        posted = _posted_at(info)
+        if posted:
+            t = dt.datetime.fromisoformat(posted)
+            # A date with no time (no `timestamp`) is midnight UTC: compare
+            # days then, or a Short from this afternoon would read as too old.
+            old = (t.date() < since.astimezone(dt.timezone.utc).date()
+                   if not info.get("timestamp") else t < since)
+            if old:
+                break
+        out.append({
+            "url": f"https://www.youtube.com/shorts/{info.get('id') or e['id']}",
+            "posted_at": posted,
+            "caption": info.get("title") or "",
+            "views": info.get("view_count"),
+            "likes": info.get("like_count"),
+            "comments": info.get("comment_count"),
+        })
+    return out, ""
+
+
 def subscribers(handle: str) -> tuple[int | None, str]:
     """(the channel's public subscriber count, "") or (None, why), for the
     weekly follower report. YouTube ROUNDS it publicly (12,345 shows as

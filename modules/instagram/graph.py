@@ -274,27 +274,17 @@ def reel_insights(media_id: str, account: str) -> tuple[dict | None, str]:
         return None, str(exc)[:300]
 
 
-def latest_reel(account: str) -> tuple[dict | None, str]:
-    """The account's most recent Reel with its numbers, for the /report
-    command: ({url, posted_at, caption, views, likes, comments, shares,
-    saves, reach}, "") — (None, "no reels yet") or (None, why). Read from
-    the account itself, not from the bot's reel_log, so a reel posted by hand
-    counts too. A missing insights permission still returns likes/comments
-    (those come with the media) with views None. Never raises."""
-    try:
-        token, user_id = _creds(account)
-        body = _call("GET", f"{API}/{user_id}/media",
-                     params={"fields": "id,media_type,media_product_type,"
-                                       "timestamp,permalink,caption,"
-                                       "like_count,comments_count",
-                             "limit": 25, "access_token": token})
-    except Exception as exc:
-        return None, str(exc)[:300]
-    items = body.get("data") or []
-    media = (next((m for m in items if m.get("media_product_type") == "REELS"), None)
-             or next((m for m in items if m.get("media_type") == "VIDEO"), None))
-    if media is None:
-        return None, "no reels yet"
+_MEDIA_FIELDS = ("id,media_type,media_product_type,timestamp,permalink,"
+                 "caption,like_count,comments_count")
+
+
+def _is_reel(m: dict) -> bool:
+    return m.get("media_product_type") == "REELS" or m.get("media_type") == "VIDEO"
+
+
+def _reel_row(media: dict, account: str) -> dict:
+    """One reel's numbers for /report. A missing insights permission still
+    returns likes/comments (those come with the media) with views None."""
     insights, _ = reel_insights(media["id"], account)
     insights = insights or {}
     return {
@@ -307,7 +297,64 @@ def latest_reel(account: str) -> tuple[dict | None, str]:
         "shares": insights.get("shares"),
         "saves": insights.get("saved"),
         "reach": insights.get("reach"),
-    }, ""
+    }
+
+
+def _media_list(account: str, limit: int) -> list:
+    token, user_id = _creds(account)
+    body = _call("GET", f"{API}/{user_id}/media",
+                 params={"fields": _MEDIA_FIELDS, "limit": limit,
+                         "access_token": token})
+    return body.get("data") or []
+
+
+def latest_reel(account: str) -> tuple[dict | None, str]:
+    """The account's most recent Reel with its numbers, for `/report latest`:
+    ({url, posted_at, caption, views, likes, comments, shares, saves, reach},
+    "") — (None, "no reels yet") or (None, why). Read from the account
+    itself, not from the bot's reel_log, so a reel posted by hand counts too.
+    Never raises."""
+    try:
+        items = _media_list(account, 25)
+    except Exception as exc:
+        return None, str(exc)[:300]
+    media = (next((m for m in items if m.get("media_product_type") == "REELS"), None)
+             or next((m for m in items if m.get("media_type") == "VIDEO"), None))
+    if media is None:
+        return None, "no reels yet"
+    return _reel_row(media, account), ""
+
+
+def recent_reels(account: str, since: dt.datetime) -> tuple[list | None, str]:
+    """Every Reel the account posted at or after `since` (newest first), each
+    with the same numbers as `latest_reel` — ([], "") when there is none, or
+    (None, why). One media listing + one insights read per reel. Never
+    raises."""
+    try:
+        items = _media_list(account, 50)
+    except Exception as exc:
+        return None, str(exc)[:300]
+    out = []
+    for m in items:
+        t = _stamp(m.get("timestamp"))
+        # skip, don't stop: a pinned post can sit above newer ones
+        if _is_reel(m) and t is not None and t >= since:
+            out.append(_reel_row(m, account))
+    return out, ""
+
+
+def _stamp(s):
+    """Meta's 2026-10-30T17:00:04+0000 -> an aware datetime (None if bad)."""
+    if not s:
+        return None
+    try:
+        return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%S%z")
+    except ValueError:
+        try:
+            t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            return None
 
 
 def publishing_quota(account: str) -> tuple[int, int] | None:

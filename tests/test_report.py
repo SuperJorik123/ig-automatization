@@ -251,3 +251,137 @@ def test_youtube_channel_url():
         "https://www.youtube.com/channel/UC" + "x" * 22 + "/shorts"
     assert stats.channel_url("https://www.youtube.com/@news/videos") == \
         "https://www.youtube.com/@news/shorts"
+
+
+# --- the 24 h report ---------------------------------------------------------- #
+
+def _reel(views, hours_ago, likes=0, url="https://x/r"):
+    t = (NOW - dt.timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%S+0000")
+    return {"url": url, "posted_at": t, "views": views, "likes": likes,
+            "comments": 0, "shares": 0}
+
+
+def _rr(brand, p, reels=None, error=""):
+    return {"brand": brand, "platform": p, "reels": reels,
+            "error": error if reels is None else ""}
+
+
+def test_render_recent_sums_every_reel_of_the_window():
+    results = [
+        _rr("big", "ig", [_reel(5000, 3, likes=400, url="https://ig/a"),
+                          _reel(2000, 20)]),
+        _rr("big", "fb", [_reel(1000, 10)]),
+        _rr("small", "ig", [_reel(50, 12)]),
+        _rr("quiet", "ig", []),
+        _rr("broken", "fb", error="Session has expired (code 190)"),
+    ]
+    text = report.render_recent(results, NOW)[0]
+    assert "Reels of the last 24 h" in text
+    assert "👁 <b>8.1K views</b> on 4 reels" in text
+    assert "📸 7K (3) · 📘 1K (1)" in text
+    assert '🏆 Best reel: <b>big</b> on Instagram — 5K views (3h ago) · <a href="https://ig/a">open</a>' in text
+    assert "🐢 Weakest: <b>small</b> on Instagram — 50 views" in text
+    assert "😴 Nothing posted: quiet" in text
+    table = [l.split() for l in text[text.index("<pre>") + 5:text.index("</pre>")].splitlines()]
+    assert table[0] == ["IG", "FB", "#"]
+    assert table[1] == ["big", "7K", "1K", "3"]
+    assert table[2] == ["small", "50", "·", "1"]
+    assert ["quiet", "—", "·", "0"] in table
+    assert ["broken", "·", "!", "0"] in table
+    assert "• broken FB: token expired" in text
+
+
+def test_render_recent_with_no_reels_at_all():
+    text = report.render_recent([_rr("a", "ig", [])], NOW)[0]
+    assert "<b>0 views</b> on 0 reels" in text and "Best reel" not in text
+
+
+def test_collect_recent_passes_the_window_and_keeps_failures():
+    since = NOW - dt.timedelta(hours=24)
+    seen = []
+
+    def ig(acct, s):
+        seen.append((acct, s))
+        return [_reel(10, 1)], ""
+    out = report.collect_recent(
+        [{"name": "a", "ig": "a_ig", "fb": "a_fb"}, {"name": "b", "yt": "chan"}],
+        since, {"ig": ig, "fb": lambda a, s: (None, "boom"),
+                "yt": lambda a, s: ([], "")})
+    assert seen == [("a_ig", since)]
+    by = {(r["brand"], r["platform"]): r for r in out}
+    assert by[("a", "ig")]["reels"][0]["views"] == 10
+    assert by[("a", "fb")]["reels"] is None and by[("a", "fb")]["error"] == "boom"
+    assert by[("b", "yt")]["error"] == "no handle"     # a channel, no public handle
+
+
+def test_ig_recent_reels_keeps_only_reels_inside_the_window(monkeypatch):
+    monkeypatch.setenv("IG_GRAPH_ACME_ACCESS_TOKEN", "IGAA")
+    monkeypatch.setenv("IG_GRAPH_ACME_USER_ID", "178")
+
+    def fake(method, url, params=None, **kw):
+        if url.endswith("/178/media"):
+            return {"data": [
+                {"id": "pin", "media_product_type": "REELS",      # pinned, old
+                 "timestamp": "2026-10-01T10:00:00+0000"},
+                {"id": "r2", "media_product_type": "REELS",
+                 "timestamp": "2026-11-01T10:00:00+0000"},
+                {"id": "p1", "media_type": "IMAGE", "media_product_type": "FEED",
+                 "timestamp": "2026-11-01T09:00:00+0000"},
+                {"id": "r1", "media_type": "VIDEO", "media_product_type": "REELS",
+                 "timestamp": "2026-10-31T13:00:00+0000"},
+                {"id": "old", "media_product_type": "REELS",
+                 "timestamp": "2026-10-31T11:00:00+0000"},
+            ]}
+        mid = url.split("/")[-2]
+        return {"data": [{"name": "views", "values": [{"value": {"r2": 7, "r1": 3}[mid]}]}]}
+    monkeypatch.setattr(graph, "_call", fake)
+    reels, why = graph.recent_reels("acme", NOW - dt.timedelta(hours=24))
+    assert why == "" and [r["views"] for r in reels] == [7, 3]
+
+
+def test_fb_recent_reels_keeps_only_reels_inside_the_window(monkeypatch, fb_creds):
+    def fake(method, url, params=None, **kw):
+        if url.endswith("/123/video_reels"):
+            return {"data": [
+                {"id": "v2", "views": 900, "created_time": "2026-11-01T08:00:00+0000"},
+                {"id": "v1", "views": 50, "created_time": "2026-10-30T08:00:00+0000"},
+            ]}
+        return {"data": []}
+    monkeypatch.setattr(fb, "_call", fake)
+    reels, why = fb.recent_reels("acme", NOW - dt.timedelta(hours=24))
+    assert why == "" and [r["views"] for r in reels] == [900]
+
+
+def test_youtube_recent_shorts_stops_at_the_first_old_one(monkeypatch):
+    import sys
+    import types
+    infos = {
+        "https://www.youtube.com/shorts/a": {"id": "a", "view_count": 40,
+                                             "timestamp": NOW.timestamp() - 3600},
+        "https://www.youtube.com/shorts/b": {"id": "b", "view_count": 9,
+                                             "upload_date": "20261101"},   # date only, today
+        "https://www.youtube.com/shorts/c": {"id": "c", "view_count": 1,
+                                             "timestamp": NOW.timestamp() - 90000},
+    }
+    opened = []
+
+    class YDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=False):
+            if url.endswith("/shorts") and self.opts.get("extract_flat"):
+                return {"entries": [{"id": k[-1], "url": k} for k in infos]
+                        + [{"id": "d", "url": "https://www.youtube.com/shorts/d"}]}
+            opened.append(url)
+            return infos[url]
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=YDL))
+    reels, why = stats.recent_shorts("@chan", NOW - dt.timedelta(hours=24))
+    assert why == "" and [r["views"] for r in reels] == [40, 9]
+    assert opened[-1].endswith("/c")                    # d never opened

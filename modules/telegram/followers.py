@@ -19,8 +19,9 @@ Readers (all never raise, all return (count | None, why)):
 `collect` is the blocking half; `render` is pure and laid out like /report:
 the total, the best and worst account in plain words, one monospace table
 (account × platform, change since the baseline; "!" = read failed, "·" = no
-account, "new" = no count from back then), current totals, then what needs
-fixing.
+account, "new" = no count from back then), a second table of every
+account's CURRENT followers on each platform (with a total per platform),
+then what needs fixing.
 
 CLI (reads now, prints the current counts): py modules/telegram/followers.py
 """
@@ -35,7 +36,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from modules.telegram.report import MSG_LIMIT, fmt_num, short_error  # noqa: E402
+from modules.telegram.report import fmt_num, paginate, short_error  # noqa: E402
 
 PLATFORMS = (  # key, label, icon, brand field holding the account
     ("ig", "Instagram", "📸", "ig"),
@@ -190,7 +191,7 @@ def render(results: list, then: dict | None, then_day: str | None,
         return sum(r["count"] for r in rows)
 
     ranked = sorted(by_brand, key=lambda n: (-score(n), n))
-    name_w = min(NAME_W, max(len(n) for n in ranked))
+    name_w = min(NAME_W, max(len(n) for n in ranked + ["Total"]))
 
     def name(n):
         return n if len(n) <= name_w else n[:name_w - 1] + "…"
@@ -198,40 +199,35 @@ def render(results: list, then: dict | None, then_day: str | None,
     rows = [name(n).ljust(name_w)
             + "".join(cell(by_brand[n].get(p)).rjust(COL_W) for p in plats)
             for n in ranked]
+    tables = [("<b>Change</b>" if compare else "", header, rows)]
+
+    if compare:
+        # Current followers, every account and platform, biggest first.
+        def now_cell(r):
+            if r is None:
+                return "·"
+            return "!" if r["count"] is None else fmt_num(r["count"])
+        biggest = sorted(by_brand, key=lambda n: (
+            -sum(r["count"] or 0 for r in by_brand[n].values()), n))
+        now_rows = [name(n).ljust(name_w)
+                    + "".join(now_cell(by_brand[n].get(p)).rjust(COL_W) for p in plats)
+                    for n in biggest]
+        now_rows.append("Total".ljust(name_w) + "".join(
+            fmt_num(sum(r["count"] for r in ok if r["platform"] == p)).rjust(COL_W)
+            for p in plats))
+        tables.append(("<b>Followers now</b>", header, now_rows))
 
     tail = []
-    if compare:
-        tail += ["", "Followers now: " + " · ".join(
-            f"{_ICON[p]} {fmt_num(sum(r['count'] for r in ok if r['platform'] == p))}"
-            for p in plats)]
     if "yt" in plats:
-        tail.append("<i>YouTube rounds its public count, so a small week can "
-                    "show 0.</i>")
+        tail += ["", "<i>YouTube rounds its public count, so a small week can "
+                 "show 0.</i>"]
     broken = [r for r in results if r["count"] is None]
     if broken:
         tail += ["", f"⚠️ <b>Needs fixing ({len(broken)})</b> — the ! in the table"]
         tail += [f"• {html.escape(r['brand'])} {_SHORT[r['platform']]}: "
                  f"{html.escape(short_error(r['error']))}"
                  for r in sorted(broken, key=lambda r: (r["brand"], r["platform"]))]
-
-    def table(chunk):
-        return "<pre>" + html.escape("\n".join([header] + chunk)) + "</pre>"
-
-    pages, head, chunk = [], "\n".join(out) + "\n\n", []
-    for row in rows:
-        if chunk and len(head) + len(table(chunk + [row])) > MSG_LIMIT:
-            pages.append(head + table(chunk))
-            head, chunk = "", []
-        chunk.append(row)
-    cur = head + table(chunk)
-    for line in tail:
-        if len(cur) + 1 + len(line) > MSG_LIMIT:
-            pages.append(cur)
-            cur = line
-        else:
-            cur += "\n" + line
-    pages.append(cur)
-    return pages
+    return paginate(out, tables, tail)
 
 
 def main() -> None:

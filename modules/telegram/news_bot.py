@@ -3147,15 +3147,30 @@ async def _on_bundle_callback(q, context) -> None:
 
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/report — every account's latest reel on Instagram, Facebook and
-    YouTube with its views / likes / comments (modules/telegram/report.py).
-    Read live from the platforms, so it takes a few seconds."""
+    """/report — views of every reel each account posted in the last 24 h on
+    Instagram, Facebook and YouTube (modules/telegram/report.py);
+    `/report 48` takes another window (1-168 h), `/report latest` shows each
+    account's newest reel instead, whenever it was posted. Read live from
+    the platforms, so it takes a few seconds."""
     msg = update.effective_message
-    note = _track(await msg.reply_text("📊 collecting the latest reel of every "
-                                       "account …"))
+    arg = (context.args[0].lower() if context.args else "")
+    latest = arg == "latest"
+    hours = reach_report.WINDOW_H
+    if arg.rstrip("h").isdigit():
+        hours = max(1, min(168, int(arg.rstrip("h"))))
+    note = _track(await msg.reply_text(
+        "📊 collecting the latest reel of every account …" if latest else
+        f"📊 collecting every reel of the last {hours} h …"))
     try:
-        results = await asyncio.to_thread(reach_report.collect, config.BRANDS)
-        pages = reach_report.render(results)
+        if latest:
+            results = await asyncio.to_thread(reach_report.collect, config.BRANDS)
+            pages = reach_report.render(results)
+        else:
+            now = dt.datetime.now(dt.timezone.utc)
+            results = await asyncio.to_thread(
+                reach_report.collect_recent, config.BRANDS,
+                now - dt.timedelta(hours=hours))
+            pages = reach_report.render_recent(results, now, hours)
     except Exception as exc:  # collect never raises; render is pure — belt and braces
         log.error("report failed: %s", exc)
         await note.edit_text(f"❌ report failed: {str(exc)[:300]}")
@@ -3219,8 +3234,8 @@ async def _follower_count_job(context) -> None:
 
 # What the group's command menu (the "/" button) offers.
 _MENU = [
-    BotCommand("report", "📊 latest reel of every account: views, likes, comments"),
-    BotCommand("followers", "👥 followers gained this week, every account"),
+    BotCommand("report", "📊 views of every reel of the last 24 h (/report latest, /report 48)"),
+    BotCommand("followers", "👥 followers: gained this week + current, every account"),
     BotCommand("bundle", "the open bundle with its buttons"),
     BotCommand("scheduled", "posts waiting to go out"),
 ]

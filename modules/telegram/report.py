@@ -243,31 +243,192 @@ def render(results: list, now: dt.datetime | None = None) -> list:
                  f"{html.escape(short_error(r['error']))}"
                  for r in sorted(broken, key=lambda r: (r["brand"], r["platform"]))]
 
-    # Split only between table rows (each page repeats the header) and
-    # between problem lines, so no page ever cuts a row in half.
-    def table(chunk):
+    return paginate(out, [("", header, rows)], tail)
+
+
+def paginate(head: list, tables: list, tail: list) -> list:
+    """Telegram pages under MSG_LIMIT: the `head` lines, then each table
+    ((caption line or "", header row, rows) — a monospace <pre>), then the
+    `tail` lines. Split only between table rows (a page that continues a
+    table repeats its header) and between tail lines, so no page ever cuts a
+    row in half."""
+    def pre(header, chunk):
         return "<pre>" + html.escape("\n".join([header] + chunk)) + "</pre>"
 
-    pages, head, chunk = [], "\n".join(out) + "\n\n", []
-    for row in rows:
-        if chunk and len(head) + len(table(chunk + [row])) > MSG_LIMIT:
-            pages.append(head + table(chunk))
-            head, chunk = "", []
-        chunk.append(row)
-    cur = head + table(chunk)
+    pages, cur = [], "\n".join(head)
+    for caption, header, rows in tables:
+        prefix = ("\n\n" if cur else "") + (caption + "\n" if caption else "")
+        chunk = []
+        for row in rows:
+            if chunk and len(cur) + len(prefix) + len(pre(header, chunk + [row])) > MSG_LIMIT:
+                pages.append(cur + prefix + pre(header, chunk))
+                cur, prefix, chunk = "", "", []
+            chunk.append(row)
+        if cur and len(cur) + len(prefix) + len(pre(header, chunk)) > MSG_LIMIT:
+            pages.append(cur)
+            cur, prefix = "", (caption + "\n" if caption else "")
+        cur += prefix + pre(header, chunk)
     for line in tail:
-        if len(cur) + 1 + len(line) > MSG_LIMIT:
+        if cur and len(cur) + 1 + len(line) > MSG_LIMIT:
             pages.append(cur)
             cur = line
         else:
-            cur += "\n" + line
+            cur = cur + "\n" + line if cur else line
     pages.append(cur)
     return pages
 
 
+# --------------------------------------------------------------------------- #
+# /report — every reel of the last 24 h                                        #
+# --------------------------------------------------------------------------- #
+
+WINDOW_H = 24
+
+
+def _recent_fetchers() -> dict:
+    """platform -> (account, since) -> (list of reels | None, why)."""
+    from modules.facebook import poster as fb
+    from modules.instagram import graph as ig
+    from modules.youtube import stats as yt
+    return {"ig": ig.recent_reels, "fb": fb.recent_reels, "yt": yt.recent_shorts}
+
+
+def collect_recent(brands: list, since: dt.datetime,
+                   fetchers: dict | None = None) -> list:
+    """[{brand, platform, reels, error}] — every reel each account posted at
+    or after `since`, one entry per (brand, platform it has an account on).
+    `reels` is [] when the account posted none, None when the read failed.
+    Blocking; never raises."""
+    fetchers = fetchers or _recent_fetchers()
+    jobs, out = [], []
+    for b in brands:
+        for p, _, _ in PLATFORMS:
+            acct = _account(b, p)
+            if acct:
+                jobs.append((b["name"], p, acct))
+            elif p == "yt" and b.get("yt"):
+                out.append({"brand": b["name"], "platform": p, "reels": None,
+                            "error": "no handle"})
+
+    def run(job):
+        name, p, acct = job
+        try:
+            reels, why = fetchers[p](acct, since)
+        except Exception as exc:  # the fetchers never raise; belt and braces
+            reels, why = None, str(exc)
+        return {"brand": name, "platform": p, "reels": reels,
+                "error": "" if reels is not None else (why or "unavailable")}
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            out.extend(pool.map(run, jobs))
+    return out
+
+
+def _sum_views(reels) -> int:
+    return sum(r.get("views") or 0 for r in reels or ())
+
+
+def render_recent(results: list, now: dt.datetime | None = None,
+                  hours: int = WINDOW_H) -> list:
+    """Telegram-HTML pages for `collect_recent`: total views of every reel
+    posted in the window, the best / most engaging / weakest reel, accounts
+    that posted nothing, one table of views (account x platform: the sum of
+    that account's reels there, plus how many reels), then what needs fixing.
+    Views are as of now — a reel posted an hour ago has had an hour."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    stamp = now.astimezone().strftime("%d %b, %H:%M")
+    since = (now - dt.timedelta(hours=hours)).astimezone().strftime("%d %b, %H:%M")
+    title = f"📊 <b>Reels of the last {hours} h</b> · {stamp}"
+    if not results:
+        return [f"{title}\n\nNo account has Instagram, Facebook or YouTube "
+                "connected."]
+
+    plats = [p for p, _, _ in PLATFORMS if any(r["platform"] == p for r in results)]
+    reels = [dict(x, brand=r["brand"], platform=r["platform"])
+             for r in results if r["reels"] for x in r["reels"]]
+    viewed = [x for x in reels if x.get("views") is not None]
+
+    plural = "s" if len(reels) != 1 else ""
+    out = [title, f"<i>views so far of every reel posted since {since}</i>", ""]
+    out.append(f"👁 <b>{fmt_num(_sum_views(reels))} views</b> on {len(reels)} reel{plural}")
+    out.append("   " + " · ".join(
+        f"{_ICON[p]} {fmt_num(_sum_views(x for x in reels if x['platform'] == p))}"
+        f" ({sum(1 for x in reels if x['platform'] == p)})" for p in plats))
+
+    def where(x):
+        link = f' · <a href="{html.escape(x["url"])}">open</a>' if x.get("url") else ""
+        return (f"<b>{html.escape(x['brand'])}</b> on {_LABEL[x['platform']]}",
+                f"({age(x.get('posted_at'), now)}){link}")
+
+    if viewed:
+        out.append("")
+        best = max(viewed, key=lambda x: x["views"])
+        w, end = where(best)
+        out.append(f"🏆 Best reel: {w} — {fmt_num(best['views'])} views {end}")
+        engaged = [x for x in viewed if x["views"] >= 100 and engagement(x)]
+        if engaged:
+            top = max(engaged, key=engagement)
+            w, end = where(top)
+            out.append(f"🔥 Most engaging: {w} — {engagement(top) * 100:.1f}% "
+                       f"liked, commented or shared {end}")
+        settled = [x for x in viewed if x is not best and (
+            (t := _parse_time(x.get("posted_at"))) is None
+            or (now - t).total_seconds() >= FRESH_S)]
+        if len(viewed) > 2 and settled:
+            low = min(settled, key=lambda x: x["views"])
+            w, end = where(low)
+            out.append(f"🐢 Weakest: {w} — {fmt_num(low['views'])} views {end}")
+
+    by_brand: dict[str, dict] = {}
+    for r in results:
+        by_brand.setdefault(r["brand"], {})[r["platform"]] = r
+    idle = sorted(n for n, rows in by_brand.items()
+                  if all(r["reels"] == [] for r in rows.values()))
+    if idle:
+        out.append(f"😴 Nothing posted: {html.escape(', '.join(idle))}")
+
+    def cell(r):
+        if r is None:
+            return "·"
+        if r["reels"] is None:
+            return "!"
+        if not r["reels"]:
+            return "—"
+        return fmt_num(_sum_views(r["reels"]))
+
+    ranked = sorted(by_brand, key=lambda n: (
+        -sum(_sum_views(r["reels"]) for r in by_brand[n].values()), n))
+    name_w = min(NAME_W, max(len(n) for n in ranked))
+
+    def name(n):
+        return n if len(n) <= name_w else n[:name_w - 1] + "…"
+    header = (" " * name_w + "".join(_SHORT[p].rjust(COL_W) for p in plats)
+              + "#".rjust(4))
+    rows = [name(n).ljust(name_w)
+            + "".join(cell(by_brand[n].get(p)).rjust(COL_W) for p in plats)
+            + str(sum(len(r["reels"] or ()) for r in by_brand[n].values())).rjust(4)
+            for n in ranked]
+
+    tail = ["<i>— = no reel in the window · # = reels posted</i>"]
+    broken = [r for r in results if r["reels"] is None]
+    if broken:
+        tail += ["", f"⚠️ <b>Needs fixing ({len(broken)})</b> — the ! in the table"]
+        tail += [f"• {html.escape(r['brand'])} {_SHORT[r['platform']]}: "
+                 f"{html.escape(short_error(r['error']))}"
+                 for r in sorted(broken, key=lambda r: (r["brand"], r["platform"]))]
+    return paginate(out, [("", header, rows)], tail)
+
+
 def main() -> None:
     from shared import config
-    for msg in render(collect(config.BRANDS)):
+    if "--latest" in sys.argv:
+        pages = render(collect(config.BRANDS))
+    else:
+        now = dt.datetime.now(dt.timezone.utc)
+        pages = render_recent(collect_recent(
+            config.BRANDS, now - dt.timedelta(hours=WINDOW_H)), now)
+    for msg in pages:
         print(html.unescape(re.sub(r"<[^>]+>", "", msg)))
         print()
 
