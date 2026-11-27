@@ -482,3 +482,20 @@ def test_insights_are_stored_or_the_missing_permission_reported(env, monkeypatch
     rows = env.store.reels_since(__import__("datetime").datetime(1999, 1, 1,
                                  tzinfo=__import__("datetime").timezone.utc))
     assert rows[0]["insights_24h"]["error"].startswith("missing permission")
+
+
+def test_jnn_groups_get_each_video_on_at_most_three_accounts(env, monkeypatch):
+    # brand0-8 in JNN 1/2/3, brand9 in GMN (untouched: it still gets a video).
+    for i, b in enumerate(config.BRANDS):
+        b["group"] = f"JNN {i // 3 + 1}" if i < 9 else "GMN"
+    b, lines = _start(env, 2)
+    _render(env, b, lines)
+    plan = env.store.get_bundle(b["id"])["plan"]
+    a = plan["assignment"]
+    v = {d["n"]: vid for vid, d in plan["videos"].items()}
+    assert sorted(a[x] for x in ("brand0", "brand1", "brand2")) == \
+        sorted([v[1], v[1], v[2]])
+    assert not {"brand6", "brand7", "brand8"} & set(a)        # JNN 3 idle
+    assert "brand9" in a
+    jnn = [a[x] for x in a if x != "brand9"]
+    assert jnn.count(v[1]) == 3 and jnn.count(v[2]) == 3

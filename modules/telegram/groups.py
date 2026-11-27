@@ -34,6 +34,32 @@ def group_of(brand: dict) -> str:
     return (brand.get("group") or "").strip()
 
 
+def tier_number(name: str):
+    """The priority of a NUMBERED group — "JNN 1" -> 1, "JNN 2" -> 2 — or None
+    for a plain one ("GMN", "JNN"). A numbered group is a set of accounts one
+    video may go to together (2026-11-26: JNN split into groups of three so
+    the same clip stops landing on all eight identical accounts)."""
+    parts = (name or "").strip().rsplit(None, 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+
+def tier_order(brands: list, names: list) -> list:
+    """The numbered groups' members among `names`, as lists of brand names:
+    groups by number ascending (JNN 1 first), members in `names` order. A
+    name in no numbered group is left out — that's bundle.assign's cue to
+    give it the old even split (GMN)."""
+    group = {b["name"]: group_of(b) for b in brands}
+    by_tier: dict[tuple, list] = {}
+    for n in names:
+        g = group.get(n, "")
+        t = tier_number(g)
+        if t is not None:
+            by_tier.setdefault((t, g), []).append(n)
+    return [by_tier[k] for k in sorted(by_tier)]
+
+
 def _handle(value) -> str:
     """Account handles compare case-insensitively and without the @ — a brand
     stores `@WsWire`, YT_DESTINATIONS stores `wswiremedia`, and an operator

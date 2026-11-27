@@ -478,3 +478,34 @@ def test_plan_lines_show_the_design_only_when_there_was_a_choice():
         _plan_brands(), {0}, ["tg"], "insets", 3)
     assert not any(line.startswith("Design") for line in branded.plan_lines(
         _plan_brands(), {0}, ["tg"], "solo", 1))
+
+
+# --- JNN 1 / JNN 2 / JNN 3 (2026-11-26) ------------------------------------
+
+def _jnn_brands():
+    groups_ = ["JNN 2", "JNN 1", "JNN 1", "JNN 1", "JNN 2", "GMN", "GMN",
+               "GMN", "GMN"]
+    return [dict(_brand(f"n{i}", group=g, tg="", yt="", tw=""), ig=f"n{i}",
+                 has_logo=True) for i, g in enumerate(groups_)]
+
+
+def test_a_card_opens_on_jnn_1():
+    plan = branded.default_plan(_jnn_brands(), "video", 0)
+    assert plan["sel_brands"] == {1, 2, 3}
+    assert branded.brands_summary(_jnn_brands(), {1, 2, 3}) == "JNN 1 (3)"
+
+
+def test_without_jnn_1_the_card_still_opens_on_jnn():
+    # The credentials not edited yet: every JNN brand still says "JNN".
+    assert branded.default_plan(_plan_brands(), "video", 0)["sel_brands"] == {2}
+
+
+def test_more_than_three_group_accounts_get_a_warning():
+    brands = _jnn_brands()
+    warn = "⚠️ same video on 4 accounts — Instagram hides copies"
+    assert warn in branded.plan_lines(brands, {0, 1, 2, 3}, ["ig"])
+    assert not any(l.startswith("⚠️") for l in
+                   branded.plan_lines(brands, {1, 2, 3}, ["ig"]))
+    # GMN is not touched: four GMN accounts is how GMN always posts.
+    assert not any(l.startswith("⚠️") for l in
+                   branded.plan_lines(brands, {5, 6, 7, 8}, ["ig"]))

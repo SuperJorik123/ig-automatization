@@ -343,7 +343,7 @@ def _photo_count(media: list) -> int:
 # --------------------------------------------------------------------------- #
 #
 # One message that already holds every answer — brands, design, platforms —
-# from the house default (branded.DEFAULT_GROUP / DEFAULT_PLATFORMS), with
+# from the house default (branded.DEFAULT_GROUPS / DEFAULT_PLATFORMS), with
 # 🎬 Render to accept it and ✏️ Change to edit all of it on one screen. The
 # pure half (defaults, summary lines, keyboards) is in branded.py.
 
@@ -2913,7 +2913,8 @@ async def _render_bundle(q, context, bid: int) -> None:
     accounts = [b["name"] for b in _bundle_accounts()]
     keys = {v: states[v].get("video_key") or "" for v in order}
     hist = await asyncio.to_thread(_history, accounts, keys)
-    assignment, carried = bundle.assign(order, accounts, hist)
+    assignment, carried = bundle.assign(
+        order, accounts, hist, tiers=groups.tier_order(config.BRANDS, accounts))
     notes = []
     if carried:
         new_bid = await asyncio.to_thread(queue_store.open_bundle, CHAT_ID,
@@ -2981,7 +2982,9 @@ async def _reshuffle_bundle(q, context, bid: int) -> None:
     hist = await asyncio.to_thread(_history, accounts, keys)
     old = plan["assignment"]
     for _ in range(10):   # a re-draw that changes nothing is no reshuffle
-        assignment, _carried = bundle.assign(order, accounts, hist)
+        assignment, _carried = bundle.assign(
+            order, accounts, hist,
+            tiers=groups.tier_order(config.BRANDS, accounts))
         if assignment != old or len(order) == 1:
             break
     plan.update(assignment=assignment, failures=[])

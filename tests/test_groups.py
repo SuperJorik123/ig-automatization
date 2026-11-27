@@ -151,3 +151,29 @@ def test_toggle_dest_group_does_not_mutate_the_selection_it_was_given():
     sel = {"tg": {0}, "yt": set(), "tw": set()}
     groups.toggle_dest_group(_G, sel)
     assert sel == {"tg": {0}, "yt": set(), "tw": set()}
+
+
+# --- numbered groups (JNN 1 / JNN 2 / JNN 3) --------------------------------
+
+def test_tier_number_reads_the_trailing_number():
+    assert groups.tier_number("JNN 2") == 2
+    assert groups.tier_number(" JNN 10 ") == 10
+    assert groups.tier_number("JNN") is None
+    assert groups.tier_number("GMN") is None
+    assert groups.tier_number("") is None
+
+
+def test_tier_order_lists_numbered_groups_in_priority_order():
+    brands = [_brand("westorn24", "JNN 2"), _brand("frontiva24", "JNN 1"),
+              _brand("mirnews", "GMN"), _brand("wswire", "JNN 1"),
+              _brand("altenews", "JNN 2"), _brand("vestra24", "JNN")]
+    names = ["wswire", "frontiva24", "altenews", "mirnews", "vestra24"]
+    # westorn24 is not in `names` (paused); GMN and plain JNN are not tiers;
+    # members keep the order of `names`.
+    assert groups.tier_order(brands, names) == [["wswire", "frontiva24"],
+                                                ["altenews"]]
+
+
+def test_tier_order_is_empty_without_numbered_groups():
+    brands = [_brand("a", "JNN"), _brand("b", "GMN")]
+    assert groups.tier_order(brands, ["a", "b"]) == []
