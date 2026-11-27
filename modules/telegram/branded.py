@@ -273,8 +273,14 @@ def countdown_keyboard() -> InlineKeyboardMarkup:
 # but never pre-ticked — an upload there has to be a deliberate choice, after
 # three accounts were lost to strikes (2026-08). YT_UPLOADS_ENABLED (which
 # gates the as-is picker's YT_DESTINATIONS) doesn't apply to this human pick.
-DEFAULT_GROUP = "JNN"
+# JNN 1 (frontiva24 / wswire / eur24news, the most promising) since
+# 2026-11-26: the old default, all of JNN, put one clip on eight identical
+# accounts and Instagram buried the copies. The first group that exists wins,
+# so a VPS whose credentials still say plain "JNN" keeps opening on JNN.
+DEFAULT_GROUPS = ("JNN 1", "JNN")
 DEFAULT_PLATFORMS = ("tw", "ig", "fb")
+# One video on more numbered-group accounts than this gets the ⚠️ line.
+MAX_SAME_VIDEO = 3
 
 # Platform names on the card, where there is room to spell them out.
 PLATFORM_NAMES = {"tg": "Telegram", "yt": "YouTube", "tw": "X",
@@ -296,16 +302,20 @@ def plan_platform_keys(brands: list, selected: set, kind: str) -> list:
 
 
 def default_plan(brands: list, kind: str, n_photos: int) -> dict:
-    """The plan a fresh card opens with: the DEFAULT_GROUP brands (every
-    usable brand when that group doesn't exist, so the card is never empty),
+    """The plan a fresh card opens with: the first of DEFAULT_GROUPS that has
+    brands (every usable brand when none does, so the card is never empty),
     the first design this many photos allow, and the DEFAULT_PLATFORMS those
     brands can actually publish to.
 
     Returns {"sel_brands": {index}, "layout": str | None, "platforms": {key}}.
     """
     usable = {i for i, b in enumerate(brands) if b.get("has_logo", True)}
-    sel = {i for i in usable
-           if groups.group_of(brands[i]) == DEFAULT_GROUP} or set(usable)
+    sel = set()
+    for name in DEFAULT_GROUPS:
+        sel = {i for i in usable if groups.group_of(brands[i]) == name}
+        if sel:
+            break
+    sel = sel or set(usable)
     layout = card_layouts(n_photos)[0][0] if kind == "photo" else None
     avail = plan_platform_keys(brands, sel, kind)
     return {"sel_brands": sel, "layout": layout,
@@ -340,6 +350,12 @@ def plan_lines(brands: list, selected: set, platforms: list,
         lines.append(f"Design: {layout_label(layout)}")
     lines.append("Platforms: " + (" · ".join(PLATFORM_NAMES[k] for k in platforms)
                                   or "none"))
+    # More than one numbered group's worth (JNN 1/2/3) on one clip: allowed,
+    # for the odd huge story, but said out loud. GMN isn't counted.
+    n = sum(1 for i in selected
+            if groups.tier_number(groups.group_of(brands[i])) is not None)
+    if n > MAX_SAME_VIDEO:
+        lines.append(f"⚠️ same video on {n} accounts — Instagram hides copies")
     return lines
 
 

@@ -68,6 +68,91 @@ def test_an_unavoidable_clash_still_gives_every_account_a_video():
     assert len(bundle.clashes(out, history)) == 10
 
 
+# --- numbered groups: JNN 1 / JNN 2 / JNN 3 (2026-11-26) ---------------------
+
+TIERS = [["a1", "a2", "a3"], ["b1", "b2", "b3"], ["c1", "c2", "c3"]]
+TIER_ACCOUNTS = [a for t in TIERS for a in t]
+
+
+def _videos_of(out, tier):
+    return sorted(out[a] for a in tier if a in out)
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_one_video_goes_to_group_1_only(seed):
+    out, carried = bundle.assign(["v1"], TIER_ACCOUNTS, tiers=TIERS,
+                                 rng=random.Random(seed))
+    assert sorted(out) == ["a1", "a2", "a3"] and carried == []
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_two_videos_six_accounts_group_1_gets_both(seed):
+    out, carried = bundle.assign(["v1", "v2"], TIER_ACCOUNTS, tiers=TIERS,
+                                 rng=random.Random(seed))
+    assert len(out) == 6 and carried == []
+    assert _videos_of(out, TIERS[0]) == ["v1", "v1", "v2"]   # owner's example
+    assert _videos_of(out, TIERS[1]) == ["v1", "v2", "v2"]
+    assert _videos_of(out, TIERS[2]) == []
+    assert bundle.copies(out) == {"v1": 3, "v2": 3}
+
+
+def test_three_videos_every_group_gets_all_three():
+    out, _ = bundle.assign(["v1", "v2", "v3"], TIER_ACCOUNTS, tiers=TIERS)
+    for t in TIERS:
+        assert _videos_of(out, t) == ["v1", "v2", "v3"]
+
+
+def test_four_videos_never_more_than_three_copies():
+    out, carried = bundle.assign(["v1", "v2", "v3", "v4"], TIER_ACCOUNTS,
+                                 tiers=TIERS)
+    assert _videos_of(out, TIERS[0]) == ["v1", "v2", "v3"]
+    assert _videos_of(out, TIERS[1]) == ["v1", "v2", "v4"]
+    assert _videos_of(out, TIERS[2]) == ["v1", "v3", "v4"]
+    assert max(bundle.copies(out).values()) == 3 and carried == []
+
+
+def test_ten_videos_nine_used_the_last_carried():
+    videos = [f"v{i}" for i in range(1, 11)]
+    out, carried = bundle.assign(videos, TIER_ACCOUNTS, tiers=TIERS)
+    assert sorted(out.values()) == sorted(videos[:9]) and carried == ["v10"]
+    assert _videos_of(out, TIERS[0]) == ["v1", "v2", "v3"]
+
+
+def test_a_paused_account_shrinks_its_group_and_the_deal_goes_on():
+    tiers = [["a1", "a3"], TIERS[1], TIERS[2]]          # a2 paused
+    out, _ = bundle.assign(["v1", "v2"], [a for t in tiers for a in t],
+                           tiers=tiers)
+    assert "a2" not in out
+    assert _videos_of(out, tiers[0]) == ["v1", "v2"]
+    assert _videos_of(out, tiers[1]) == ["v1", "v1", "v2"]
+    assert _videos_of(out, tiers[2]) == ["v2"]
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_history_is_avoided_inside_a_group(seed):
+    history = {"a1": {"v1"}, "a2": {"v1"}}
+    out, _ = bundle.assign(["v1", "v2", "v3"], TIER_ACCOUNTS, history,
+                           rng=random.Random(seed), tiers=TIERS)
+    assert out["a3"] == "v1" and bundle.clashes(out, history) == []
+
+
+def test_accounts_outside_the_groups_keep_the_even_split():
+    gmn = ["g1", "g2", "g3", "g4"]
+    out, carried = bundle.assign(["v1", "v2"], TIER_ACCOUNTS + gmn,
+                                 tiers=TIERS)
+    assert all(g in out for g in gmn)                  # GMN: every account
+    assert sorted(out[g] for g in gmn) == ["v1", "v1", "v2", "v2"]
+    assert _videos_of(out, TIERS[2]) == [] and carried == []
+
+
+def test_a_video_only_gmn_can_take_is_not_carried():
+    out, carried = bundle.assign([f"v{i}" for i in range(1, 6)],
+                                 ["a1", "a2", "g1", "g2", "g3", "g4", "g5"],
+                                 tiers=[["a1", "a2"]])
+    assert carried == [] and sorted(out[g] for g in
+                                    ["g1", "g2", "g3", "g4", "g5"]) ==         ["v1", "v2", "v3", "v4", "v5"]
+
+
 def test_split_sizes():
     assert bundle.split_sizes(3, 10) == [4, 3, 3]
     assert bundle.split_sizes(12, 10) == [1] * 10

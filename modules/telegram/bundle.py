@@ -85,18 +85,68 @@ def _matching(videos: list, sizes: dict, accounts: list, history: dict,
     return {a: slots[s] for s, a in enumerate(owner)}
 
 
+# A video goes to at most this many accounts of the numbered groups (JNN 1 /
+# JNN 2 / JNN 3) — owner, 2026-11-26: eight identical accounts posting the
+# same clip got one or two of the copies shown and the rest buried.
+COPIES_PER_VIDEO = 3
+
+
+def _tiered(videos: list, tiers: list, history: dict,
+            rng: random.Random) -> dict:
+    """The numbered groups' share: copies dealt round-robin (v1, v2, …, vV,
+    v1, …) onto the accounts in group order, at most COPIES_PER_VIDEO each, so
+    group 1 gets as many DIFFERENT videos as there are, then group 2, and so
+    on. Inside a group the dealt videos are matched to its accounts at random,
+    avoiding history. {account: video}."""
+    flat = [a for t in tiers for a in t]
+    n = min(len(flat), COPIES_PER_VIDEO * len(videos))
+    deal = [videos[i % len(videos)] for i in range(n)]
+    out, k = {}, 0
+    for tier in tiers:
+        got = deal[k:k + len(tier)]
+        if not got:
+            break
+        members = tier[:len(got)] if len(got) < len(tier) else tier
+        sizes = {}
+        for v in got:
+            sizes[v] = sizes.get(v, 0) + 1
+        out.update(_matching(list(sizes), sizes, members, history, rng))
+        k += len(got)
+    return out
+
+
 def assign(videos: list, accounts: list, history: dict | None = None,
-           rng: random.Random | None = None) -> tuple[dict, list]:
+           rng: random.Random | None = None,
+           tiers: list | None = None) -> tuple[dict, list]:
     """({account: video}, carried videos).
 
     `videos` in the order they joined the bundle; `accounts` the ACTIVE ones
     (a paused account is simply not in the list); `history` {account: set of
-    videos it has already published}. Every account gets exactly one video;
-    the first len(accounts) videos are used and the rest are carried over.
-    Pure but for `rng` (default: a fresh, unseeded one)."""
+    videos it has already published}. `tiers` the numbered groups' accounts
+    ([[JNN 1 names], [JNN 2 names], …], groups.tier_order): those get the
+    capped round-robin deal of `_tiered`; every other account gets exactly one
+    video by the even split below, the first len(those accounts) videos used.
+    A video neither part uses is carried over. Pure but for `rng` (default: a
+    fresh, unseeded one)."""
     rng = rng or random.Random()
     history = history or {}
     accounts = list(dict.fromkeys(accounts))
+    in_tier, kept = set(), []
+    for t in tiers or ():
+        members = [a for a in t if a in accounts and a not in in_tier]
+        in_tier.update(members)
+        if members:
+            kept.append(members)
+    tiers = kept
+    if tiers:
+        flat = [a for t in tiers for a in t]
+        rest = [a for a in accounts if a not in in_tier]
+        out = _tiered(list(videos[:len(flat)]), tiers, history, rng)
+        if rest:
+            legacy, _ = assign(videos, rest, history, rng)
+            out.update(legacy)
+        taken = set(out.values())
+        return out, [v for v in videos if v not in taken]
     used, carried = list(videos[:len(accounts)]), list(videos[len(accounts):])
     if not used or not accounts:
         return {}, list(videos)
