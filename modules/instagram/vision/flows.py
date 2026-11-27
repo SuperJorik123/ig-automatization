@@ -184,6 +184,81 @@ def open_gallery(drv):
     return s
 
 
+F_CROP = [_rid("croptype_toggle_button"), _desc("Change crop")]
+
+
+def slide_aspect(path):
+    """width / height of a local slide (photos only; videos → None)."""
+    if not path.lower().endswith((".jpg", ".jpeg", ".png")):
+        return None
+    from PIL import Image
+
+    try:
+        with Image.open(path) as im:
+            return im.width / im.height
+    except (OSError, ValueError):
+        return None  # unreadable here: leave IG's crop alone
+
+
+def portrait_shown(image, bounds, aspect):
+    """True when the gallery preview (`bounds` of crop_image_view, screen
+    pixels) shows a portrait slide UNCROPPED: the picture is narrower than
+    the box, leaving two plain bands left and right. The dump can't tell —
+    the preview view keeps its bounds whatever the crop (2026-11-25) — so
+    this reads the screenshot. A square crop fills the box edge to edge.
+
+    Bands = the outer (1 - aspect)/2 of the box width, with a margin; each
+    must be near-uniform (low spread) and the two must match."""
+    lx, ly, rx, ry = bounds
+    sx, sy = image.width / 1080, image.height / 2340  # screenshot may be scaled
+    lx, rx, ly, ry = int(lx * sx), int(rx * sx), int(ly * sy), int(ry * sy)
+    band = int((rx - lx) * (1 - aspect) / 2)
+    if band < 12:
+        return True  # (near-)square slide: nothing to crop away
+    gray = image.convert("L")
+    margin = max(3, band // 5)
+    # Only the upper 80 %: the Change-crop button sits in the left band's
+    # bottom corner (x 34-135, y 1102-1203 of a 157-1237 box on IG 457).
+    y0, y1 = ly + 20, ly + int((ry - ly) * 0.8)
+    stats = []
+    for x0, x1 in ((lx + margin, lx + band - margin), (rx - band + margin, rx - margin)):
+        px = gray.crop((x0, y0, x1, y1)).resize((8, 64)).tobytes()
+        mean = sum(px) / len(px)
+        spread = (sum((p - mean) ** 2 for p in px) / len(px)) ** 0.5
+        stats.append((mean, spread))
+    (m1, s1), (m2, s2) = stats
+    return s1 < 6 and s2 < 6 and abs(m1 - m2) < 8
+
+
+def keep_original_aspect(drv, first_slide):
+    """A carousel takes slide 1's crop, and the gallery starts on a SQUARE
+    crop — a 4:5 news card loses its bottom headline line. For a portrait
+    first slide, toggle 'Change crop' until the preview shows it whole
+    (checked on the screenshot; the toggle flips both ways)."""
+    aspect = slide_aspect(first_slide)
+    if aspect is None or aspect > 0.95:
+        return  # square / landscape / video: the default crop is fine for now
+    for attempt in range(3):
+        s = drv.screen
+        box = s.first(rid="crop_image_view")
+        if box is None:
+            drv.stop("not_found", "No gallery preview to check the crop on.")
+        if portrait_shown(drv.dev.screenshot(), box.bounds, aspect):
+            if attempt:
+                drv.log("    crop: original 4:5 ✓")
+            return
+        if attempt == 2:
+            break
+        toggle = drv.find("Change crop", F_CROP, s)
+        if toggle is None:
+            drv.stop("not_found", "No 'Change crop' button on the gallery preview.")
+        drv.log("  → Change crop (keep the slide's original aspect)")
+        drv.tap(toggle.bounds, "Change crop")
+        drv.sleep(1.5)
+        drv.resolve("gallery")
+    drv.stop("crop", "Couldn't get the gallery to show slide 1 uncropped — the post would be cut to a square.")
+
+
 def _thumb_time(desc):
     m = re.search(r"created on (\w+ \d{1,2}, \d{4} \d{1,2}:\d\d)", desc)
     if not m:
@@ -368,10 +443,27 @@ def share_and_confirm(drv, before_posts, timeout_s=180):
         drv.stop("not_found", "No Share button on the composer.")
     drv.tap(node.bounds, "Share")
     drv.sleep(5.0)
+    return confirm_post(drv, before_posts, timeout_s)
+
+
+def confirm_post(drv, before_posts, timeout_s=180):
+    """After the ONE Share tap: answer known popups (the Facebook cross-post
+    sheet → Not now), wait out the upload, then read the profile until the
+    post count is before_posts + 1. Never taps Share. Stops — "check the
+    profile by hand" — on an unknown popup or when the count won't move."""
+    drv.step = "confirm"
     deadline = drv.clock() + timeout_s
     while drv.clock() < deadline:
         s = drv.look()
         drv.guard(s)
+        if s.is_popup:
+            btn = scr.popup_button(s)
+            if btn is None:
+                drv.stop("share_unconfirmed", f"A popup appeared after Share ({s.name}). Share was tapped "
+                                              "once — do NOT rerun; check the profile by hand.")
+            drv.tap(btn.bounds, f"dismiss {s.name}")
+            drv.sleep(2.0)
+            continue
         if s.name == "composer":
             drv.sleep(3.0)
             continue
@@ -481,6 +573,8 @@ def carousel_with_music(drv, paths, caption, account, track=None, artist=None,
 
     drv.act("Home tab", F_HOME_TAB, "home")
     open_gallery(drv)
+    drv.step = "crop"
+    keep_original_aspect(drv, paths[0])
     select_slides(drv, len(paths), pushed_at)
     drv.step = "gallery_next"
     drv.act("Next (gallery)", F_GALLERY_NEXT, "editor", timeout=15)

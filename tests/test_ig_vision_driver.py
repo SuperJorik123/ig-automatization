@@ -125,7 +125,7 @@ class FakePhone:
 
     def __init__(self, screens, routes, start="home", lose_taps=None):
         self.screens = screens
-        self.routes = routes
+        self.routes = {k: list(v) for k, v in routes.items()}  # tests may edit their copy
         self.state = start
         self.lose_taps = dict(lose_taps or {})
         self.taps, self.texts, self.pushed, self.swipes, self.shells = [], [], [], 0, []
@@ -499,3 +499,142 @@ def test_caption_editor_ok_variant_is_confirmed_with_its_ok_button(tmp_path):
     expected = ("fallback", "Done (caption)",
                 "matched by 'rid=next_button_textview', not 'rid=caption_done_button'")
     assert expected in drv.events
+
+
+# --------------------------------------------------------------------------- #
+# crop: a portrait slide 1 must not be cut to a square                        #
+# --------------------------------------------------------------------------- #
+
+def _preview(portrait):
+    """A 1080x2340 screen whose gallery preview box (0,157)-(1080,1237)
+    shows a busy picture edge to edge (square crop) or only in the middle
+    864 px with plain dark bands left and right (original 4:5)."""
+    import random as _r
+
+    rng = _r.Random(7)
+    im = Image.new("L", (1080, 2340), 14)
+    x0, x1 = (108, 972) if portrait else (0, 1080)
+    px = im.load()
+    for y in range(157, 1237, 3):
+        for x in range(x0, x1, 3):
+            v = rng.randint(30, 230)
+            for dy in range(3):
+                for dx in range(3):
+                    px[x + dx, y + dy] = v
+    return im.convert("RGB")
+
+
+def test_portrait_shown_reads_the_bands():
+    box = (0, 157, 1080, 1237)
+    assert flows.portrait_shown(_preview(True), box, 0.8)
+    assert not flows.portrait_shown(_preview(False), box, 0.8)
+    assert flows.portrait_shown(_preview(False), box, 1.0)  # square slide: nothing to keep
+
+
+class CropPhone(FakePhone):
+    def __init__(self, *a, portrait=False, **kw):
+        super().__init__(*a, **kw)
+        self.portrait = portrait
+        self.toggles = 0
+        self.shots = {True: _preview(True), False: _preview(False)}
+
+    def screenshot(self):
+        return self.shots[self.portrait] if self.state == "gallery" else Image.new("RGB", (108, 234), "gray")
+
+    def tap(self, x, y):
+        if self.state == "gallery" and any(n.rid == "croptype_toggle_button" for n in self._under(x, y)):
+            self.portrait = not self.portrait
+            self.toggles += 1
+            return
+        super().tap(x, y)
+
+
+def _crop_phone(portrait):
+    screens = {n: fx(n) for n in NAMES}
+    screens["gallery_1"] = _gallery_1()
+    return CropPhone(screens, ROUTES, portrait=portrait)
+
+
+def _portrait_slides(tmp_path):
+    paths = []
+    for i in (1, 2, 3):  # the recorded screens reach Next after three slides
+        p = tmp_path / f"card_{i}.jpg"
+        Image.new("RGB", (1080, 1350), "black").save(p)
+        paths.append(str(p))
+    return paths
+
+
+def test_square_crop_is_switched_to_the_original_aspect(tmp_path):
+    phone = _crop_phone(portrait=False)
+    flows.carousel_with_music(_driver(phone), _portrait_slides(tmp_path), CAPTION, "test_account",
+                              track="Lazy River", push=_push)
+    assert phone.toggles == 1 and phone.portrait
+
+
+def test_original_aspect_already_on_is_left_alone(tmp_path):
+    phone = _crop_phone(portrait=True)
+    flows.carousel_with_music(_driver(phone), _portrait_slides(tmp_path), CAPTION, "test_account",
+                              track="Lazy River", push=_push)
+    assert phone.toggles == 0  # the toggle flips both ways: never tapped when not needed
+
+
+def test_crop_that_will_not_switch_stops(tmp_path):
+    phone = _crop_phone(portrait=False)
+    phone.tap = lambda x, y, _orig=phone.tap: None if phone.state == "gallery" and any(
+        n.rid == "croptype_toggle_button" for n in phone._under(x, y)) else _orig(x, y)
+    with pytest.raises(Stop) as e:
+        flows.carousel_with_music(_driver(phone), _portrait_slides(tmp_path), CAPTION, "test_account",
+                                  track="Lazy River", push=_push)
+    assert e.value.kind == "crop"
+
+
+# --------------------------------------------------------------------------- #
+# share: the Facebook cross-post sheet, confirmation by post count            #
+# --------------------------------------------------------------------------- #
+
+def test_facebook_crosspost_sheet_is_a_known_popup_answered_not_now():
+    s = scr.classify(fx("popup_facebook_crosspost"))
+    assert s.name == "popup:facebook_crosspost"  # not "composer", which is still under the sheet
+    btn = scr.popup_button(s)
+    assert (btn.text or btn.desc) == "Not now"
+
+
+class SharePhone(FakePhone):
+    def tap(self, x, y):
+        if self.state == "popup_facebook_crosspost" and any(
+                (n.text or n.desc) == "Not now" for n in self._under(x, y)):
+            self.not_now = True
+            self.routes["home"] = [("profile_tab", "profile_109")]  # the post is up now
+        super().tap(x, y)
+
+
+def _share_phone():
+    screens = {n: fx(n) for n in NAMES + ["popup_facebook_crosspost"]}
+    screens["gallery_1"] = _gallery_1()
+    screens["profile_109"] = fx("profile").replace('text="108"', 'text="109"').replace("108posts", "109posts")
+    routes = dict(ROUTES)
+    routes["composer_final"] = [("share_footer_button", "popup_facebook_crosspost")]
+    routes["popup_facebook_crosspost"] = [("Not now", "home")]
+    phone = SharePhone(screens, routes)
+    phone.not_now = False
+    return phone
+
+
+def test_share_answers_the_facebook_sheet_and_confirms_by_post_count(tmp_path):
+    phone = _share_phone()
+    res = flows.carousel_with_music(_driver(phone), _slides(tmp_path), CAPTION, "test_account",
+                                    track="Lazy River", push=_push, share=True, confirm_share=True)
+    assert phone.not_now
+    assert res["shared"] and res["posts_before"] == 108 and res["posts_after"] == 109
+    share_taps = [t for t in phone.taps if t[0] == "composer_final"]
+    assert len(share_taps) == 1  # Share tapped exactly once
+
+
+def test_share_with_a_count_that_never_moves_stops_without_a_second_tap(tmp_path):
+    phone = _share_phone()
+    phone.screens["profile_109"] = fx("profile")  # still 108
+    with pytest.raises(Stop) as e:
+        flows.carousel_with_music(_driver(phone), _slides(tmp_path), CAPTION, "test_account",
+                                  track="Lazy River", push=_push, share=True, confirm_share=True)
+    assert e.value.kind == "share_unconfirmed"
+    assert len([t for t in phone.taps if t[0] == "composer_final"]) == 1

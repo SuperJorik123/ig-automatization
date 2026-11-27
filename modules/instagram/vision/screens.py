@@ -48,6 +48,11 @@ POPUPS = {
     # Back out of the editor on IG 457: "Start over? If you go back now, you
     # will lose this draft." — Start over / Save draft / Keep editing.
     "start_over": (lambda t: "Start over?" in t and "Start over" in t, "Start over"),
+    # Right after Share (first time per account, 2026-11-25): "Share your posts
+    # to Facebook too" — "Always share posts" would cross-post EVERY post to a
+    # personal Facebook profile. Always "Not now". It sits on the composer,
+    # which stays in the dump — that's why popups are checked before screens.
+    "facebook_crosspost": (lambda t: "Share your posts to Facebook too" in t and "Not now" in t, "Not now"),
     "discard_post": (lambda t: any(s.startswith("Discard") for s in t)
                      and any(k in " ".join(t) for k in ("Keep editing", "Save draft", "Discard post",
                                                        "Discard edits", "lose")), "Discard"),
